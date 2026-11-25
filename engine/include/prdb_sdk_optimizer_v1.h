@@ -1,8 +1,7 @@
 #ifndef PRDB_SDK_OPTIMIZER_V1_H
 #define PRDB_SDK_OPTIMIZER_V1_H
 
-#include "prdb_query_abi_v4.h"
-#include "prdb_query_abi_v5.h"
+#include "prdb_query_abi_v1.h"
 #include "prdb_sdk_sql_dml_v1.h"
 #include "prdb_sdk_sql_v1.h"
 
@@ -160,14 +159,14 @@ int32_t prdb_sdk_optimizer_decode_response_v1(
  * only the fixed optimizer submission operation. `out->plan` borrows from
  * `response`; caller storage must not overlap the output record. */
 int32_t prdb_sdk_optimizer_submit_select_v1(
-    const prdb_host_api_v4 *host,
+    const prdb_host_api_v1 *host,
     const uint8_t *request, uint64_t request_len,
     uint8_t *response, uint64_t response_capacity, uint64_t *response_len,
     prdb_sdk_optimizer_response_v1 *out, uint32_t out_capacity);
 
 /* Submit one encoded UPDATE request on the operation-selected ABI v5 callback. */
 int32_t prdb_sdk_optimizer_submit_update_v1(
-    const prdb_host_api_v5 *host,
+    const prdb_host_api_v1 *host,
     const uint8_t *request, uint64_t request_len,
     uint8_t *response, uint64_t response_capacity, uint64_t *response_len,
     prdb_sdk_optimizer_response_v1 *out, uint32_t out_capacity);
@@ -175,13 +174,13 @@ int32_t prdb_sdk_optimizer_submit_update_v1(
 /* Submit one encoded join SELECT request using the role-authorized v5
  * operation-selected optimizer callback. */
 int32_t prdb_sdk_optimizer_submit_join_select_v1(
-    const prdb_host_api_v5 *host,
+    const prdb_host_api_v1 *host,
     const uint8_t *request, uint64_t request_len,
     uint8_t *response, uint64_t response_capacity, uint64_t *response_len,
     prdb_sdk_optimizer_response_v1 *out, uint32_t out_capacity);
 
 int32_t prdb_sdk_optimizer_submit_group_count_v1(
-    const prdb_host_api_v5 *host,
+    const prdb_host_api_v1 *host,
     const uint8_t *request, uint64_t request_len,
     uint8_t *response, uint64_t response_capacity, uint64_t *response_len,
     prdb_sdk_optimizer_response_v1 *out, uint32_t out_capacity);
@@ -200,7 +199,7 @@ int32_t prdb_sdk_optimizer_encode_delete_v1(
 /* Submit an encoded DELETE request on ABI v5's operation-aware optimizer
  * callback. The request uses only OptimizeDelete and grants no storage access. */
 int32_t prdb_sdk_optimizer_submit_delete_v1(
-    const prdb_host_api_v5 *host,
+    const prdb_host_api_v1 *host,
     const uint8_t *request, uint64_t request_len,
     uint8_t *response, uint64_t response_capacity, uint64_t *response_len,
     prdb_sdk_optimizer_response_v1 *out, uint32_t out_capacity);

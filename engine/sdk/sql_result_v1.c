@@ -182,7 +182,7 @@ int32_t prdb_sdk_sql_encode_result_row_v1(
 }
 
 int32_t prdb_sdk_sql_write_result_row_v1(
-    const prdb_host_api_v3 *host,
+    const prdb_host_api_v1 *host,
     const prdb_sdk_select_binding_v1 *binding,
     const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count,
     const prdb_sdk_row_v1 *row, prdb_sdk_value_v1 *cell_scratch,
@@ -196,7 +196,7 @@ int32_t prdb_sdk_sql_write_result_row_v1(
     }
     if (host == NULL || output_len == NULL ||
         host->struct_size < sizeof(*host) ||
-        host->abi_version != PRDB_QUERY_ABI_V3_VERSION ||
+        host->abi_version != PRDB_QUERY_ABI_VERSION ||
         host->write_result == NULL) {
         return PRDB_SDK_SQL_RESULT_INVALID_ARGUMENT;
     }
@@ -222,7 +222,7 @@ int32_t prdb_sdk_sql_write_result_row_v1(
 }
 
 int32_t prdb_sdk_sql_write_projected_result_v1(
-    const prdb_host_api_v3 *host,
+    const prdb_host_api_v1 *host,
     const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count,
     const uint32_t *projection_ordinals,
     const prdb_sdk_value_v1 *projected_values, uint32_t projection_count,
@@ -234,7 +234,7 @@ int32_t prdb_sdk_sql_write_projected_result_v1(
     if (host == NULL || columns == NULL || projection_ordinals == NULL ||
         projected_values == NULL || output == NULL || output_len == NULL ||
         output_capacity == 0 || host->struct_size < sizeof(*host) ||
-        host->abi_version != PRDB_QUERY_ABI_V3_VERSION ||
+        host->abi_version != PRDB_QUERY_ABI_VERSION ||
         host->write_result == NULL) {
         return PRDB_SDK_SQL_RESULT_INVALID_ARGUMENT;
     }
@@ -400,7 +400,7 @@ int32_t prdb_sdk_sql_encode_join_result_v1(
 }
 
 int32_t prdb_sdk_sql_write_join_result_v1(
-    const prdb_host_api_v3 *host,
+    const prdb_host_api_v1 *host,
     const prdb_sdk_select_binding_v1 *binding,
     const prdb_sdk_sql_column_shape_v1 *left_columns,
     uint32_t left_column_count,
@@ -414,7 +414,7 @@ int32_t prdb_sdk_sql_write_join_result_v1(
     if (output_len != NULL) *output_len = 0;
     if (host == NULL || output_len == NULL ||
         host->struct_size < sizeof(*host) ||
-        host->abi_version != PRDB_QUERY_ABI_V3_VERSION ||
+        host->abi_version != PRDB_QUERY_ABI_VERSION ||
         host->write_result == NULL) {
         return PRDB_SDK_SQL_RESULT_INVALID_ARGUMENT;
     }
@@ -504,7 +504,7 @@ int32_t prdb_sdk_sql_encode_group_count_result_v1(
 }
 
 int32_t prdb_sdk_sql_write_group_count_result_v1(
-    const prdb_host_api_v3 *host,
+    const prdb_host_api_v1 *host,
     const prdb_sdk_sql_column_shape_v1 *group_column,
     const prdb_sdk_value_v1 *group_key, uint64_t count,
     uint8_t *output, uint64_t output_capacity, uint64_t *output_len) {
@@ -514,7 +514,7 @@ int32_t prdb_sdk_sql_write_group_count_result_v1(
     if (output_len != NULL) *output_len = 0;
     if (host == NULL || output_len == NULL ||
         host->struct_size < sizeof(*host) ||
-        host->abi_version != PRDB_QUERY_ABI_V3_VERSION ||
+        host->abi_version != PRDB_QUERY_ABI_VERSION ||
         host->write_result == NULL) {
         return PRDB_SDK_SQL_RESULT_INVALID_ARGUMENT;
     }
@@ -712,7 +712,7 @@ int32_t prdb_sdk_sql_encode_group_avg_result_v1(
 }
 
 int32_t prdb_sdk_sql_write_group_minmax_result_v1(
-    const prdb_host_api_v3 *host,
+    const prdb_host_api_v1 *host,
     const prdb_sdk_sql_column_shape_v1 *group_column,
     const prdb_sdk_value_v1 *group_key,
     const prdb_sdk_sql_column_shape_v1 *aggregate_column,
@@ -724,7 +724,7 @@ int32_t prdb_sdk_sql_write_group_minmax_result_v1(
     if (output_len != NULL) *output_len = 0;
     if (host == NULL || output_len == NULL ||
         host->struct_size < sizeof(*host) ||
-        host->abi_version != PRDB_QUERY_ABI_V3_VERSION ||
+        host->abi_version != PRDB_QUERY_ABI_VERSION ||
         host->write_result == NULL) {
         return PRDB_SDK_SQL_RESULT_INVALID_ARGUMENT;
     }
@@ -748,7 +748,7 @@ int32_t prdb_sdk_sql_write_group_minmax_result_v1(
 }
 
 int32_t prdb_sdk_sql_write_group_sum_result_v1(
-    const prdb_host_api_v3 *host,
+    const prdb_host_api_v1 *host,
     const prdb_sdk_sql_column_shape_v1 *group_column,
     const prdb_sdk_value_v1 *group_key,
     const prdb_sdk_sql_column_shape_v1 *aggregate_input_column,
@@ -760,7 +760,7 @@ int32_t prdb_sdk_sql_write_group_sum_result_v1(
     if (output_len != NULL) *output_len = 0;
     if (host == NULL || output_len == NULL ||
         host->struct_size < sizeof(*host) ||
-        host->abi_version != PRDB_QUERY_ABI_V3_VERSION ||
+        host->abi_version != PRDB_QUERY_ABI_VERSION ||
         host->write_result == NULL) {
         return PRDB_SDK_SQL_RESULT_INVALID_ARGUMENT;
     }
@@ -784,7 +784,7 @@ int32_t prdb_sdk_sql_write_group_sum_result_v1(
 }
 
 int32_t prdb_sdk_sql_write_group_avg_result_v1(
-    const prdb_host_api_v3 *host,
+    const prdb_host_api_v1 *host,
     const prdb_sdk_sql_column_shape_v1 *group_column,
     const prdb_sdk_value_v1 *group_key,
     const prdb_sdk_sql_column_shape_v1 *aggregate_input_column,
@@ -796,7 +796,7 @@ int32_t prdb_sdk_sql_write_group_avg_result_v1(
     if (output_len != NULL) *output_len = 0;
     if (host == NULL || output_len == NULL ||
         host->struct_size < sizeof(*host) ||
-        host->abi_version != PRDB_QUERY_ABI_V3_VERSION ||
+        host->abi_version != PRDB_QUERY_ABI_VERSION ||
         host->write_result == NULL) {
         return PRDB_SDK_SQL_RESULT_INVALID_ARGUMENT;
     }
@@ -1044,7 +1044,7 @@ int32_t prdb_sdk_sql_encode_group_composite_result_v1(
 }
 
 int32_t prdb_sdk_sql_write_group_composite_result_v1(
-    const prdb_host_api_v3 *host,
+    const prdb_host_api_v1 *host,
     const prdb_sdk_select_binding_v1 *binding,
     const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count,
     const prdb_sdk_value_v1 *group_keys, uint32_t group_key_count,
@@ -1056,7 +1056,7 @@ int32_t prdb_sdk_sql_write_group_composite_result_v1(
     if (output_len != NULL) *output_len = 0;
     if (host == NULL || output_len == NULL ||
         host->struct_size < sizeof(*host) ||
-        host->abi_version != PRDB_QUERY_ABI_V3_VERSION ||
+        host->abi_version != PRDB_QUERY_ABI_VERSION ||
         host->write_result == NULL) {
         return PRDB_SDK_SQL_RESULT_INVALID_ARGUMENT;
     }

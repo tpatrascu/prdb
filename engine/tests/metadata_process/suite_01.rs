@@ -349,7 +349,7 @@ pub(super) fn authenticated_metadata_and_admin_lifecycle_cross_gateway_and_super
         let artifact = std::fs::read(artifact_path)?;
         let manifest = manifest_v1_from_elf(
             &artifact,
-            3,
+            1,
             1,
             "x86_64-v1".to_owned(),
             "nixos-x86_64-glibc-2.42".to_owned(),

@@ -247,7 +247,7 @@ static int32_t run_query(mock_state *mock, const uint8_t *sql,
         {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0}};
     prdb_sdk_value_v1 cell_scratch[2] = {{0}};
-    prdb_host_api_v3 host = {sizeof(host), PRDB_QUERY_ABI_V3_VERSION,
+    prdb_host_api_v1 host = {sizeof(host), PRDB_QUERY_ABI_VERSION,
                              mock, executor_request, planner_request, NULL,
                              statement_failure};
     return prdb_sdk_sql_execute_group_v1(

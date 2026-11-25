@@ -2,7 +2,7 @@
 #define PRDB_SDK_SQL_RESULT_V1_H
 
 #include "prdb_sdk_sql_v1.h"
-#include "prdb_query_abi_v3.h"
+#include "prdb_query_abi_v1.h"
 
 #define PRDB_SDK_SQL_RESULT_V1_ABI_VERSION UINT32_C(1)
 #define PRDB_SDK_SQL_RESULT_WIRE_V1_VERSION UINT16_C(1)
@@ -34,7 +34,7 @@ int32_t prdb_sdk_sql_encode_result_row_v1(
  * latch a statement failure; an error may follow already-emitted chunks and
  * clears output_len. */
 int32_t prdb_sdk_sql_write_result_row_v1(
-    const prdb_host_api_v3 *host,
+    const prdb_host_api_v1 *host,
     const prdb_sdk_select_binding_v1 *binding,
     const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count,
     const prdb_sdk_row_v1 *row, prdb_sdk_value_v1 *cell_scratch,
@@ -45,7 +45,7 @@ int32_t prdb_sdk_sql_write_result_row_v1(
  * Projection ordinals select names and declared types from the authorized
  * relation shape; values are borrowed only for this call. */
 int32_t prdb_sdk_sql_write_projected_result_v1(
-    const prdb_host_api_v3 *host,
+    const prdb_host_api_v1 *host,
     const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count,
     const uint32_t *projection_ordinals,
     const prdb_sdk_value_v1 *projected_values, uint32_t projection_count,
@@ -66,7 +66,7 @@ int32_t prdb_sdk_sql_encode_join_result_v1(
 /* Encodes and emits one joined SQLR row through the v3 result callback in
  * host-sized provisional chunks. */
 int32_t prdb_sdk_sql_write_join_result_v1(
-    const prdb_host_api_v3 *host,
+    const prdb_host_api_v1 *host,
     const prdb_sdk_select_binding_v1 *binding,
     const prdb_sdk_sql_column_shape_v1 *left_columns,
     uint32_t left_column_count,
@@ -87,7 +87,7 @@ int32_t prdb_sdk_sql_encode_group_count_result_v1(
 /* Encodes and emits one grouped SQLR record through the v3 result callback,
  * split into host-sized chunks. Output remains provisional. */
 int32_t prdb_sdk_sql_write_group_count_result_v1(
-    const prdb_host_api_v3 *host,
+    const prdb_host_api_v1 *host,
     const prdb_sdk_sql_column_shape_v1 *group_column,
     const prdb_sdk_value_v1 *group_key, uint64_t count,
     uint8_t *output, uint64_t output_capacity, uint64_t *output_len);
@@ -105,7 +105,7 @@ int32_t prdb_sdk_sql_encode_group_minmax_result_v1(
 /* Encodes and emits one grouped MIN/MAX SQLR record through the v3 result
  * callback, split into host-sized provisional chunks. */
 int32_t prdb_sdk_sql_write_group_minmax_result_v1(
-    const prdb_host_api_v3 *host,
+    const prdb_host_api_v1 *host,
     const prdb_sdk_sql_column_shape_v1 *group_column,
     const prdb_sdk_value_v1 *group_key,
     const prdb_sdk_sql_column_shape_v1 *aggregate_column,
@@ -124,7 +124,7 @@ int32_t prdb_sdk_sql_encode_group_sum_result_v1(
 /* Encodes and emits one grouped SUM SQLR row in host-sized provisional
  * chunks. */
 int32_t prdb_sdk_sql_write_group_sum_result_v1(
-    const prdb_host_api_v3 *host,
+    const prdb_host_api_v1 *host,
     const prdb_sdk_sql_column_shape_v1 *group_column,
     const prdb_sdk_value_v1 *group_key,
     const prdb_sdk_sql_column_shape_v1 *aggregate_input_column,
@@ -143,7 +143,7 @@ int32_t prdb_sdk_sql_encode_group_avg_result_v1(
 /* Encodes and emits one grouped AVG SQLR row in host-sized provisional
  * chunks. */
 int32_t prdb_sdk_sql_write_group_avg_result_v1(
-    const prdb_host_api_v3 *host,
+    const prdb_host_api_v1 *host,
     const prdb_sdk_sql_column_shape_v1 *group_column,
     const prdb_sdk_value_v1 *group_key,
     const prdb_sdk_sql_column_shape_v1 *aggregate_input_column,
@@ -161,7 +161,7 @@ int32_t prdb_sdk_sql_encode_group_composite_result_v1(
     uint8_t *output, uint64_t output_capacity, uint64_t *output_len);
 
 int32_t prdb_sdk_sql_write_group_composite_result_v1(
-    const prdb_host_api_v3 *host,
+    const prdb_host_api_v1 *host,
     const prdb_sdk_select_binding_v1 *binding,
     const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count,
     const prdb_sdk_value_v1 *group_keys, uint32_t group_key_count,

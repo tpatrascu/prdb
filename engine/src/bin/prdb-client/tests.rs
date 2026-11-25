@@ -46,7 +46,7 @@ fn instance_set_preserves_sdk_selection_and_updates_endpoint_credentials() {
                 target: "linux-x86_64".to_owned(),
                 cpu_baseline: "x86_64-v1".to_owned(),
                 runtime_profile: "glibc-test".to_owned(),
-                native_abi: 4,
+                native_abi: 1,
             },
             default_credential: "alice".to_owned(),
             credentials: vec![ClientCredential {
@@ -93,7 +93,7 @@ fn instance_set_preserves_sdk_selection_and_updates_endpoint_credentials() {
     assert_eq!(instance.address, "192.0.2.8");
     assert_eq!(instance.port, 7444);
     assert_eq!(instance.sdk.release, 7);
-    assert_eq!(instance.sdk.native_abi, 4);
+    assert_eq!(instance.sdk.native_abi, 1);
     assert_eq!(instance.credentials[0].token_id, "12".repeat(16));
     assert_eq!(instance.credentials[1].name, "runas");
     assert_eq!(instance.credentials[1].username, "bob");
@@ -126,7 +126,7 @@ fn sdk_selection_requires_exact_local_release_profile_abi_and_digest() {
     let digest: [u8; 32] = Sha256::digest(bytes).into();
     let info = SdkLibraryInfo {
         sdk_release: 3,
-        native_abis: vec![1, 4],
+        native_abis: vec![1],
         target: "linux-x86_64".to_owned(),
         cpu_baseline: "x86_64-v1".to_owned(),
         runtime_profile: "glibc-test".to_owned(),
@@ -159,13 +159,13 @@ fn configured_submit_rejects_package_mismatch_and_legacy_sdk_files() {
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
     let manifest = prdb_engine::submission_manifest::encode_manifest_v1(
         &prdb_engine::submission_manifest::ArtifactManifestV1 {
-            native_abi_version: 3,
+            native_abi_version: 1,
             sdk_release: 7,
             cpu_baseline: "x86_64-v1".to_owned(),
             runtime_profile: "glibc-test".to_owned(),
             compiler_identity: "test".to_owned(),
-            descriptor_symbol: "prdb_query_descriptor_v3".to_owned(),
-            entry_point_symbol: "prdb_query_main_v3".to_owned(),
+            descriptor_symbol: "prdb_query_descriptor_v1".to_owned(),
+            entry_point_symbol: "prdb_query_main_v1".to_owned(),
             dependencies: vec!["libc.so.6".to_owned(), "libprdb_sql.so.7".to_owned()],
         },
     )
@@ -176,7 +176,7 @@ fn configured_submit_rejects_package_mismatch_and_legacy_sdk_files() {
         target: "linux-x86_64".to_owned(),
         cpu_baseline: "x86_64-v1".to_owned(),
         runtime_profile: "glibc-test".to_owned(),
-        native_abi: 3,
+        native_abi: 1,
     };
     assert!(validate_package_selection(&root, &selection).is_ok());
     let mut mismatch = selection.clone();

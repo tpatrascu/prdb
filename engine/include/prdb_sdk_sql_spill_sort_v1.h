@@ -22,7 +22,7 @@ typedef int32_t (*prdb_sdk_sql_spill_sort_output_v1_fn)(
  * workspace ceiling above; merge fan-in is eight. The comparator applies SQL
  * scalar/null/redaction rules and must return ordering in -1..1. */
 int32_t prdb_sdk_sql_spill_sort_v1(
-    const prdb_host_api_v6 *host, void *context, uint32_t row_bytes,
+    const prdb_host_api_v1 *host, void *context, uint32_t row_bytes,
     uint32_t memory_budget_bytes,
     prdb_sdk_sql_spill_sort_source_v1_fn source,
     prdb_sdk_sql_spill_sort_compare_v1_fn compare,

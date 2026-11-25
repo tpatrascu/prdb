@@ -115,7 +115,7 @@ pub fn generate_query_batch_source(schema: &str, sql: &[u8]) -> Result<Vec<u8>, 
         .collect::<Result<_, _>>()?;
 
     let mut source = String::from(
-        "#include <stddef.h>\n#include \"prdb_query_abi_v3.h\"\n#include \"prdb_sdk_sql_dispatch_v1.h\"\n#include \"prdb_sdk_sql_batch_v1.h\"\n\n",
+        "#include <stddef.h>\n#include \"prdb_query_abi_v1.h\"\n#include \"prdb_sdk_sql_dispatch_v1.h\"\n#include \"prdb_sdk_sql_batch_v1.h\"\n\n",
     );
     source.push_str("static const uint8_t sql_schema[] = {");
     append_c_bytes(&mut source, schema.as_bytes());
@@ -126,8 +126,8 @@ pub fn generate_query_batch_source(schema: &str, sql: &[u8]) -> Result<Vec<u8>, 
         append_c_bytes(&mut source, query.as_bytes());
         source.push_str("};\n");
     }
-    source.push_str("\nstatic int32_t dispatch_batch_statement(const prdb_host_api_v3 *host, const uint8_t *schema, uint32_t schema_len, const prdb_sdk_sql_batch_statement_v1 *statement) {\n    int32_t status = prdb_sdk_sql_run_statement_v1(host, schema, schema_len, statement->sql, statement->sql_len, statement->parameters, statement->parameters_len);\n    return status == PRDB_SDK_SQL_DISPATCH_OK ? 0 : status;\n}\n\n");
-    source.push_str("const prdb_query_descriptor_v3_record prdb_query_descriptor_v3 = { sizeof(prdb_query_descriptor_v3_record), PRDB_QUERY_ABI_V3_VERSION, sizeof(prdb_host_api_v3), sizeof(prdb_invocation_v3) };\n\nint32_t prdb_query_main_v3(const prdb_host_api_v3 *host, const prdb_invocation_v3 *invocation) {\n    if (invocation == NULL || invocation->struct_size < sizeof(*invocation) || invocation->abi_version != PRDB_QUERY_ABI_V3_VERSION) return 1;\n    prdb_sdk_sql_batch_statement_v1 statements[] = {\n");
+    source.push_str("\nstatic int32_t dispatch_batch_statement(const prdb_host_api_v1 *host, const uint8_t *schema, uint32_t schema_len, const prdb_sdk_sql_batch_statement_v1 *statement) {\n    int32_t status = prdb_sdk_sql_run_statement_v1(host, schema, schema_len, statement->sql, statement->sql_len, statement->parameters, statement->parameters_len);\n    return status == PRDB_SDK_SQL_DISPATCH_OK ? 0 : status;\n}\n\n");
+    source.push_str("const prdb_query_descriptor_v1_record prdb_query_descriptor_v1 = { sizeof(prdb_query_descriptor_v1_record), PRDB_QUERY_ABI_VERSION, sizeof(prdb_host_api_v1), sizeof(prdb_invocation_v1) };\n\nint32_t prdb_query_main_v1(const prdb_host_api_v1 *host, const prdb_invocation_v1 *invocation) {\n    if (invocation == NULL || invocation->struct_size < sizeof(*invocation) || invocation->abi_version != PRDB_QUERY_ABI_VERSION) return 1;\n    prdb_sdk_sql_batch_statement_v1 statements[] = {\n");
     for (index, (_, has_parameters)) in queries.iter().enumerate() {
         use std::fmt::Write as _;
         if *has_parameters {

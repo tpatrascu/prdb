@@ -10,23 +10,13 @@ mod worker {
         IpcFrame, Operation, ServiceRole, authorize_operation, read_frame, write_frame,
     };
     use prdb_engine::query_abi::{
-        BorrowedInvocationV1, HostApiV1, HostApiV2, HostApiV3, HostApiV4, HostApiV5, HostApiV6,
-        InvocationV2, InvocationV3, InvocationV4, InvocationV5, InvocationV6,
-        MAX_IPC_REQUEST_BYTES, MAX_IPC_RESPONSE_BYTES, MAX_RESULT_CHUNK_BYTES,
-        QUERY_ABI_V2_VERSION, QUERY_ABI_V3_VERSION, QUERY_ABI_V4_VERSION, QUERY_ABI_V5_VERSION,
-        QUERY_ABI_V6_VERSION, QUERY_ABI_VERSION, QUERY_DESCRIPTOR_SYMBOL,
-        QUERY_DESCRIPTOR_V2_SYMBOL, QUERY_DESCRIPTOR_V3_SYMBOL, QUERY_DESCRIPTOR_V4_SYMBOL,
-        QUERY_DESCRIPTOR_V5_SYMBOL, QUERY_DESCRIPTOR_V6_SYMBOL, QUERY_ENTRY_SYMBOL,
-        QUERY_ENTRY_V2_SYMBOL, QUERY_ENTRY_V3_SYMBOL, QUERY_ENTRY_V4_SYMBOL, QUERY_ENTRY_V5_SYMBOL,
-        QUERY_ENTRY_V6_SYMBOL, QUERY_STATEMENT_FAILURE_SQL, QueryDescriptorV1, QueryDescriptorV2,
-        QueryDescriptorV3, QueryDescriptorV4, QueryDescriptorV5, QueryDescriptorV6,
-        QueryIpcRequestV2, QueryMainV1, QueryMainV2, QueryMainV3, QueryMainV4, QueryMainV5,
-        QueryMainV6, QueryOptimizerRequestV4, QueryOptimizerRequestV5, QuerySpillRequestV1,
-        QueryStatementFailureV3, QueryWriteResultV2, SPILL_CHANNEL_HEADER_BYTES,
-        SPILL_CHANNEL_MAGIC, SPILL_CHANNEL_VERSION, SPILL_OP_APPEND, SPILL_OP_CREATE,
-        SPILL_OP_DESTROY, SPILL_OP_READ_AT, SPILL_OP_SEAL, SPILL_STATUS_OK, validate_descriptor_v1,
-        validate_descriptor_v2, validate_descriptor_v3, validate_descriptor_v4,
-        validate_descriptor_v5, validate_descriptor_v6,
+        BorrowedInvocationV1, HostApiV1, MAX_IPC_REQUEST_BYTES, MAX_IPC_RESPONSE_BYTES,
+        MAX_RESULT_CHUNK_BYTES, QUERY_ABI_VERSION, QUERY_DESCRIPTOR_SYMBOL, QUERY_ENTRY_SYMBOL,
+        QUERY_STATEMENT_FAILURE_SQL, QueryDescriptorV1, QueryIpcRequestV1, QueryMainV1,
+        QueryOptimizerRequestV1, QuerySpillRequestV1, QueryStatementFailureV1, QueryWriteResultV1,
+        SPILL_CHANNEL_HEADER_BYTES, SPILL_CHANNEL_MAGIC, SPILL_CHANNEL_VERSION, SPILL_OP_APPEND,
+        SPILL_OP_CREATE, SPILL_OP_DESTROY, SPILL_OP_READ_AT, SPILL_OP_SEAL, SPILL_STATUS_OK,
+        validate_descriptor_v1,
     };
     use std::ffi::{CStr, CString, OsStr, c_void};
     use std::io::{self, Read, Write};
@@ -275,38 +265,21 @@ mod worker {
             return Err(dynamic_loader_error("dlopen"));
         }
 
-        // Prefer v6, then v5, v4, v3 and v2. An invalid descriptor is rejected rather than
-        // falling back to a second ABI exported by the same library.
-        let v6_descriptor_symbol = CString::new(QUERY_DESCRIPTOR_V6_SYMBOL).expect("static symbol");
-        if let Some(descriptor_address) = lookup_optional_symbol(handle, &v6_descriptor_symbol)? {
-            return unsafe { execute_v6_library(handle, descriptor_address, args) };
-        }
-        let v5_descriptor_symbol = CString::new(QUERY_DESCRIPTOR_V5_SYMBOL).expect("static symbol");
-        if let Some(descriptor_address) = lookup_optional_symbol(handle, &v5_descriptor_symbol)? {
-            return unsafe { execute_v5_library(handle, descriptor_address, args) };
-        }
-        let v4_descriptor_symbol = CString::new(QUERY_DESCRIPTOR_V4_SYMBOL).expect("static symbol");
-        if let Some(descriptor_address) = lookup_optional_symbol(handle, &v4_descriptor_symbol)? {
-            return unsafe { execute_v4_library(handle, descriptor_address, args) };
-        }
-        let v3_descriptor_symbol = CString::new(QUERY_DESCRIPTOR_V3_SYMBOL).expect("static symbol");
-        if let Some(descriptor_address) = lookup_optional_symbol(handle, &v3_descriptor_symbol)? {
-            return unsafe { execute_v3_library(handle, descriptor_address, args) };
-        }
-        let v2_descriptor_symbol = CString::new(QUERY_DESCRIPTOR_V2_SYMBOL).expect("static symbol");
-        if let Some(descriptor_address) = lookup_optional_symbol(handle, &v2_descriptor_symbol)? {
-            return unsafe { execute_v2_library(handle, descriptor_address, args) };
-        }
-        // SAFETY: this host has already verified confinement and the loader
-        // handle remains live through the entry-point call.
-        unsafe { execute_v1_library(handle, args) }
-    }
-
-    unsafe fn execute_v1_library(handle: *mut libc::c_void, args: WorkerArgs) -> io::Result<i32> {
-        // Validate the descriptor before resolving the entry point. Constructors
-        // have already run, so this code is intentionally inside the sandbox.
+        // Validate the versioned descriptor before resolving the entry point.
+        // Future ABI versions (v2+) can be added here by checking their
+        // descriptor symbol first without falling back on invalid descriptors.
         let descriptor_symbol = CString::new(QUERY_DESCRIPTOR_SYMBOL).expect("static symbol");
         let descriptor_address = lookup_symbol(handle, &descriptor_symbol)?;
+        // SAFETY: this host has already verified confinement and the loader
+        // handle remains live through the entry-point call.
+        unsafe { execute_v1_library(handle, descriptor_address, args) }
+    }
+
+    unsafe fn execute_v1_library(
+        handle: *mut libc::c_void,
+        descriptor_address: *mut libc::c_void,
+        args: WorkerArgs,
+    ) -> io::Result<i32> {
         if !(descriptor_address as usize).is_multiple_of(std::mem::align_of::<QueryDescriptorV1>())
         {
             return Err(io::Error::new(
@@ -337,56 +310,6 @@ mod worker {
                 format!("invalid parameters: {error:?}"),
             )
         })?;
-        let host = HostApiV1 {
-            struct_size: std::mem::size_of::<HostApiV1>() as u32,
-            abi_version: QUERY_ABI_VERSION,
-        };
-        // SAFETY: both records follow the validated v1 ABI. The parameter
-        // bytes and host/invocation records remain alive for the entire call.
-        let status = unsafe { entry(&host, invocation.as_ptr()) };
-        // Deliberately leak the loader handle and let main use _exit; arbitrary
-        // library finalizers must not run during host cleanup.
-        let _ = handle;
-        Ok(status)
-    }
-
-    unsafe fn execute_v6_library(
-        handle: *mut libc::c_void,
-        descriptor_address: *mut libc::c_void,
-        args: WorkerArgs,
-    ) -> io::Result<i32> {
-        if !(descriptor_address as usize).is_multiple_of(std::mem::align_of::<QueryDescriptorV6>())
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "query v6 descriptor has invalid alignment",
-            ));
-        }
-        let descriptor = unsafe { descriptor_address.cast::<QueryDescriptorV6>().read() };
-        validate_descriptor_v6(&descriptor).map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("query ABI v6 descriptor rejected: {error:?}"),
-            )
-        })?;
-        let entry_symbol = CString::new(QUERY_ENTRY_V6_SYMBOL).expect("static symbol");
-        let entry_address = lookup_symbol(handle, &entry_symbol)?;
-        let entry: QueryMainV6 = unsafe { std::mem::transmute(entry_address) };
-        let parameters = read_parameters(args.parameters_fd)?;
-        let parameters_len = u64::try_from(parameters.len()).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidInput, "parameters length overflow")
-        })?;
-        let parameters_ptr = if parameters.is_empty() {
-            std::ptr::null()
-        } else {
-            parameters.as_ptr()
-        };
-        let invocation = InvocationV6 {
-            struct_size: std::mem::size_of::<InvocationV6>() as u32,
-            abi_version: QUERY_ABI_V6_VERSION,
-            parameters: parameters_ptr,
-            parameters_len,
-        };
         let context = unsafe {
             CallbackContext::from_raw_fds(
                 args.planner_fd,
@@ -398,334 +321,35 @@ mod worker {
                 args.max_sql_index_probe_candidates,
             )
         };
+        // Keep callback state alive until the worker's immediate `_exit`, even
+        // if hostile library code retains the context pointer on another thread.
         let context = Box::leak(Box::new(context));
-        let v3 = HostApiV3 {
-            struct_size: std::mem::size_of::<HostApiV3>() as u32,
-            abi_version: QUERY_ABI_V3_VERSION,
+        let host = HostApiV1 {
+            struct_size: std::mem::size_of::<HostApiV1>() as u32,
+            abi_version: QUERY_ABI_VERSION,
             context: (context as *mut CallbackContext).cast(),
-            executor_request: Some(executor_request_v2 as QueryIpcRequestV2),
-            planner_request: Some(planner_request_v2 as QueryIpcRequestV2),
-            write_result: Some(write_result_v2 as QueryWriteResultV2),
-            statement_failure: Some(statement_failure_v3 as QueryStatementFailureV3),
-        };
-        let v5 = HostApiV5 {
-            v4: HostApiV4 {
-                v3,
-                optimizer_request: Some(optimizer_request_v4 as QueryOptimizerRequestV4),
-            },
-            optimizer_request: Some(optimizer_request_v5 as QueryOptimizerRequestV5),
-        };
-        let host = HostApiV6 {
-            v5,
+            executor_request: Some(executor_request_v2 as QueryIpcRequestV1),
+            planner_request: Some(planner_request_v2 as QueryIpcRequestV1),
+            write_result: Some(write_result_v2 as QueryWriteResultV1),
+            statement_failure: Some(statement_failure_v3 as QueryStatementFailureV1),
+            optimizer_request: Some(optimizer_request_v1 as QueryOptimizerRequestV1),
             spill_request: context
                 .spill
                 .as_ref()
                 .map(|_| spill_request_v1 as QuerySpillRequestV1),
         };
-        let status = unsafe { entry(&host, &invocation) };
+        // SAFETY: both records follow the validated v1 ABI. The parameter
+        // bytes and host/invocation records remain alive for the entire call.
+        let status = unsafe { entry(&host, invocation.as_ptr()) };
         let failed = context.statement_failed.load(Ordering::SeqCst);
+        // Deliberately leak the loader handle and let main use _exit; arbitrary
+        // library finalizers must not run during host cleanup.
         let _ = handle;
         Ok(query_exit_status(status, failed))
     }
 
-    unsafe fn execute_v5_library(
-        handle: *mut libc::c_void,
-        descriptor_address: *mut libc::c_void,
-        args: WorkerArgs,
-    ) -> io::Result<i32> {
-        if !(descriptor_address as usize).is_multiple_of(std::mem::align_of::<QueryDescriptorV5>())
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "query v5 descriptor has invalid alignment",
-            ));
-        }
-        // SAFETY: malformed native records can fault only this disposable,
-        // confined worker. Copy before validation to avoid retaining a library pointer.
-        let descriptor = unsafe { descriptor_address.cast::<QueryDescriptorV5>().read() };
-        validate_descriptor_v5(&descriptor).map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("query ABI v5 descriptor rejected: {error:?}"),
-            )
-        })?;
-        let entry_symbol = CString::new(QUERY_ENTRY_V5_SYMBOL).expect("static symbol");
-        let entry_address = lookup_symbol(handle, &entry_symbol)?;
-        // SAFETY: the validated descriptor declares this ABI and entry point.
-        let entry: QueryMainV5 = unsafe { std::mem::transmute(entry_address) };
-        let parameters = read_parameters(args.parameters_fd)?;
-        let parameters_len = u64::try_from(parameters.len()).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidInput, "parameters length overflow")
-        })?;
-        let parameters_ptr = if parameters.is_empty() {
-            std::ptr::null()
-        } else {
-            parameters.as_ptr()
-        };
-        let invocation = InvocationV5 {
-            struct_size: std::mem::size_of::<InvocationV5>() as u32,
-            abi_version: QUERY_ABI_V5_VERSION,
-            parameters: parameters_ptr,
-            parameters_len,
-        };
-        let context = unsafe {
-            CallbackContext::from_raw_fds(
-                args.planner_fd,
-                args.executor_fd,
-                args.optimizer_fd,
-                args.result_fd,
-                (args.spill_fd >= 3).then_some(args.spill_fd),
-                args.max_total_result_bytes,
-                args.max_sql_index_probe_candidates,
-            )
-        };
-        let context = Box::leak(Box::new(context));
-        let v3 = HostApiV3 {
-            struct_size: std::mem::size_of::<HostApiV3>() as u32,
-            abi_version: QUERY_ABI_V3_VERSION,
-            context: (context as *mut CallbackContext).cast(),
-            executor_request: Some(executor_request_v2 as QueryIpcRequestV2),
-            planner_request: Some(planner_request_v2 as QueryIpcRequestV2),
-            write_result: Some(write_result_v2 as QueryWriteResultV2),
-            statement_failure: Some(statement_failure_v3 as QueryStatementFailureV3),
-        };
-        let host = HostApiV5 {
-            v4: HostApiV4 {
-                v3,
-                optimizer_request: Some(optimizer_request_v4 as QueryOptimizerRequestV4),
-            },
-            optimizer_request: Some(optimizer_request_v5 as QueryOptimizerRequestV5),
-        };
-        // SAFETY: all host and invocation storage remains alive through the call.
-        let status = unsafe { entry(&host, &invocation) };
-        let latched_statement_failure = context.statement_failed.load(Ordering::SeqCst);
-        let _ = handle;
-        Ok(query_exit_status(status, latched_statement_failure))
-    }
-
-    unsafe fn execute_v4_library(
-        handle: *mut libc::c_void,
-        descriptor_address: *mut libc::c_void,
-        args: WorkerArgs,
-    ) -> io::Result<i32> {
-        if !(descriptor_address as usize).is_multiple_of(std::mem::align_of::<QueryDescriptorV4>())
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "query v4 descriptor has invalid alignment",
-            ));
-        }
-        // SAFETY: malformed native records can fault only this disposable,
-        // confined worker. Copy before validation to avoid retaining a library pointer.
-        let descriptor = unsafe { descriptor_address.cast::<QueryDescriptorV4>().read() };
-        validate_descriptor_v4(&descriptor).map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("query ABI v4 descriptor rejected: {error:?}"),
-            )
-        })?;
-
-        let entry_symbol = CString::new(QUERY_ENTRY_V4_SYMBOL).expect("static symbol");
-        let entry_address = lookup_symbol(handle, &entry_symbol)?;
-        // SAFETY: the validated descriptor declares this ABI and entry point.
-        let entry: QueryMainV4 = unsafe { std::mem::transmute(entry_address) };
-
-        let parameters = read_parameters(args.parameters_fd)?;
-        let parameters_len = u64::try_from(parameters.len()).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidInput, "parameters length overflow")
-        })?;
-        let parameters_ptr = if parameters.is_empty() {
-            std::ptr::null()
-        } else {
-            parameters.as_ptr()
-        };
-        let invocation = InvocationV4 {
-            struct_size: std::mem::size_of::<InvocationV4>() as u32,
-            abi_version: QUERY_ABI_V4_VERSION,
-            parameters: parameters_ptr,
-            parameters_len,
-        };
-        // SAFETY: the trusted launcher supplied distinct inherited socket fds.
-        let context = unsafe {
-            CallbackContext::from_raw_fds(
-                args.planner_fd,
-                args.executor_fd,
-                args.optimizer_fd,
-                args.result_fd,
-                (args.spill_fd >= 3).then_some(args.spill_fd),
-                args.max_total_result_bytes,
-                args.max_sql_index_probe_candidates,
-            )
-        };
-        // Keep callback state alive until the worker's immediate `_exit`, even
-        // if hostile library code retains the context pointer on another thread.
-        let context = Box::leak(Box::new(context));
-        let host = HostApiV4 {
-            v3: HostApiV3 {
-                struct_size: std::mem::size_of::<HostApiV3>() as u32,
-                abi_version: QUERY_ABI_V3_VERSION,
-                context: (context as *mut CallbackContext).cast(),
-                executor_request: Some(executor_request_v2 as QueryIpcRequestV2),
-                planner_request: Some(planner_request_v2 as QueryIpcRequestV2),
-                write_result: Some(write_result_v2 as QueryWriteResultV2),
-                statement_failure: Some(statement_failure_v3 as QueryStatementFailureV3),
-            },
-            optimizer_request: Some(optimizer_request_v4 as QueryOptimizerRequestV4),
-        };
-        // SAFETY: all host and invocation storage remains alive through the call.
-        let status = unsafe { entry(&host, &invocation) };
-        let latched_statement_failure = context.statement_failed.load(Ordering::SeqCst);
-        let _ = handle;
-        Ok(query_exit_status(status, latched_statement_failure))
-    }
-
-    unsafe fn execute_v3_library(
-        handle: *mut libc::c_void,
-        descriptor_address: *mut libc::c_void,
-        args: WorkerArgs,
-    ) -> io::Result<i32> {
-        if !(descriptor_address as usize).is_multiple_of(std::mem::align_of::<QueryDescriptorV3>())
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "query v3 descriptor has invalid alignment",
-            ));
-        }
-        // SAFETY: malformed native records can fault only this disposable,
-        // confined worker. Copy before validation to avoid retaining a library pointer.
-        let descriptor = unsafe { descriptor_address.cast::<QueryDescriptorV3>().read() };
-        validate_descriptor_v3(&descriptor).map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("query ABI v3 descriptor rejected: {error:?}"),
-            )
-        })?;
-
-        let entry_symbol = CString::new(QUERY_ENTRY_V3_SYMBOL).expect("static symbol");
-        let entry_address = lookup_symbol(handle, &entry_symbol)?;
-        // SAFETY: the validated descriptor declares this ABI and entry point.
-        let entry: QueryMainV3 = unsafe { std::mem::transmute(entry_address) };
-
-        let parameters = read_parameters(args.parameters_fd)?;
-        let parameters_len = u64::try_from(parameters.len()).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidInput, "parameters length overflow")
-        })?;
-        let parameters_ptr = if parameters.is_empty() {
-            std::ptr::null()
-        } else {
-            parameters.as_ptr()
-        };
-        let invocation = InvocationV3 {
-            struct_size: std::mem::size_of::<InvocationV3>() as u32,
-            abi_version: QUERY_ABI_V3_VERSION,
-            parameters: parameters_ptr,
-            parameters_len,
-        };
-        // SAFETY: the trusted launcher supplied distinct inherited socket fds.
-        let context = unsafe {
-            CallbackContext::from_raw_fds(
-                args.planner_fd,
-                args.executor_fd,
-                args.optimizer_fd,
-                args.result_fd,
-                (args.spill_fd >= 3).then_some(args.spill_fd),
-                args.max_total_result_bytes,
-                args.max_sql_index_probe_candidates,
-            )
-        };
-        // Keep callback state alive until the worker's immediate `_exit`, even
-        // if hostile library code retains the context pointer on another thread.
-        let context = Box::leak(Box::new(context));
-        let host = HostApiV3 {
-            struct_size: std::mem::size_of::<HostApiV3>() as u32,
-            abi_version: QUERY_ABI_V3_VERSION,
-            context: (context as *mut CallbackContext).cast(),
-            executor_request: Some(executor_request_v2 as QueryIpcRequestV2),
-            planner_request: Some(planner_request_v2 as QueryIpcRequestV2),
-            write_result: Some(write_result_v2 as QueryWriteResultV2),
-            statement_failure: Some(statement_failure_v3 as QueryStatementFailureV3),
-        };
-        // SAFETY: all host and invocation storage remains alive through the call.
-        let status = unsafe { entry(&host, &invocation) };
-        let latched_statement_failure = context.statement_failed.load(Ordering::SeqCst);
-        let _ = handle;
-        Ok(query_exit_status(status, latched_statement_failure))
-    }
-
     fn query_exit_status(entry_status: i32, statement_failed: bool) -> i32 {
         if statement_failed { 1 } else { entry_status }
-    }
-
-    unsafe fn execute_v2_library(
-        handle: *mut libc::c_void,
-        descriptor_address: *mut libc::c_void,
-        args: WorkerArgs,
-    ) -> io::Result<i32> {
-        if !(descriptor_address as usize).is_multiple_of(std::mem::align_of::<QueryDescriptorV2>())
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "query v2 descriptor has invalid alignment",
-            ));
-        }
-        // SAFETY: malformed native records can fault only this disposable,
-        // confined worker. Copy before validation to avoid retaining a library pointer.
-        let descriptor = unsafe { descriptor_address.cast::<QueryDescriptorV2>().read() };
-        validate_descriptor_v2(&descriptor).map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("query ABI v2 descriptor rejected: {error:?}"),
-            )
-        })?;
-
-        let entry_symbol = CString::new(QUERY_ENTRY_V2_SYMBOL).expect("static symbol");
-        let entry_address = lookup_symbol(handle, &entry_symbol)?;
-        // SAFETY: the validated descriptor declares this ABI and entry point.
-        let entry: QueryMainV2 = unsafe { std::mem::transmute(entry_address) };
-
-        let parameters = read_parameters(args.parameters_fd)?;
-        let parameters_len = u64::try_from(parameters.len()).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidInput, "parameters length overflow")
-        })?;
-        let parameters_ptr = if parameters.is_empty() {
-            std::ptr::null()
-        } else {
-            parameters.as_ptr()
-        };
-        let invocation = InvocationV2 {
-            struct_size: std::mem::size_of::<InvocationV2>() as u32,
-            abi_version: QUERY_ABI_V2_VERSION,
-            parameters: parameters_ptr,
-            parameters_len,
-        };
-        // SAFETY: the trusted launcher supplied distinct inherited socket fds.
-        let context = unsafe {
-            CallbackContext::from_raw_fds(
-                args.planner_fd,
-                args.executor_fd,
-                args.optimizer_fd,
-                args.result_fd,
-                (args.spill_fd >= 3).then_some(args.spill_fd),
-                args.max_total_result_bytes,
-                args.max_sql_index_probe_candidates,
-            )
-        };
-        // Keep callback state alive until the worker's immediate `_exit`, even
-        // if hostile library code retains the context pointer on another thread.
-        let context = Box::leak(Box::new(context));
-        let host = HostApiV2 {
-            struct_size: std::mem::size_of::<HostApiV2>() as u32,
-            abi_version: QUERY_ABI_V2_VERSION,
-            context: (context as *mut CallbackContext).cast(),
-            executor_request: Some(executor_request_v2 as QueryIpcRequestV2),
-            planner_request: Some(planner_request_v2 as QueryIpcRequestV2),
-            write_result: Some(write_result_v2 as QueryWriteResultV2),
-        };
-        // SAFETY: host, invocation, callback state and parameter bytes all
-        // remain alive for the complete entry-point call.
-        let status = unsafe { entry(&host, &invocation) };
-        let _ = handle;
-        Ok(status)
     }
 
     const CALLBACK_OK: i32 = 0;
@@ -1060,29 +684,7 @@ mod worker {
         )
     }
 
-    unsafe extern "C" fn optimizer_request_v4(
-        context: *mut c_void,
-        request: *const u8,
-        request_len: u64,
-        response: *mut u8,
-        response_capacity: u64,
-        response_len: *mut u64,
-    ) -> i32 {
-        callback_ipc_v2(
-            context,
-            ServiceRole::OptimizerSubmission,
-            Operation::OptimizeSelect as u16,
-            IpcCallbackBuffers {
-                request,
-                request_len,
-                response,
-                response_capacity,
-                response_len,
-            },
-        )
-    }
-
-    unsafe extern "C" fn optimizer_request_v5(
+    unsafe extern "C" fn optimizer_request_v1(
         context: *mut c_void,
         operation: u16,
         request: *const u8,
@@ -1278,6 +880,7 @@ mod worker {
         Ok(address)
     }
 
+    #[allow(dead_code)]
     fn lookup_optional_symbol(
         handle: *mut libc::c_void,
         symbol: &CStr,
@@ -1644,7 +1247,7 @@ mod worker {
         }
 
         #[test]
-        fn optimizer_callback_uses_fixed_operation_and_bounded_response() {
+        fn optimizer_callback_uses_bounded_response_for_select() {
             let (planner, _planner_peer) = UnixStream::pair().unwrap();
             let (executor, _executor_peer) = UnixStream::pair().unwrap();
             let (optimizer, mut optimizer_peer) = UnixStream::pair().unwrap();
@@ -1672,10 +1275,10 @@ mod worker {
             let request = b"select request";
             let mut response = [0x7f; 3];
             let mut response_len = 0;
-            // SAFETY: all callback buffers and context remain live and sized.
             let status = unsafe {
-                optimizer_request_v4(
+                optimizer_request_v1(
                     context_ptr,
+                    Operation::OptimizeSelect as u16,
                     request.as_ptr(),
                     request.len() as u64,
                     response.as_mut_ptr(),
@@ -1689,11 +1292,10 @@ mod worker {
 
             let mut small_response = [0x7f; 2];
             response_len = 0;
-            // SAFETY: callback buffers remain live; undersizing is reported
-            // without copying any response bytes.
             let status = unsafe {
-                optimizer_request_v4(
+                optimizer_request_v1(
                     context_ptr,
+                    Operation::OptimizeSelect as u16,
                     request.as_ptr(),
                     request.len() as u64,
                     small_response.as_mut_ptr(),
@@ -1708,7 +1310,7 @@ mod worker {
         }
 
         #[test]
-        fn optimizer_v5_callback_selects_an_allowlisted_operation() {
+        fn optimizer_v1_callback_selects_an_allowlisted_operation() {
             let (planner, _planner_peer) = UnixStream::pair().unwrap();
             let (executor, _executor_peer) = UnixStream::pair().unwrap();
             let (optimizer, mut optimizer_peer) = UnixStream::pair().unwrap();
@@ -1733,7 +1335,7 @@ mod worker {
             let mut response = [0; 8];
             let mut response_len = 0;
             let status = unsafe {
-                optimizer_request_v5(
+                optimizer_request_v1(
                     context_ptr,
                     Operation::OptimizeDelete as u16,
                     request.as_ptr(),
@@ -1748,7 +1350,7 @@ mod worker {
             assert_eq!(&response, b"response");
 
             let status = unsafe {
-                optimizer_request_v5(
+                optimizer_request_v1(
                     context_ptr,
                     Operation::DescribePlanRelation as u16,
                     request.as_ptr(),

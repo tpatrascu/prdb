@@ -7,7 +7,7 @@
 
 #include <string.h>
 
-static int32_t fail_statement(const prdb_host_api_v3 *host, int32_t status) {
+static int32_t fail_statement(const prdb_host_api_v1 *host, int32_t status) {
     if (status != PRDB_SDK_SQL_EXEC_OK) {
         (void)host->statement_failure(host->context,
                                       PRDB_QUERY_STATEMENT_FAILURE_SQL);
@@ -51,7 +51,7 @@ static int span_matches_name(const uint8_t *sql,
 #define SQL_SPILL_SORT_ROW_BYTES UINT32_C(1024)
 
 typedef struct sql_spill_sort_context {
-    const prdb_host_api_v6 *host;
+    const prdb_host_api_v1 *host;
     prdb_sdk_spill_stream_v1 input;
     uint64_t source_offset;
     uint64_t record_count;
@@ -208,8 +208,8 @@ static int32_t spill_sort_output(void *opaque, const uint8_t *record,
 }
 
 static int32_t execute_select_internal(
-    const prdb_host_api_v3 *host_v3, const uint8_t *schema, uint32_t schema_len,
-    const prdb_host_api_v6 *spill_host,
+    const prdb_host_api_v1 *host_v3, const uint8_t *schema, uint32_t schema_len,
+    const prdb_host_api_v1 *spill_host,
     const uint8_t *sql, uint64_t sql_len,
     const prdb_sdk_value_v1 *parameters,
     const prdb_sdk_sql_parameter_metadata_v1 *parameter_metadata,
@@ -254,17 +254,17 @@ static int32_t execute_select_internal(
     int cursor_open = 0;
     int32_t status;
     int32_t final_status = PRDB_SDK_SQL_EXEC_OK;
-    prdb_host_api_v2 base_host;
-    const prdb_host_api_v2 *host;
+    prdb_host_api_v1 base_host;
+    const prdb_host_api_v1 *host;
 
     if (host_v3 == NULL || host_v3->struct_size < sizeof(*host_v3) ||
-        host_v3->abi_version != PRDB_QUERY_ABI_V3_VERSION ||
+        host_v3->abi_version != PRDB_QUERY_ABI_VERSION ||
         host_v3->statement_failure == NULL ||
         host_v3->executor_request == NULL || host_v3->planner_request == NULL) {
         return PRDB_SDK_SQL_EXEC_INVALID_ARGUMENT;
     }
-    base_host = (prdb_host_api_v2){
-        sizeof(prdb_host_api_v2), PRDB_QUERY_ABI_V2_VERSION, host_v3->context,
+    base_host = (prdb_host_api_v1){
+        sizeof(prdb_host_api_v1), PRDB_QUERY_ABI_VERSION, host_v3->context,
         host_v3->executor_request, host_v3->planner_request,
         host_v3->write_result};
     host = &base_host;
@@ -638,7 +638,7 @@ static int32_t execute_select_internal(
 }
 
 int32_t prdb_sdk_sql_execute_select_v1(
-    const prdb_host_api_v3 *host, const uint8_t *schema, uint32_t schema_len,
+    const prdb_host_api_v1 *host, const uint8_t *schema, uint32_t schema_len,
     const uint8_t *sql, uint64_t sql_len,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     uint16_t max_candidates, uint32_t max_batch_bytes,
@@ -662,7 +662,7 @@ int32_t prdb_sdk_sql_execute_select_v1(
 }
 
 int32_t prdb_sdk_sql_execute_select_ordered_v1(
-    const prdb_host_api_v3 *host, const uint8_t *schema, uint32_t schema_len,
+    const prdb_host_api_v1 *host, const uint8_t *schema, uint32_t schema_len,
     const uint8_t *sql, uint64_t sql_len,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     uint16_t max_candidates, uint32_t max_batch_bytes,
@@ -688,7 +688,7 @@ int32_t prdb_sdk_sql_execute_select_ordered_v1(
 }
 
 int32_t prdb_sdk_sql_execute_select_spill_v1(
-    const prdb_host_api_v6 *host, const uint8_t *schema, uint32_t schema_len,
+    const prdb_host_api_v1 *host, const uint8_t *schema, uint32_t schema_len,
     const uint8_t *sql, uint64_t sql_len,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     const prdb_sdk_sql_parameter_metadata_v1 *parameter_metadata,
@@ -703,12 +703,12 @@ int32_t prdb_sdk_sql_execute_select_spill_v1(
     prdb_sdk_value_v1 *cell_scratch, uint32_t cell_scratch_capacity,
     prdb_sdk_sql_result_row_v1_fn on_row, void *result_context) {
     if (host == NULL ||
-        host->v5.v4.v3.struct_size < sizeof(prdb_host_api_v3) ||
-        host->v5.v4.v3.abi_version != PRDB_QUERY_ABI_V3_VERSION ||
+        host->struct_size < sizeof(prdb_host_api_v1) ||
+        host->abi_version != PRDB_QUERY_ABI_VERSION ||
         host->spill_request == NULL)
         return PRDB_SDK_SQL_EXEC_INVALID_ARGUMENT;
     return execute_select_internal(
-        &host->v5.v4.v3, schema, schema_len, host, sql, sql_len, parameters,
+        host, schema, schema_len, host, sql, sql_len, parameters,
         parameter_metadata, parameter_count, max_candidates, max_batch_bytes,
         planner_response, planner_response_capacity, executor_response,
         executor_response_capacity, batch_response, batch_response_capacity,
@@ -718,7 +718,7 @@ int32_t prdb_sdk_sql_execute_select_spill_v1(
 }
 
 int32_t prdb_sdk_sql_execute_select_typed_v1(
-    const prdb_host_api_v3 *host, const uint8_t *schema, uint32_t schema_len,
+    const prdb_host_api_v1 *host, const uint8_t *schema, uint32_t schema_len,
     const uint8_t *sql, uint64_t sql_len,
     const prdb_sdk_value_v1 *parameters,
     const prdb_sdk_sql_parameter_metadata_v1 *parameter_metadata,
@@ -734,7 +734,7 @@ int32_t prdb_sdk_sql_execute_select_typed_v1(
     uint32_t cell_scratch_capacity, prdb_sdk_sql_result_row_v1_fn on_row,
     void *result_context) {
     if (host == NULL || host->struct_size < sizeof(*host) ||
-        host->abi_version != PRDB_QUERY_ABI_V3_VERSION ||
+        host->abi_version != PRDB_QUERY_ABI_VERSION ||
         host->statement_failure == NULL) {
         return PRDB_SDK_SQL_EXEC_INVALID_ARGUMENT;
     }
@@ -752,7 +752,7 @@ int32_t prdb_sdk_sql_execute_select_typed_v1(
 }
 
 int32_t prdb_sdk_sql_execute_insert_v1(
-    const prdb_host_api_v3 *host_v3, const uint8_t *schema,
+    const prdb_host_api_v1 *host_v3, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     uint8_t *planner_response, uint64_t planner_response_capacity,
@@ -770,17 +770,17 @@ int32_t prdb_sdk_sql_execute_insert_v1(
     uint64_t planner_response_len = 0;
     uint64_t executor_response_len = 0;
     int32_t status;
-    prdb_host_api_v2 base_host;
-    const prdb_host_api_v2 *host;
+    prdb_host_api_v1 base_host;
+    const prdb_host_api_v1 *host;
 
     if (host_v3 == NULL || host_v3->struct_size < sizeof(*host_v3) ||
-        host_v3->abi_version != PRDB_QUERY_ABI_V3_VERSION ||
+        host_v3->abi_version != PRDB_QUERY_ABI_VERSION ||
         host_v3->statement_failure == NULL ||
         host_v3->executor_request == NULL || host_v3->planner_request == NULL) {
         return PRDB_SDK_SQL_EXEC_INVALID_ARGUMENT;
     }
-    base_host = (prdb_host_api_v2){
-        sizeof(prdb_host_api_v2), PRDB_QUERY_ABI_V2_VERSION, host_v3->context,
+    base_host = (prdb_host_api_v1){
+        sizeof(prdb_host_api_v1), PRDB_QUERY_ABI_VERSION, host_v3->context,
         host_v3->executor_request, host_v3->planner_request,
         host_v3->write_result};
     host = &base_host;
@@ -909,7 +909,7 @@ static uint32_t insert_batch_count(
 }
 
 int32_t prdb_sdk_sql_execute_insert_batch_v1(
-    const prdb_host_api_v3 *host_v3, const uint8_t *schema,
+    const prdb_host_api_v1 *host_v3, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     uint8_t *planner_response, uint64_t planner_response_capacity,
@@ -927,17 +927,17 @@ int32_t prdb_sdk_sql_execute_insert_batch_v1(
     uint64_t planner_response_len = 0;
     uint64_t executor_response_len = 0;
     int32_t status;
-    prdb_host_api_v2 base_host;
-    const prdb_host_api_v2 *host;
+    prdb_host_api_v1 base_host;
+    const prdb_host_api_v1 *host;
 
     if (host_v3 == NULL || host_v3->struct_size < sizeof(*host_v3) ||
-        host_v3->abi_version != PRDB_QUERY_ABI_V3_VERSION ||
+        host_v3->abi_version != PRDB_QUERY_ABI_VERSION ||
         host_v3->statement_failure == NULL ||
         host_v3->executor_request == NULL || host_v3->planner_request == NULL) {
         return PRDB_SDK_SQL_EXEC_INVALID_ARGUMENT;
     }
-    base_host = (prdb_host_api_v2){
-        sizeof(prdb_host_api_v2), PRDB_QUERY_ABI_V2_VERSION, host_v3->context,
+    base_host = (prdb_host_api_v1){
+        sizeof(prdb_host_api_v1), PRDB_QUERY_ABI_VERSION, host_v3->context,
         host_v3->executor_request, host_v3->planner_request,
         host_v3->write_result};
     host = &base_host;
@@ -1109,7 +1109,7 @@ int32_t prdb_sdk_sql_execute_insert_batch_v1(
 }
 
 int32_t prdb_sdk_sql_execute_update_v1(
-    const prdb_host_api_v3 *host_v3, const uint8_t *schema,
+    const prdb_host_api_v1 *host_v3, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     uint16_t max_candidates, uint32_t max_batch_bytes,
@@ -1142,17 +1142,17 @@ int32_t prdb_sdk_sql_execute_update_v1(
     int cursor_open = 0;
     int32_t final_status = PRDB_SDK_SQL_EXEC_OK;
     int32_t status;
-    prdb_host_api_v2 base_host;
-    const prdb_host_api_v2 *host;
+    prdb_host_api_v1 base_host;
+    const prdb_host_api_v1 *host;
 
     if (host_v3 == NULL || host_v3->struct_size < sizeof(*host_v3) ||
-        host_v3->abi_version != PRDB_QUERY_ABI_V3_VERSION ||
+        host_v3->abi_version != PRDB_QUERY_ABI_VERSION ||
         host_v3->statement_failure == NULL ||
         host_v3->executor_request == NULL || host_v3->planner_request == NULL) {
         return PRDB_SDK_SQL_EXEC_INVALID_ARGUMENT;
     }
-    base_host = (prdb_host_api_v2){
-        sizeof(prdb_host_api_v2), PRDB_QUERY_ABI_V2_VERSION, host_v3->context,
+    base_host = (prdb_host_api_v1){
+        sizeof(prdb_host_api_v1), PRDB_QUERY_ABI_VERSION, host_v3->context,
         host_v3->executor_request, host_v3->planner_request,
         host_v3->write_result};
     host = &base_host;
@@ -1404,7 +1404,7 @@ int32_t prdb_sdk_sql_execute_update_v1(
 }
 
 int32_t prdb_sdk_sql_execute_delete_v1(
-    const prdb_host_api_v3 *host_v3, const uint8_t *schema,
+    const prdb_host_api_v1 *host_v3, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     uint16_t max_candidates, uint32_t max_batch_bytes,
@@ -1435,17 +1435,17 @@ int32_t prdb_sdk_sql_execute_delete_v1(
     int cursor_open = 0;
     int32_t final_status = PRDB_SDK_SQL_EXEC_OK;
     int32_t status;
-    prdb_host_api_v2 base_host;
-    const prdb_host_api_v2 *host;
+    prdb_host_api_v1 base_host;
+    const prdb_host_api_v1 *host;
 
     if (host_v3 == NULL || host_v3->struct_size < sizeof(*host_v3) ||
-        host_v3->abi_version != PRDB_QUERY_ABI_V3_VERSION ||
+        host_v3->abi_version != PRDB_QUERY_ABI_VERSION ||
         host_v3->statement_failure == NULL ||
         host_v3->executor_request == NULL || host_v3->planner_request == NULL) {
         return PRDB_SDK_SQL_EXEC_INVALID_ARGUMENT;
     }
-    base_host = (prdb_host_api_v2){
-        sizeof(prdb_host_api_v2), PRDB_QUERY_ABI_V2_VERSION, host_v3->context,
+    base_host = (prdb_host_api_v1){
+        sizeof(prdb_host_api_v1), PRDB_QUERY_ABI_VERSION, host_v3->context,
         host_v3->executor_request, host_v3->planner_request,
         host_v3->write_result};
     host = &base_host;

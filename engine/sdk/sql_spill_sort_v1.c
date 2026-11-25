@@ -29,7 +29,7 @@ static uint64_t decode_u64(const uint8_t in[8]) {
     return value;
 }
 
-static int32_t destroy_run(const prdb_host_api_v6 *host, sort_run *run) {
+static int32_t destroy_run(const prdb_host_api_v1 *host, sort_run *run) {
     if (run->stream.valid != 1) return 0;
     return prdb_sdk_spill_destroy_v1(host, &run->stream);
 }
@@ -39,7 +39,7 @@ typedef struct run_cursor {
     sort_cursor cursor;
 } run_cursor;
 
-static int32_t load_cursor_record(const prdb_host_api_v6 *host,
+static int32_t load_cursor_record(const prdb_host_api_v1 *host,
                                   run_cursor *cursor, uint32_t record_bytes) {
     uint64_t read_bytes = 0;
     int32_t status = prdb_sdk_spill_read_at_v1(
@@ -57,7 +57,7 @@ static int32_t load_cursor_record(const prdb_host_api_v6 *host,
 }
 
 static int32_t merge_runs(
-    const prdb_host_api_v6 *host, sort_run *runs, uint32_t run_count,
+    const prdb_host_api_v1 *host, sort_run *runs, uint32_t run_count,
     uint32_t row_bytes, prdb_sdk_sql_spill_sort_compare_v1_fn compare,
     void *context, sort_run *merged, prdb_sdk_sql_spill_sort_output_v1_fn output,
     prdb_sql_spill_heap_budget *heap_budget) {
@@ -228,7 +228,7 @@ static int32_t sort_run_records(
     return 0;
 }
 
-static int32_t flush_run(const prdb_host_api_v6 *host, sort_run *run,
+static int32_t flush_run(const prdb_host_api_v1 *host, sort_run *run,
                          const uint8_t *rows, const uint64_t *ordinals,
                          uint32_t count, uint32_t row_bytes,
                          prdb_sql_spill_heap_budget *heap_budget) {
@@ -254,7 +254,7 @@ static int32_t flush_run(const prdb_host_api_v6 *host, sort_run *run,
 }
 
 static int32_t spill_sort_with_budget(
-    const prdb_host_api_v6 *host, void *context, uint32_t row_bytes,
+    const prdb_host_api_v1 *host, void *context, uint32_t row_bytes,
     uint32_t memory_budget_bytes,
     prdb_sdk_sql_spill_sort_source_v1_fn source,
     prdb_sdk_sql_spill_sort_compare_v1_fn compare,
@@ -358,7 +358,7 @@ cleanup:
 }
 
 int32_t prdb_sdk_sql_spill_sort_v1(
-    const prdb_host_api_v6 *host, void *context, uint32_t row_bytes,
+    const prdb_host_api_v1 *host, void *context, uint32_t row_bytes,
     uint32_t memory_budget_bytes,
     prdb_sdk_sql_spill_sort_source_v1_fn source,
     prdb_sdk_sql_spill_sort_compare_v1_fn compare,

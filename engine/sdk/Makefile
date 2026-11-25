@@ -84,7 +84,7 @@ SDK_RELEASE ?= 1
 SDK_TARGET ?= linux-x86_64
 SDK_CPU_BASELINE ?= x86_64-v1
 SDK_RUNTIME_PROFILE ?= nixos-x86_64-glibc-2.42
-SDK_NATIVE_ABIS ?= 1,2,3,4,5,6
+SDK_NATIVE_ABIS ?= 1
 SDK_EXTRA_SHARED_OBJECTS ?=
 SDK_RELEASE_DIR := $(BUILD_DIR)/releases/$(SDK_TARGET)/$(SDK_CPU_BASELINE)/$(SDK_RUNTIME_PROFILE)/sdk-$(SDK_RELEASE)-abis$(SDK_NATIVE_ABIS)
 SDK_PIC_OBJECT_DIR := $(SDK_RELEASE_DIR)/pic
@@ -175,7 +175,7 @@ SQL_V3_CAUGHT_ERROR_OBJECT := $(BUILD_DIR)/sql-v3-caught-error.o
 SQL_V3_WRITE_READ_OBJECT := $(BUILD_DIR)/sql-v3-write-read.o
 SQL_V6_SPILL_OBJECT := $(BUILD_DIR)/sql-v6-spill.o
 SQL_V3_RESTRICTED_METADATA_OBJECT := $(BUILD_DIR)/sql-v3-restricted-metadata.o
-QUERY_ABI_GENERATED_HEADERS := $(INCLUDE_DIR)/prdb_query_abi_layout_assertions.h $(INCLUDE_DIR)/prdb_query_abi_records_v1.h $(INCLUDE_DIR)/prdb_query_abi_records_v2.h $(INCLUDE_DIR)/prdb_query_abi_records_v3.h
+QUERY_ABI_GENERATED_HEADERS := $(INCLUDE_DIR)/prdb_query_abi_layout_assertions.h $(INCLUDE_DIR)/prdb_query_abi_records_v1.h
 QUERY_ABI_V4_TEST := $(BUILD_DIR)/query-abi-v4-callbacks
 QUERY_ABI_V5_TEST := $(BUILD_DIR)/query-abi-v5-callbacks
 QUERY_ABI_V6_TEST := $(BUILD_DIR)/query-abi-v6-callbacks
@@ -183,9 +183,9 @@ SDK_OPTIMIZER_TEST := $(BUILD_DIR)/sdk-optimizer-v1
 SDK_OPTIMIZER_DELETE_TEST := $(BUILD_DIR)/sdk-optimizer-delete-v1
 SDK_OPTIMIZER_UPDATE_TEST := $(BUILD_DIR)/sdk-optimizer-update-v1
 SDK_OPTIMIZER_PLAN_TEST := $(BUILD_DIR)/sdk-optimizer-plan-v1
-QUERY_ABI_GENERATED_HEADERS += $(INCLUDE_DIR)/prdb_query_abi_records_v4.h
-QUERY_ABI_GENERATED_HEADERS += $(INCLUDE_DIR)/prdb_query_abi_records_v5.h
-QUERY_ABI_GENERATED_HEADERS += $(INCLUDE_DIR)/prdb_query_abi_records_v6.h
+QUERY_ABI_GENERATED_HEADERS +=
+QUERY_ABI_GENERATED_HEADERS +=
+QUERY_ABI_GENERATED_HEADERS +=
 RELEASE_PROFILE_DIR ?= target/release-profile
 RELEASE_PROFILE_ARCHIVE ?= target/prdb-release-profile.tar.gz
 RELEASE_PROFILE_SIGNATURE ?= $(RELEASE_PROFILE_ARCHIVE).minisig
@@ -228,22 +228,22 @@ $(SDK_SQL_JOIN_OBJECT): $(SDK_SQL_JOIN_SOURCE) $(INCLUDE_DIR)/prdb_sdk_sql_join_
 $(SDK_PLANNER_OBJECT): $(SDK_PLANNER_SOURCE) $(INCLUDE_DIR)/prdb_sdk_planner_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_v1.h $(INCLUDE_DIR)/prdb_sdk_batch_v1.h | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
 
-$(SDK_EXECUTOR_OBJECT): $(SDK_EXECUTOR_SOURCE) $(INCLUDE_DIR)/prdb_sdk_executor_v1.h $(INCLUDE_DIR)/prdb_query_abi_v2.h $(INCLUDE_DIR)/prdb_query_abi_constants.h $(QUERY_ABI_GENERATED_HEADERS) $(INCLUDE_DIR)/prdb_sdk_planner_v1.h $(INCLUDE_DIR)/prdb_sdk_batch_v1.h | $(BUILD_DIR)
+$(SDK_EXECUTOR_OBJECT): $(SDK_EXECUTOR_SOURCE) $(INCLUDE_DIR)/prdb_sdk_executor_v1.h $(INCLUDE_DIR)/prdb_query_abi_v1.h $(INCLUDE_DIR)/prdb_query_abi_constants.h $(QUERY_ABI_GENERATED_HEADERS) $(INCLUDE_DIR)/prdb_sdk_planner_v1.h $(INCLUDE_DIR)/prdb_sdk_batch_v1.h | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
 
-$(SDK_SQL_EXEC_OBJECT): $(SDK_SQL_EXEC_SOURCE) engine/sdk/sql_parameter_internal.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_dml_v1.h $(INCLUDE_DIR)/prdb_query_abi_v3.h $(INCLUDE_DIR)/prdb_query_abi_constants.h $(INCLUDE_DIR)/prdb_sdk_spill_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_spill_sort_v1.h $(QUERY_ABI_GENERATED_HEADERS) $(INCLUDE_DIR)/prdb_sdk_executor_v1.h $(INCLUDE_DIR)/prdb_sdk_planner_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_order_v1.h | $(BUILD_DIR)
+$(SDK_SQL_EXEC_OBJECT): $(SDK_SQL_EXEC_SOURCE) engine/sdk/sql_parameter_internal.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_dml_v1.h $(INCLUDE_DIR)/prdb_query_abi_v1.h $(INCLUDE_DIR)/prdb_query_abi_constants.h $(INCLUDE_DIR)/prdb_sdk_spill_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_spill_sort_v1.h $(QUERY_ABI_GENERATED_HEADERS) $(INCLUDE_DIR)/prdb_sdk_executor_v1.h $(INCLUDE_DIR)/prdb_sdk_planner_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_order_v1.h | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
 
 $(SDK_SQL_DISPATCH_OBJECT): $(SDK_SQL_DISPATCH_SOURCE) $(INCLUDE_DIR)/prdb_sdk_sql_dispatch_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_v1.h $(INCLUDE_DIR)/prdb_sdk_optimizer_plan_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_order_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_spill_sort_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_dml_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_result_v1.h $(INCLUDE_DIR)/prdb_sdk_value_v1.h $(INCLUDE_DIR)/prdb_query_abi_constants.h $(QUERY_ABI_GENERATED_HEADERS) | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
 
-$(SDK_SQL_BATCH_OBJECT): $(SDK_SQL_BATCH_SOURCE) $(INCLUDE_DIR)/prdb_sdk_sql_batch_v1.h $(INCLUDE_DIR)/prdb_query_abi_v3.h $(QUERY_ABI_GENERATED_HEADERS) | $(BUILD_DIR)
+$(SDK_SQL_BATCH_OBJECT): $(SDK_SQL_BATCH_SOURCE) $(INCLUDE_DIR)/prdb_sdk_sql_batch_v1.h $(INCLUDE_DIR)/prdb_query_abi_v1.h $(QUERY_ABI_GENERATED_HEADERS) | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
 
 $(SDK_SQL_EXEC_GROUP_OBJECT): $(SDK_SQL_EXEC_GROUP_SOURCE) engine/sdk/sql_parameter_internal.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_group_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_order_v1.h $(INCLUDE_DIR)/prdb_sdk_executor_v1.h $(INCLUDE_DIR)/prdb_sdk_optimizer_v1.h $(INCLUDE_DIR)/prdb_sdk_optimizer_plan_v1.h $(INCLUDE_DIR)/prdb_sdk_planner_v1.h | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
 
-$(SDK_SQL_EXEC_JOIN_OBJECT): $(SDK_SQL_EXEC_JOIN_SOURCE) engine/sdk/sql_parameter_internal.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_spill_join_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_join_v1.h $(INCLUDE_DIR)/prdb_sdk_executor_v1.h $(INCLUDE_DIR)/prdb_sdk_optimizer_v1.h $(INCLUDE_DIR)/prdb_sdk_optimizer_plan_v1.h $(INCLUDE_DIR)/prdb_query_abi_v5.h $(INCLUDE_DIR)/prdb_query_abi_v6.h | $(BUILD_DIR)
+$(SDK_SQL_EXEC_JOIN_OBJECT): $(SDK_SQL_EXEC_JOIN_SOURCE) engine/sdk/sql_parameter_internal.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_spill_join_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_join_v1.h $(INCLUDE_DIR)/prdb_sdk_executor_v1.h $(INCLUDE_DIR)/prdb_sdk_optimizer_v1.h $(INCLUDE_DIR)/prdb_sdk_optimizer_plan_v1.h $(INCLUDE_DIR)/prdb_query_abi_v1.h $(INCLUDE_DIR)/prdb_query_abi_v1.h | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
 
 $(SDK_SQL_EXEC_SPILL_OBJECT): $(SDK_SQL_EXEC_SPILL_SOURCE) $(INCLUDE_DIR)/prdb_sdk_sql_exec_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_spill_group_v1.h $(QUERY_ABI_GENERATED_HEADERS) | $(BUILD_DIR)
@@ -255,7 +255,7 @@ $(SDK_SQL_RESULT_OBJECT): $(SDK_SQL_RESULT_SOURCE) $(INCLUDE_DIR)/prdb_sdk_sql_r
 $(SDK_MANIFEST_OBJECT): $(SDK_MANIFEST_SOURCE) $(INCLUDE_DIR)/prdb_sdk_manifest_v1.h | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
 
-$(SDK_SPILL_OBJECT): $(SDK_SPILL_SOURCE) $(INCLUDE_DIR)/prdb_sdk_spill_v1.h $(INCLUDE_DIR)/prdb_query_abi_v6.h $(QUERY_ABI_GENERATED_HEADERS) | $(BUILD_DIR)
+$(SDK_SPILL_OBJECT): $(SDK_SPILL_SOURCE) $(INCLUDE_DIR)/prdb_sdk_spill_v1.h $(INCLUDE_DIR)/prdb_query_abi_v1.h $(QUERY_ABI_GENERATED_HEADERS) | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
 
 $(SDK_SQL_SPILL_SORT_OBJECT): $(SDK_SQL_SPILL_SORT_SOURCE) engine/sdk/sql_spill_workspace_internal.h $(INCLUDE_DIR)/prdb_sdk_sql_spill_sort_v1.h $(INCLUDE_DIR)/prdb_sdk_spill_v1.h $(QUERY_ABI_GENERATED_HEADERS) | $(BUILD_DIR)
@@ -270,10 +270,10 @@ $(SDK_SQL_SPILL_JOIN_OBJECT): $(SDK_SQL_SPILL_JOIN_SOURCE) engine/sdk/sql_spill_
 $(SDK_SCOPE_OBJECT): $(SDK_SCOPE_SOURCE) $(INCLUDE_DIR)/prdb_sdk_scope_v1.h | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
 
-$(SDK_OPTIMIZER_OBJECT): $(SDK_OPTIMIZER_SOURCE) $(INCLUDE_DIR)/prdb_sdk_optimizer_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_dml_v1.h $(INCLUDE_DIR)/prdb_query_abi_v5.h $(QUERY_ABI_GENERATED_HEADERS) | $(BUILD_DIR)
+$(SDK_OPTIMIZER_OBJECT): $(SDK_OPTIMIZER_SOURCE) $(INCLUDE_DIR)/prdb_sdk_optimizer_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_dml_v1.h $(INCLUDE_DIR)/prdb_query_abi_v1.h $(QUERY_ABI_GENERATED_HEADERS) | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
 
-$(SDK_OPTIMIZER_PLAN_OBJECT): $(SDK_OPTIMIZER_PLAN_SOURCE) $(INCLUDE_DIR)/prdb_sdk_optimizer_plan_v1.h $(INCLUDE_DIR)/prdb_sdk_optimizer_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_dml_v1.h $(INCLUDE_DIR)/prdb_query_abi_v5.h $(INCLUDE_DIR)/prdb_query_abi_payload_codecs.h | $(BUILD_DIR)
+$(SDK_OPTIMIZER_PLAN_OBJECT): $(SDK_OPTIMIZER_PLAN_SOURCE) $(INCLUDE_DIR)/prdb_sdk_optimizer_plan_v1.h $(INCLUDE_DIR)/prdb_sdk_optimizer_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_dml_v1.h $(INCLUDE_DIR)/prdb_query_abi_v1.h $(INCLUDE_DIR)/prdb_query_abi_payload_codecs.h | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
 
 $(SDK_SQL_DML_OBJECT): $(SDK_SQL_DML_SOURCE) engine/sdk/sql_internal.h | $(BUILD_DIR)
@@ -451,7 +451,7 @@ $(SDK_SQL_V23_TEST): engine/tests/fixtures/sdk_sql_select_v23.c $(SDK_ARCHIVE) $
 $(SDK_SQL_V22_TEST): engine/tests/fixtures/sdk_sql_select_v22.c $(SDK_ARCHIVE) $(INCLUDE_DIR)/prdb_sdk_sql_v1.h | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" "$<" "$(SDK_ARCHIVE)" -o "$@"
 
-$(SDK_SQL_EXEC_V19_TEST): engine/tests/fixtures/sdk_sql_execute_v19.c $(SDK_ARCHIVE) $(INCLUDE_DIR)/prdb_sdk_sql_exec_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_v1.h $(INCLUDE_DIR)/prdb_sdk_optimizer_v1.h $(INCLUDE_DIR)/prdb_sdk_optimizer_plan_v1.h $(INCLUDE_DIR)/prdb_query_abi_v5.h | $(BUILD_DIR)
+$(SDK_SQL_EXEC_V19_TEST): engine/tests/fixtures/sdk_sql_execute_v19.c $(SDK_ARCHIVE) $(INCLUDE_DIR)/prdb_sdk_sql_exec_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_v1.h $(INCLUDE_DIR)/prdb_sdk_optimizer_v1.h $(INCLUDE_DIR)/prdb_sdk_optimizer_plan_v1.h $(INCLUDE_DIR)/prdb_query_abi_v1.h | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" "$<" "$(SDK_ARCHIVE)" -o "$@"
 
 $(SDK_SQL_V18_FUZZER): engine/tests/fuzz/sql_v18_fuzz.c $(SDK_SQL_SOURCES) $(SDK_VALUE_SOURCE) $(SDK_BATCH_SOURCE) $(INCLUDE_DIR)/prdb_sdk_sql_v1.h | $(BUILD_DIR)
@@ -535,7 +535,7 @@ fuzz-sql-v24: $(SDK_SQL_V24_FUZZER)
 $(SDK_PLANNER_TEST): engine/tests/fixtures/sdk_planner_v1.c $(SDK_ARCHIVE) $(INCLUDE_DIR)/prdb_sdk_planner_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_v1.h $(INCLUDE_DIR)/prdb_sdk_batch_v1.h | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" "$<" "$(SDK_ARCHIVE)" -o "$@"
 
-$(SDK_EXECUTOR_TEST): engine/tests/fixtures/sdk_executor_v1.c $(SDK_ARCHIVE) $(INCLUDE_DIR)/prdb_sdk_executor_v1.h $(INCLUDE_DIR)/prdb_query_abi_v2.h $(INCLUDE_DIR)/prdb_query_abi_constants.h $(QUERY_ABI_GENERATED_HEADERS) | $(BUILD_DIR)
+$(SDK_EXECUTOR_TEST): engine/tests/fixtures/sdk_executor_v1.c $(SDK_ARCHIVE) $(INCLUDE_DIR)/prdb_sdk_executor_v1.h $(INCLUDE_DIR)/prdb_query_abi_v1.h $(INCLUDE_DIR)/prdb_query_abi_constants.h $(QUERY_ABI_GENERATED_HEADERS) | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" "$<" "$(SDK_ARCHIVE)" -o "$@"
 
 $(SDK_SQL_EXEC_TEST): engine/tests/fixtures/sdk_sql_execute_v2.c $(SDK_ARCHIVE) $(INCLUDE_DIR)/prdb_sdk_sql_exec_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_dispatch_v1.h $(INCLUDE_DIR)/prdb_sdk_spill_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_result_v1.h $(INCLUDE_DIR)/prdb_sdk_executor_v1.h $(INCLUDE_DIR)/prdb_sdk_planner_v1.h $(QUERY_ABI_GENERATED_HEADERS) | $(BUILD_DIR)
@@ -598,13 +598,13 @@ $(SDK_IPC_FRAME_TEST): engine/tests/fixtures/ipc_frame_v1.c engine/csrc/ipc_fram
 $(SDK_IPC_PAYLOAD_CODEC_TEST): engine/tests/fixtures/ipc_payload_codec_v1.c $(INCLUDE_DIR)/prdb_query_abi_payload_codecs.h $(INCLUDE_DIR)/prdb_query_abi_constants.h | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" "$<" -o "$@"
 
-$(QUERY_ABI_V4_TEST): engine/tests/fixtures/query_abi_v4_callbacks.c $(INCLUDE_DIR)/prdb_query_abi_v4.h $(INCLUDE_DIR)/prdb_query_abi_v6.h $(INCLUDE_DIR)/prdb_query_abi_constants.h $(QUERY_ABI_GENERATED_HEADERS) | $(BUILD_DIR)
+$(QUERY_ABI_V4_TEST): engine/tests/fixtures/query_abi_v4_callbacks.c $(INCLUDE_DIR)/prdb_query_abi_v1.h $(INCLUDE_DIR)/prdb_query_abi_v1.h $(INCLUDE_DIR)/prdb_query_abi_constants.h $(QUERY_ABI_GENERATED_HEADERS) | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" "$<" -o "$@"
 
-$(QUERY_ABI_V5_TEST): engine/tests/fixtures/query_abi_v5_callbacks.c $(INCLUDE_DIR)/prdb_query_abi_v5.h $(INCLUDE_DIR)/prdb_query_abi_v6.h $(INCLUDE_DIR)/prdb_query_abi_constants.h $(QUERY_ABI_GENERATED_HEADERS) | $(BUILD_DIR)
+$(QUERY_ABI_V5_TEST): engine/tests/fixtures/query_abi_v5_callbacks.c $(INCLUDE_DIR)/prdb_query_abi_v1.h $(INCLUDE_DIR)/prdb_query_abi_v1.h $(INCLUDE_DIR)/prdb_query_abi_constants.h $(QUERY_ABI_GENERATED_HEADERS) | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" "$<" -o "$@"
 
-$(QUERY_ABI_V6_TEST): engine/tests/fixtures/query_abi_v6_callbacks.c $(INCLUDE_DIR)/prdb_query_abi_v6.h $(INCLUDE_DIR)/prdb_query_abi_constants.h $(QUERY_ABI_GENERATED_HEADERS) | $(BUILD_DIR)
+$(QUERY_ABI_V6_TEST): engine/tests/fixtures/query_abi_v6_callbacks.c $(INCLUDE_DIR)/prdb_query_abi_v1.h $(INCLUDE_DIR)/prdb_query_abi_constants.h $(QUERY_ABI_GENERATED_HEADERS) | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" "$<" -o "$@"
 
 $(SDK_OPTIMIZER_TEST): engine/tests/fixtures/sdk_optimizer_v1.c $(SDK_ARCHIVE) $(INCLUDE_DIR)/prdb_sdk_optimizer_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_v1.h | $(BUILD_DIR)
@@ -623,7 +623,7 @@ $(SDK_OPTIMIZER_PLAN_TEST): engine/tests/fixtures/sdk_optimizer_plan_v1.c $(SDK_
 # its output as requiring an executable stack and rejects it in the worker.
 # Compile/archive with TinyCC, then use the system linker with noexecstack.
 # These untrusted artifacts are loaded only through the Rust sandbox.
-$(SQL_V3_CAUGHT_ERROR_OBJECT): engine/tests/fixtures/sql_v3_caught_error.c $(INCLUDE_DIR)/prdb_query_abi_v3.h $(INCLUDE_DIR)/prdb_query_abi_constants.h $(QUERY_ABI_GENERATED_HEADERS) $(INCLUDE_DIR)/prdb_sdk_sql_exec_v1.h | $(BUILD_DIR)
+$(SQL_V3_CAUGHT_ERROR_OBJECT): engine/tests/fixtures/sql_v3_caught_error.c $(INCLUDE_DIR)/prdb_query_abi_v1.h $(INCLUDE_DIR)/prdb_query_abi_constants.h $(QUERY_ABI_GENERATED_HEADERS) $(INCLUDE_DIR)/prdb_sdk_sql_exec_v1.h | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -fPIC -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
 
 $(SQL_V3_CAUGHT_ERROR_QUERY): $(SQL_V3_CAUGHT_ERROR_OBJECT) $(SDK_ARCHIVE) | $(BUILD_DIR)
@@ -641,28 +641,28 @@ $(SQL_V3_MISSING_DEPENDENCY_QUERY): engine/tests/fixtures/sql_missing_dependency
 	$(TCC) -Wall -Wextra -Werror -fPIC -I"$(INCLUDE_DIR)" -c "$<" -o "$@.o"
 	env -u NIX_LDFLAGS NIX_DONT_SET_RPATH=1 $(SHARED_LINKER) -shared -Wl,--no-eh-frame-hdr,-z,noexecstack,-z,defs,--hash-style=both "$@.o" "$(SDK_SQL_SHARED_LIBRARY)" "$(SQL_V3_MISSING_DEPENDENCY_LIBRARY)" -Wl,-rpath,'$$ORIGIN' -o "$@"
 
-$(SQL_V3_NETWORK_CONSTRUCTOR_OBJECT): engine/tests/fixtures/sql_v3_caught_error.c $(INCLUDE_DIR)/prdb_query_abi_v3.h $(INCLUDE_DIR)/prdb_query_abi_constants.h $(QUERY_ABI_GENERATED_HEADERS) $(INCLUDE_DIR)/prdb_sdk_sql_exec_v1.h | $(BUILD_DIR)
+$(SQL_V3_NETWORK_CONSTRUCTOR_OBJECT): engine/tests/fixtures/sql_v3_caught_error.c $(INCLUDE_DIR)/prdb_query_abi_v1.h $(INCLUDE_DIR)/prdb_query_abi_constants.h $(QUERY_ABI_GENERATED_HEADERS) $(INCLUDE_DIR)/prdb_sdk_sql_exec_v1.h | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -DPRDB_PROBE_CONSTRUCTOR_NETWORK -fPIC -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
 
 $(SQL_V3_NETWORK_CONSTRUCTOR_QUERY): $(SQL_V3_NETWORK_CONSTRUCTOR_OBJECT) $(SDK_ARCHIVE) | $(BUILD_DIR)
 	env -u NIX_LDFLAGS NIX_DONT_SET_RPATH=1 $(SHARED_LINKER) -shared -Wl,--no-eh-frame-hdr,-z,noexecstack,--hash-style=both "$<" "$(SDK_ARCHIVE)" -o "$@"
 
 # This is an untrusted query artifact; run it only with the sandbox acceptance test.
-$(SQL_V3_WRITE_READ_OBJECT): engine/tests/fixtures/sql_v3_write_read.c $(INCLUDE_DIR)/prdb_query_abi_v3.h $(INCLUDE_DIR)/prdb_query_abi_v4.h $(INCLUDE_DIR)/prdb_query_abi_constants.h $(QUERY_ABI_GENERATED_HEADERS) $(INCLUDE_DIR)/prdb_sdk_sql_dispatch_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_result_v1.h $(INCLUDE_DIR)/prdb_sdk_optimizer_plan_v1.h $(INCLUDE_DIR)/prdb_sdk_optimizer_v1.h | $(BUILD_DIR)
+$(SQL_V3_WRITE_READ_OBJECT): engine/tests/fixtures/sql_v3_write_read.c $(INCLUDE_DIR)/prdb_query_abi_v1.h $(INCLUDE_DIR)/prdb_query_abi_v1.h $(INCLUDE_DIR)/prdb_query_abi_constants.h $(QUERY_ABI_GENERATED_HEADERS) $(INCLUDE_DIR)/prdb_sdk_sql_dispatch_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_result_v1.h $(INCLUDE_DIR)/prdb_sdk_optimizer_plan_v1.h $(INCLUDE_DIR)/prdb_sdk_optimizer_v1.h | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -fPIC -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
 
 $(SQL_V3_WRITE_READ_QUERY): $(SQL_V3_WRITE_READ_OBJECT) $(SDK_SQL_SHARED_LIBRARY) | $(BUILD_DIR)
 	env -u NIX_LDFLAGS NIX_DONT_SET_RPATH=1 $(SHARED_LINKER) -shared -Wl,--no-eh-frame-hdr,-z,noexecstack,-z,defs,--hash-style=both "$<" "$(SDK_SQL_SHARED_LIBRARY)" -Wl,-rpath,'$$ORIGIN' -o "$@"
 
 # This is a focused untrusted ABI v6 artifact for confined spill acceptance.
-$(SQL_V6_SPILL_OBJECT): engine/tests/fixtures/sql_v6_spill.c $(INCLUDE_DIR)/prdb_query_abi_v6.h $(INCLUDE_DIR)/prdb_query_abi_constants.h $(QUERY_ABI_GENERATED_HEADERS) $(INCLUDE_DIR)/prdb_sdk_sql_dispatch_v1.h $(INCLUDE_DIR)/prdb_sdk_spill_v1.h | $(BUILD_DIR)
+$(SQL_V6_SPILL_OBJECT): engine/tests/fixtures/sql_v6_spill.c $(INCLUDE_DIR)/prdb_query_abi_v1.h $(INCLUDE_DIR)/prdb_query_abi_constants.h $(QUERY_ABI_GENERATED_HEADERS) $(INCLUDE_DIR)/prdb_sdk_sql_dispatch_v1.h $(INCLUDE_DIR)/prdb_sdk_spill_v1.h | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -fPIC -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
 
 $(SQL_V6_SPILL_QUERY): $(SQL_V6_SPILL_OBJECT) $(SDK_SQL_SHARED_LIBRARY) | $(BUILD_DIR)
 	env -u NIX_LDFLAGS NIX_DONT_SET_RPATH=1 $(SHARED_LINKER) -shared -Wl,--no-eh-frame-hdr,-z,noexecstack,-z,defs,--hash-style=both "$<" "$(SDK_SQL_SHARED_LIBRARY)" -Wl,-rpath,'$$ORIGIN' -o "$@"
 
 # This is an untrusted query artifact; run it only with the sandbox acceptance test.
-$(SQL_V3_RESTRICTED_METADATA_OBJECT): engine/tests/fixtures/sql_v3_restricted_metadata.c $(INCLUDE_DIR)/prdb_query_abi_v3.h $(INCLUDE_DIR)/prdb_query_abi_v4.h $(INCLUDE_DIR)/prdb_query_abi_constants.h $(QUERY_ABI_GENERATED_HEADERS) $(INCLUDE_DIR)/prdb_sdk_sql_exec_v1.h $(INCLUDE_DIR)/prdb_sdk_optimizer_plan_v1.h | $(BUILD_DIR)
+$(SQL_V3_RESTRICTED_METADATA_OBJECT): engine/tests/fixtures/sql_v3_restricted_metadata.c $(INCLUDE_DIR)/prdb_query_abi_v1.h $(INCLUDE_DIR)/prdb_query_abi_v1.h $(INCLUDE_DIR)/prdb_query_abi_constants.h $(QUERY_ABI_GENERATED_HEADERS) $(INCLUDE_DIR)/prdb_sdk_sql_exec_v1.h $(INCLUDE_DIR)/prdb_sdk_optimizer_plan_v1.h | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -fPIC -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
 
 $(SQL_V3_RESTRICTED_METADATA_QUERY): $(SQL_V3_RESTRICTED_METADATA_OBJECT) $(SDK_SQL_SHARED_LIBRARY) | $(BUILD_DIR)
@@ -670,13 +670,13 @@ $(SQL_V3_RESTRICTED_METADATA_QUERY): $(SQL_V3_RESTRICTED_METADATA_OBJECT) $(SDK_
 
 # This untrusted query deliberately bypasses the SDK and submits a forged
 # relation handle through the executor callback. Run it only in the sandbox.
-$(SQL_V3_FORGED_HANDLE_OBJECT): engine/tests/fixtures/sql_v3_forged_relation_handle.c $(INCLUDE_DIR)/prdb_query_abi_v3.h $(INCLUDE_DIR)/prdb_query_abi_constants.h $(INCLUDE_DIR)/prdb_query_abi_payload_codecs.h $(QUERY_ABI_GENERATED_HEADERS) | $(BUILD_DIR)
+$(SQL_V3_FORGED_HANDLE_OBJECT): engine/tests/fixtures/sql_v3_forged_relation_handle.c $(INCLUDE_DIR)/prdb_query_abi_v1.h $(INCLUDE_DIR)/prdb_query_abi_constants.h $(INCLUDE_DIR)/prdb_query_abi_payload_codecs.h $(QUERY_ABI_GENERATED_HEADERS) | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -fPIC -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
 
 $(SQL_V3_FORGED_HANDLE_QUERY): $(SQL_V3_FORGED_HANDLE_OBJECT) | $(BUILD_DIR)
 	env -u NIX_LDFLAGS NIX_DONT_SET_RPATH=1 $(SHARED_LINKER) -shared -Wl,--no-eh-frame-hdr,-z,noexecstack,--hash-style=both "$<" -o "$@"
 
-$(SQL_V3_FORGED_ROW_HANDLE_OBJECT): engine/tests/fixtures/sql_v3_forged_row_handle.c $(INCLUDE_DIR)/prdb_query_abi_v3.h $(INCLUDE_DIR)/prdb_query_abi_constants.h $(INCLUDE_DIR)/prdb_query_abi_payload_codecs.h $(QUERY_ABI_GENERATED_HEADERS) | $(BUILD_DIR)
+$(SQL_V3_FORGED_ROW_HANDLE_OBJECT): engine/tests/fixtures/sql_v3_forged_row_handle.c $(INCLUDE_DIR)/prdb_query_abi_v1.h $(INCLUDE_DIR)/prdb_query_abi_constants.h $(INCLUDE_DIR)/prdb_query_abi_payload_codecs.h $(QUERY_ABI_GENERATED_HEADERS) | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -fPIC -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
 
 $(SQL_V3_FORGED_ROW_HANDLE_QUERY): $(SQL_V3_FORGED_ROW_HANDLE_OBJECT) | $(BUILD_DIR)

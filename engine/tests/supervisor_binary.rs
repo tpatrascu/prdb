@@ -242,13 +242,13 @@ fn supervisor_and_gateway_binaries_commit_a_confined_submission() {
     assert!(sdk_release_dir.is_absolute());
     std::fs::write(
         &query_source,
-        "#include \"prdb_query_abi_v3.h\"\n\
-         const prdb_query_descriptor_v3_record prdb_query_descriptor_v3 = {\n\
-             sizeof(prdb_query_descriptor_v3_record), 3,\n\
-             sizeof(prdb_host_api_v3), sizeof(prdb_invocation_v3)\n\
+        "#include \"prdb_query_abi_v1.h\"\n\
+         const prdb_query_descriptor_v1_record prdb_query_descriptor_v1 = {\n\
+             sizeof(prdb_query_descriptor_v1_record), 1,\n\
+             sizeof(prdb_host_api_v1), sizeof(prdb_invocation_v1)\n\
          };\n\
-         int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,\n\
-             const prdb_invocation_v3 *invocation) {\n\
+         int32_t prdb_query_main_v1(const prdb_host_api_v1 *host,\n\
+             const prdb_invocation_v1 *invocation) {\n\
              static const uint8_t output[16384] = {0};\n\
              (void)invocation;\n\
              for (uint32_t frame = 0; frame < 1024; ++frame) {\n\
@@ -299,7 +299,7 @@ fn supervisor_and_gateway_binaries_commit_a_confined_submission() {
     let artifact = std::fs::read(&query_artifact).expect("read TinyCC query fixture");
     let manifest_value = manifest_v1_from_elf(
         &artifact,
-        3,
+        1,
         1,
         "x86_64-v1".to_owned(),
         "nixos-x86_64-glibc-2.42".to_owned(),

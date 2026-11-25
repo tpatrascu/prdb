@@ -420,16 +420,16 @@ fn runas_package_crosses_v2_tcp_gateway_and_confined_executor()
         r##"
 #include <stdint.h>
 #include <stddef.h>
-#include "prdb_query_abi_v3.h"
+#include "prdb_query_abi_v1.h"
 #include "prdb_query_abi_constants.h"
 
-const prdb_query_descriptor_v3_record prdb_query_descriptor_v3 = {
-    sizeof(prdb_query_descriptor_v3_record), 3,
-    sizeof(prdb_host_api_v3), sizeof(prdb_invocation_v3)
+const prdb_query_descriptor_v1_record prdb_query_descriptor_v1 = {
+    sizeof(prdb_query_descriptor_v1_record), 1,
+    sizeof(prdb_host_api_v1), sizeof(prdb_invocation_v1)
 };
 
-int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
-                           const prdb_invocation_v3 *invocation) {
+int32_t prdb_query_main_v1(const prdb_host_api_v1 *host,
+                           const prdb_invocation_v1 *invocation) {
     static const uint8_t request[] = {0};
     static const uint8_t denied[] = "CONTROL_OPERATIONS_DENIED";
     uint8_t response[64];
@@ -852,7 +852,7 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
         include_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("include"),
         requested_scope: scope_path.clone(),
         output_dir: package.clone(),
-        native_abi_version: 3,
+        native_abi_version: 1,
         sdk_release: 1,
         cpu_baseline: "x86_64-v1".to_owned(),
         runtime_profile: "nixos-x86_64-glibc-2.42".to_owned(),
@@ -867,7 +867,7 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
         include_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("include"),
         requested_scope: scope_path.clone(),
         output_dir: hidden_package.clone(),
-        native_abi_version: 3,
+        native_abi_version: 1,
         sdk_release: 1,
         cpu_baseline: "x86_64-v1".to_owned(),
         runtime_profile: "nixos-x86_64-glibc-2.42".to_owned(),
@@ -882,7 +882,7 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
         include_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("include"),
         requested_scope: scope_path.clone(),
         output_dir: hostile_package.clone(),
-        native_abi_version: 3,
+        native_abi_version: 1,
         sdk_release: 1,
         cpu_baseline: "x86_64-v1".to_owned(),
         runtime_profile: "nixos-x86_64-glibc-2.42".to_owned(),

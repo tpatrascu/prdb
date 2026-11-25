@@ -1085,21 +1085,6 @@ optimizer_plan_ready:
     return PRDB_QUERY_CALLBACK_OK;
 }
 
-static int32_t unused_optimizer_request(void *context,
-                                        const uint8_t *request,
-                                        uint64_t request_len,
-                                        uint8_t *response,
-                                        uint64_t capacity,
-                                        uint64_t *response_len) {
-    (void)context;
-    (void)request;
-    (void)request_len;
-    (void)response;
-    (void)capacity;
-    (void)response_len;
-    return PRDB_QUERY_CALLBACK_PROTOCOL_ERROR;
-}
-
 static int32_t executor_request(void *context, uint16_t operation,
                                 const uint8_t *request, uint64_t request_len,
                                 uint8_t *response, uint64_t capacity,

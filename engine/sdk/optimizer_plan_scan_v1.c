@@ -1,7 +1,7 @@
 #include "optimizer_plan_codec_internal.h"
 
 int32_t prdb_sdk_optimizer_validate_executor_group_count_relation_v1(
-    const prdb_host_api_v2 *host, const uint8_t *plan_payload,
+    const prdb_host_api_v1 *host, const uint8_t *plan_payload,
     uint64_t plan_payload_len, uint8_t *response,
     uint64_t response_capacity, uint64_t *response_len) {
     prdb_sdk_optimizer_group_count_plan_v1 plan = {0};
@@ -16,7 +16,7 @@ int32_t prdb_sdk_optimizer_validate_executor_group_count_relation_v1(
 }
 
 int32_t prdb_sdk_optimizer_validate_executor_composite_group_count_relation_v1(
-    const prdb_host_api_v2 *host, const uint8_t *plan_payload,
+    const prdb_host_api_v1 *host, const uint8_t *plan_payload,
     uint64_t plan_payload_len, uint8_t *response,
     uint64_t response_capacity, uint64_t *response_len) {
     prdb_sdk_optimizer_composite_group_count_plan_v1 plan = {0};
@@ -50,7 +50,7 @@ static int response_identifier(const uint8_t *bytes, uint32_t length) {
 }
 
 int32_t prdb_sdk_optimizer_validate_executor_relation_v1(
-    const prdb_host_api_v2 *host, const uint8_t *plan_payload,
+    const prdb_host_api_v1 *host, const uint8_t *plan_payload,
     uint64_t plan_payload_len, uint8_t *response,
     uint64_t response_capacity, uint64_t *response_len) {
     prdb_sdk_optimizer_plan_v1 plan = {0};
@@ -70,7 +70,7 @@ int32_t prdb_sdk_optimizer_validate_executor_relation_v1(
     int32_t plan_status;
 
     if (host == NULL || host->struct_size < sizeof(*host) ||
-        host->abi_version != PRDB_QUERY_ABI_V2_VERSION ||
+        host->abi_version != PRDB_QUERY_ABI_VERSION ||
         host->executor_request == NULL || plan_payload == NULL ||
         response == NULL || response_len == NULL ||
         response_capacity > PRDB_QUERY_MAX_IPC_RESPONSE_BYTES ||
@@ -200,7 +200,7 @@ int32_t prdb_sdk_optimizer_validate_executor_relation_v1(
 }
 
 static int32_t validate_join_relation_identity(
-    const prdb_host_api_v2 *host, const uint8_t *schema_name,
+    const prdb_host_api_v1 *host, const uint8_t *schema_name,
     uint32_t schema_name_len, const uint8_t schema_id[16],
     uint64_t schema_version,
     const prdb_sdk_optimizer_join_relation_v1 *plan_relation,
@@ -317,7 +317,7 @@ static int32_t validate_join_relation_identity(
 }
 
 int32_t prdb_sdk_optimizer_validate_executor_join_relations_v1(
-    const prdb_host_api_v2 *host, const uint8_t *plan_payload,
+    const prdb_host_api_v1 *host, const uint8_t *plan_payload,
     uint64_t plan_payload_len, uint8_t *response,
     uint64_t response_capacity, uint64_t *response_len) {
     prdb_sdk_optimizer_join_plan_v1 plan = {0};
@@ -329,7 +329,7 @@ int32_t prdb_sdk_optimizer_validate_executor_join_relations_v1(
     const prdb_sdk_optimizer_join_plan_v1 *join_plan;
     int32_t status;
     if (host == NULL || host->struct_size < sizeof(*host) ||
-        host->abi_version != PRDB_QUERY_ABI_V2_VERSION ||
+        host->abi_version != PRDB_QUERY_ABI_VERSION ||
         host->executor_request == NULL || plan_payload == NULL ||
         response == NULL || response_len == NULL ||
         response_capacity > PRDB_QUERY_MAX_IPC_RESPONSE_BYTES ||
@@ -374,7 +374,7 @@ int32_t prdb_sdk_optimizer_validate_executor_join_relations_v1(
 }
 
 int32_t prdb_sdk_optimizer_validate_executor_filtered_join_relations_v1(
-    const prdb_host_api_v2 *host, const uint8_t *plan_payload,
+    const prdb_host_api_v1 *host, const uint8_t *plan_payload,
     uint64_t plan_payload_len, uint8_t *response,
     uint64_t response_capacity, uint64_t *response_len) {
     prdb_sdk_optimizer_filtered_join_plan_v1 plan = {0};
@@ -386,7 +386,7 @@ int32_t prdb_sdk_optimizer_validate_executor_filtered_join_relations_v1(
     const prdb_sdk_optimizer_join_plan_v1 *join_plan;
     int32_t status;
     if (host == NULL || host->struct_size < sizeof(*host) ||
-        host->abi_version != PRDB_QUERY_ABI_V2_VERSION ||
+        host->abi_version != PRDB_QUERY_ABI_VERSION ||
         host->executor_request == NULL || plan_payload == NULL ||
         response == NULL || response_len == NULL ||
         response_capacity > PRDB_QUERY_MAX_IPC_RESPONSE_BYTES ||
@@ -431,7 +431,7 @@ int32_t prdb_sdk_optimizer_validate_executor_filtered_join_relations_v1(
 }
 
 int32_t prdb_sdk_optimizer_acquire_plan_relation_v1(
-    const prdb_host_api_v2 *host, const uint8_t *plan_payload,
+    const prdb_host_api_v1 *host, const uint8_t *plan_payload,
     uint64_t plan_payload_len, uint8_t *response,
     uint64_t response_capacity, uint64_t *response_len,
     prdb_sdk_executor_relation_v1 *relation_out,
@@ -487,7 +487,7 @@ int32_t prdb_sdk_optimizer_acquire_plan_relation_v1(
 }
 
 int32_t prdb_sdk_optimizer_open_plan_scan_v1(
-    const prdb_host_api_v2 *host, const uint8_t *plan_payload,
+    const prdb_host_api_v1 *host, const uint8_t *plan_payload,
     uint64_t plan_payload_len, uint8_t *relation_response,
     uint64_t relation_response_capacity, uint64_t *relation_response_len,
     uint8_t *scan_response, uint64_t scan_response_capacity,
@@ -690,7 +690,7 @@ static int32_t consume_scan_batch_internal(
 }
 
 static int32_t consume_index_ranges_internal(
-    const prdb_host_api_v2 *host, prdb_sdk_optimizer_scan_state_v1 *state,
+    const prdb_host_api_v1 *host, prdb_sdk_optimizer_scan_state_v1 *state,
     const prdb_sdk_index_ranges_v1 *ranges, uint32_t relation_column_count,
     uint16_t max_candidates, const prdb_sdk_optimizer_plan_v1 *plan,
     const prdb_sdk_optimizer_filter_v1 *filter,
@@ -857,7 +857,7 @@ int32_t prdb_sdk_optimizer_consume_plan_batch_v1(
 }
 
 PRDB_SDK_INTERNAL int32_t prdb_sdk_internal_execute_unfiltered_plan_internal(
-    const prdb_host_api_v2 *host, const uint8_t *plan_payload,
+    const prdb_host_api_v1 *host, const uint8_t *plan_payload,
     uint64_t plan_payload_len, uint16_t max_candidates,
     uint16_t max_index_candidates,
     uint32_t max_batch_bytes, uint8_t *relation_response,

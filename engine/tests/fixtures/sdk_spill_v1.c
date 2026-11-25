@@ -40,8 +40,8 @@ static int32_t mock_spill(void *context, uint16_t operation,
 
 int main(void) {
     mock_state state = {0};
-    prdb_host_api_v6 host = {0};
-    host.v5.v4.v3.context = &state;
+    prdb_host_api_v1 host = {0};
+    host.context = &state;
     host.spill_request = mock_spill;
     prdb_sdk_spill_stream_v1 stream;
     uint8_t bytes[8] = {0};

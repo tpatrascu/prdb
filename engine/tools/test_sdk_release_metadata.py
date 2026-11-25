@@ -46,7 +46,7 @@ class SdkReleaseMetadataTests(unittest.TestCase):
                 "--runtime-profile",
                 "nixos-x86_64-glibc-2.42",
                 "--native-abis",
-                "1,2,3,4,5,6",
+                "1",
                 *extra,
             ],
             check=False,
@@ -72,7 +72,7 @@ class SdkReleaseMetadataTests(unittest.TestCase):
             self.assertEqual(metadata["target"], "linux-x86_64")
             self.assertEqual(metadata["cpu_baseline"], "x86_64-v1")
             self.assertEqual(metadata["runtime_profile"], "nixos-x86_64-glibc-2.42")
-            self.assertEqual(metadata["native_abis"], [1, 2, 3, 4, 5, 6])
+            self.assertEqual(metadata["native_abis"], [1])
             self.assertEqual(metadata["needed"], sorted(metadata["needed"]))
             self.assertEqual(metadata_bytes, (json.dumps(
                 metadata, sort_keys=True, separators=(",", ":")

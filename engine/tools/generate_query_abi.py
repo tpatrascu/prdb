@@ -17,11 +17,6 @@ C_PAYLOAD_CODECS_OUTPUT = ROOT / "include" / "prdb_query_abi_payload_codecs.h"
 RUST_RECORDS_OUTPUT = ROOT / "src" / "query_abi_records.rs"
 C_RECORD_OUTPUTS = {
     "1": ROOT / "include" / "prdb_query_abi_records_v1.h",
-    "2": ROOT / "include" / "prdb_query_abi_records_v2.h",
-    "3": ROOT / "include" / "prdb_query_abi_records_v3.h",
-    "4": ROOT / "include" / "prdb_query_abi_records_v4.h",
-    "5": ROOT / "include" / "prdb_query_abi_records_v5.h",
-    "6": ROOT / "include" / "prdb_query_abi_records_v6.h",
 }
 
 

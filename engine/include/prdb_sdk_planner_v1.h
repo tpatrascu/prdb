@@ -2,7 +2,7 @@
 #define PRDB_SDK_PLANNER_V1_H
 
 #include "prdb_sdk_sql_v1.h"
-#include "prdb_query_abi_v2.h"
+#include "prdb_query_abi_v1.h"
 
 #define PRDB_SDK_PLANNER_ABI_V1_VERSION UINT32_C(1)
 #define PRDB_SDK_PLANNER_WIRE_V1_VERSION UINT16_C(1)
@@ -50,7 +50,7 @@ int32_t prdb_sdk_planner_decode_relation_v1(
 /* Submit an explicitly qualified name through the planner host channel,
  * decode its authorized shape, and retain the planner-only handle. */
 int32_t prdb_sdk_planner_describe_relation_v1(
-    const prdb_host_api_v2 *host,
+    const prdb_host_api_v1 *host,
     const uint8_t *schema, uint32_t schema_len,
     const uint8_t *relation_name, uint32_t relation_name_len,
     uint8_t *response, uint64_t response_capacity, uint64_t *response_len,

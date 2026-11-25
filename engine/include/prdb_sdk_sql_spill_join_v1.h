@@ -43,7 +43,7 @@ typedef int32_t (*prdb_sdk_sql_spill_join_output_v1_fn)(
  * cancellation callback is mandatory and polled before input and throughout
  * pair comparison. Source callbacks must poll while producing records. */
 int32_t prdb_sdk_sql_spill_hash_join_v1(
-    const prdb_host_api_v6 *host, uint32_t record_bytes,
+    const prdb_host_api_v1 *host, uint32_t record_bytes,
     prdb_sdk_sql_spill_join_source_v1_fn left_source,
     void *left_source_context,
     prdb_sdk_sql_spill_join_source_v1_fn right_source,

@@ -157,12 +157,12 @@ static int32_t output_groups(void *context, const uint8_t *bytes,
 }
 
 int main(void) {
-    prdb_host_api_v6 host = {0};
+    prdb_host_api_v1 host = {0};
     fixture state = {0};
     prdb_sql_spill_heap_budget exhausted_budget = {
         PRDB_SDK_SQL_SPILL_SORT_MAX_WORKSPACE_BYTES,
         PRDB_SDK_SQL_SPILL_SORT_MAX_WORKSPACE_BYTES};
-    host.v5.v4.v3.context = &state;
+    host.context = &state;
     host.spill_request = mock_spill;
     assert(prdb_sql_spill_heap_alloc(&exhausted_budget, 1) == NULL);
     assert(exhausted_budget.requested_bytes ==
@@ -172,13 +172,13 @@ int main(void) {
                source_rows, compare_rows, output_rows) == 0);
     assert(state.outputs == 257);
     memset(&state, 0, sizeof(state));
-    host.v5.v4.v3.context = &state;
+    host.context = &state;
     assert(prdb_sdk_sql_spill_group_count_v1(
                &host, &state, sizeof(row), 8 * (sizeof(row) + 8),
                source_rows, compare_rows, output_groups) == 0);
     assert(state.groups == 19 && state.previous_group_key == 18);
     memset(&state, 0, sizeof(state));
-    host.v5.v4.v3.context = &state;
+    host.context = &state;
     state.fail_group_output_at = 3;
     assert(prdb_sdk_sql_spill_group_count_v1(
                &host, &state, sizeof(row), 8 * (sizeof(row) + 8),
@@ -186,7 +186,7 @@ int main(void) {
     for (unsigned index = 0; index < 16; ++index)
         assert(state.streams[index].live == 0);
     memset(&state, 0, sizeof(state));
-    host.v5.v4.v3.context = &state;
+    host.context = &state;
     state.fail_source_at = 31;
     assert(prdb_sdk_sql_spill_group_count_v1(
                &host, &state, sizeof(row), 8 * (sizeof(row) + 8),

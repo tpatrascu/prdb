@@ -125,8 +125,8 @@ systemd-run --user --wait --pipe --collect \
     export PRDB_TEST_SHARED_SQL_QUERY_ARTIFACT="$PRDB_TEST_RUN_DIR/queries/sql-v3-shared-library.so"
     export PRDB_TEST_SHARED_SQL_LOAD_FAILURE_ARTIFACT="$PRDB_TEST_RUN_DIR/queries/sql-v3-missing-dependency.so"
     export PRDB_TEST_EXTRA_ALLOWED_DEPENDENCY=libprdb_missing.so.1
-    export PRDB_TEST_SDK_RELEASE_DIR="$PWD/target/sdk-v1/hostile-sdk/releases/linux-x86_64/x86_64-v1/nixos-x86_64-glibc-2.42/sdk-1-abis1,2,3,4,5,6"
-    export PRDB_TEST_INSTALLED_SDK_RELEASE_DIR="$PWD/target/release-profile/sdk/releases/linux-x86_64/x86_64-v1/nixos-x86_64-glibc-2.42/sdk-1-abis1,2,3,4,5,6"
+    export PRDB_TEST_SDK_RELEASE_DIR="$PWD/target/sdk-v1/hostile-sdk/releases/linux-x86_64/x86_64-v1/nixos-x86_64-glibc-2.42/sdk-1-abis1"
+    export PRDB_TEST_INSTALLED_SDK_RELEASE_DIR="$PWD/target/release-profile/sdk/releases/linux-x86_64/x86_64-v1/nixos-x86_64-glibc-2.42/sdk-1-abis1"
     export PRDB_TEST_NETWORK_CONSTRUCTOR_ARTIFACT="$PRDB_TEST_RUN_DIR/queries/sql-v3-network-constructor.so"
     export PRDB_TEST_FORGED_HANDLE_QUERY_ARTIFACT="$PRDB_TEST_RUN_DIR/queries/sql-v3-forged-relation-handle.so"
     export PRDB_TEST_FORGED_ROW_HANDLE_QUERY_ARTIFACT="$PRDB_TEST_RUN_DIR/queries/sql-v3-forged-row-handle.so"

@@ -290,8 +290,8 @@ pub(super) fn storage_manager_runtime_and_metadata_reads_enforce_authorization()
         )
         .into());
     }
-    let sdk_release_dir = sdk_build_dir
-        .join("releases/linux-x86_64/x86_64-v1/nixos-glibc-2.42/sdk-1-abis1,2,3,4,5,6");
+    let sdk_release_dir =
+        sdk_build_dir.join("releases/linux-x86_64/x86_64-v1/nixos-glibc-2.42/sdk-1-abis1");
     let sdk_metadata = std::fs::read(sdk_release_dir.join("sdk-release.json"))?;
     let sdk_library = std::fs::read(sdk_release_dir.join("libprdb_sql.so.1"))?;
     let sdk_repository = std::sync::Arc::new(

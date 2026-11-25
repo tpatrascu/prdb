@@ -1039,7 +1039,7 @@ fn parse_release_record(bytes: &[u8]) -> Result<ReleaseRecord, SdkRegistryError>
         || record.soname != format!("libprdb_sql.so.{sdk_release}")
         || library_name != record.soname
         || record.native_abis.is_empty()
-        || record.native_abis.iter().any(|abi| !(1..=6).contains(abi))
+        || record.native_abis.iter().any(|abi| *abi != 1)
         || record.native_abis.windows(2).any(|pair| pair[0] >= pair[1])
         || record.needed.windows(2).any(|pair| pair[0] >= pair[1])
         || record

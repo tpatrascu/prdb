@@ -540,8 +540,8 @@ int main(void) {
         prdb_sdk_sql_column_shape_v1 planner_columns[9] = {{0}};
         prdb_sdk_sql_column_shape_v1 executor_columns[9] = {{0}};
         prdb_sdk_value_v1 cell_scratch[9] = {{0}};
-        prdb_host_api_v3 host = {
-            sizeof(host), PRDB_QUERY_ABI_V3_VERSION, &mock,
+        prdb_host_api_v1 host = {
+            sizeof(host), PRDB_QUERY_ABI_VERSION, &mock,
             executor_request, planner_request, NULL, statement_failure};
         group_capture capture = {0};
         int32_t status;
@@ -582,8 +582,8 @@ int main(void) {
         prdb_sdk_sql_column_shape_v1 planner_columns[9] = {{0}};
         prdb_sdk_sql_column_shape_v1 executor_columns[9] = {{0}};
         prdb_sdk_value_v1 cell_scratch[9] = {{0}};
-        prdb_host_api_v3 host = {
-            sizeof(host), PRDB_QUERY_ABI_V3_VERSION, &mock,
+        prdb_host_api_v1 host = {
+            sizeof(host), PRDB_QUERY_ABI_VERSION, &mock,
             executor_request, planner_request, NULL, statement_failure};
         group_capture capture = {0};
         capture.mock = &mock;

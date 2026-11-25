@@ -2172,14 +2172,14 @@ int32_t prdb_sdk_optimizer_decode_response_v1(
 }
 
 int32_t prdb_sdk_optimizer_submit_select_v1(
-    const prdb_host_api_v4 *host, const uint8_t *request, uint64_t request_len,
+    const prdb_host_api_v1 *host, const uint8_t *request, uint64_t request_len,
     uint8_t *response, uint64_t response_capacity, uint64_t *response_len,
     prdb_sdk_optimizer_response_v1 *out, uint32_t out_capacity) {
     int32_t callback_status;
 
-    if (host == NULL || host->v3.struct_size != sizeof(prdb_host_api_v3) ||
-        host->v3.abi_version != PRDB_QUERY_ABI_V3_VERSION ||
-        host->v3.context == NULL || host->optimizer_request == NULL ||
+    if (host == NULL || host->struct_size != sizeof(prdb_host_api_v1) ||
+        host->abi_version != PRDB_QUERY_ABI_VERSION ||
+        host->context == NULL || host->optimizer_request == NULL ||
         request_len == 0 || request == NULL ||
         request_len > OPTIMIZER_REQUEST_MAX_BYTES || response_len == NULL ||
         response_capacity > PRDB_QUERY_MAX_IPC_REQUEST_BYTES ||
@@ -2192,8 +2192,8 @@ int32_t prdb_sdk_optimizer_submit_select_v1(
                    : PRDB_SDK_OPTIMIZER_RESULT_INVALID_ARGUMENT;
     }
     callback_status = host->optimizer_request(
-        host->v3.context, request, request_len, response, response_capacity,
-        response_len);
+        host->context, PRDB_IPC_OP_OPTIMIZE_SELECT, request, request_len,
+        response, response_capacity, response_len);
     if (callback_status == PRDB_QUERY_CALLBACK_RESPONSE_TOO_SMALL) {
         if (*response_len > PRDB_QUERY_MAX_IPC_REQUEST_BYTES) {
             return PRDB_SDK_OPTIMIZER_RESULT_INVALID_RESPONSE;
@@ -2214,14 +2214,13 @@ int32_t prdb_sdk_optimizer_submit_select_v1(
 }
 
 int32_t prdb_sdk_optimizer_submit_delete_v1(
-    const prdb_host_api_v5 *host, const uint8_t *request, uint64_t request_len,
+    const prdb_host_api_v1 *host, const uint8_t *request, uint64_t request_len,
     uint8_t *response, uint64_t response_capacity, uint64_t *response_len,
     prdb_sdk_optimizer_response_v1 *out, uint32_t out_capacity) {
     int32_t callback_status;
-    if (host == NULL || host->v4.v3.struct_size != sizeof(prdb_host_api_v3) ||
-        host->v4.v3.abi_version != PRDB_QUERY_ABI_V3_VERSION ||
-        host->v4.v3.context == NULL || host->v4.optimizer_request == NULL ||
-        host->optimizer_request == NULL || request_len == 0 || request == NULL ||
+    if (host == NULL || host->struct_size != sizeof(prdb_host_api_v1) ||
+        host->abi_version != PRDB_QUERY_ABI_VERSION ||
+        host->context == NULL || host->optimizer_request == NULL || request_len == 0 || request == NULL ||
         request_len > OPTIMIZER_REQUEST_MAX_BYTES || response_len == NULL ||
         response_capacity > PRDB_QUERY_MAX_IPC_REQUEST_BYTES ||
         (response_capacity != 0 && response == NULL) || out == NULL ||
@@ -2233,7 +2232,7 @@ int32_t prdb_sdk_optimizer_submit_delete_v1(
                    : PRDB_SDK_OPTIMIZER_RESULT_INVALID_ARGUMENT;
     }
     callback_status = host->optimizer_request(
-        host->v4.v3.context, PRDB_IPC_OP_OPTIMIZE_DELETE, request, request_len,
+        host->context, PRDB_IPC_OP_OPTIMIZE_DELETE, request, request_len,
         response, response_capacity, response_len);
     if (callback_status == PRDB_QUERY_CALLBACK_RESPONSE_TOO_SMALL) {
         if (*response_len > PRDB_QUERY_MAX_IPC_REQUEST_BYTES)
@@ -2251,14 +2250,13 @@ int32_t prdb_sdk_optimizer_submit_delete_v1(
 }
 
 int32_t prdb_sdk_optimizer_submit_update_v1(
-    const prdb_host_api_v5 *host, const uint8_t *request, uint64_t request_len,
+    const prdb_host_api_v1 *host, const uint8_t *request, uint64_t request_len,
     uint8_t *response, uint64_t response_capacity, uint64_t *response_len,
     prdb_sdk_optimizer_response_v1 *out, uint32_t out_capacity) {
     int32_t callback_status;
-    if (host == NULL || host->v4.v3.struct_size != sizeof(prdb_host_api_v3) ||
-        host->v4.v3.abi_version != PRDB_QUERY_ABI_V3_VERSION ||
-        host->v4.v3.context == NULL || host->v4.optimizer_request == NULL ||
-        host->optimizer_request == NULL || request_len == 0 || request == NULL ||
+    if (host == NULL || host->struct_size != sizeof(prdb_host_api_v1) ||
+        host->abi_version != PRDB_QUERY_ABI_VERSION ||
+        host->context == NULL || host->optimizer_request == NULL || request_len == 0 || request == NULL ||
         request_len > OPTIMIZER_REQUEST_MAX_BYTES || response_len == NULL ||
         response_capacity > PRDB_QUERY_MAX_IPC_REQUEST_BYTES ||
         (response_capacity != 0 && response == NULL) || out == NULL ||
@@ -2270,7 +2268,7 @@ int32_t prdb_sdk_optimizer_submit_update_v1(
                    : PRDB_SDK_OPTIMIZER_RESULT_INVALID_ARGUMENT;
     }
     callback_status = host->optimizer_request(
-        host->v4.v3.context, PRDB_IPC_OP_OPTIMIZE_UPDATE, request, request_len,
+        host->context, PRDB_IPC_OP_OPTIMIZE_UPDATE, request, request_len,
         response, response_capacity, response_len);
     if (callback_status == PRDB_QUERY_CALLBACK_RESPONSE_TOO_SMALL) {
         if (*response_len > PRDB_QUERY_MAX_IPC_REQUEST_BYTES)
@@ -2288,15 +2286,14 @@ int32_t prdb_sdk_optimizer_submit_update_v1(
 }
 
 int32_t prdb_sdk_optimizer_submit_join_select_v1(
-    const prdb_host_api_v5 *host, const uint8_t *request,
+    const prdb_host_api_v1 *host, const uint8_t *request,
     uint64_t request_len, uint8_t *response, uint64_t response_capacity,
     uint64_t *response_len, prdb_sdk_optimizer_response_v1 *out,
     uint32_t out_capacity) {
     int32_t callback_status;
-    if (host == NULL || host->v4.v3.struct_size != sizeof(prdb_host_api_v3) ||
-        host->v4.v3.abi_version != PRDB_QUERY_ABI_V3_VERSION ||
-        host->v4.v3.context == NULL || host->v4.optimizer_request == NULL ||
-        host->optimizer_request == NULL || request_len == 0 || request == NULL ||
+    if (host == NULL || host->struct_size != sizeof(prdb_host_api_v1) ||
+        host->abi_version != PRDB_QUERY_ABI_VERSION ||
+        host->context == NULL || host->optimizer_request == NULL || request_len == 0 || request == NULL ||
         request_len > OPTIMIZER_REQUEST_MAX_BYTES || response_len == NULL ||
         response_capacity > PRDB_QUERY_MAX_IPC_REQUEST_BYTES ||
         (response_capacity != 0 && response == NULL) || out == NULL ||
@@ -2308,7 +2305,7 @@ int32_t prdb_sdk_optimizer_submit_join_select_v1(
                    : PRDB_SDK_OPTIMIZER_RESULT_INVALID_ARGUMENT;
     }
     callback_status = host->optimizer_request(
-        host->v4.v3.context, PRDB_IPC_OP_OPTIMIZE_JOIN_SELECT, request,
+        host->context, PRDB_IPC_OP_OPTIMIZE_JOIN_SELECT, request,
         request_len, response, response_capacity, response_len);
     if (callback_status == PRDB_QUERY_CALLBACK_RESPONSE_TOO_SMALL) {
         if (*response_len > PRDB_QUERY_MAX_IPC_REQUEST_BYTES)
@@ -2326,15 +2323,14 @@ int32_t prdb_sdk_optimizer_submit_join_select_v1(
 }
 
 int32_t prdb_sdk_optimizer_submit_group_count_v1(
-    const prdb_host_api_v5 *host, const uint8_t *request,
+    const prdb_host_api_v1 *host, const uint8_t *request,
     uint64_t request_len, uint8_t *response, uint64_t response_capacity,
     uint64_t *response_len, prdb_sdk_optimizer_response_v1 *out,
     uint32_t out_capacity) {
     int32_t callback_status;
-    if (host == NULL || host->v4.v3.struct_size != sizeof(prdb_host_api_v3) ||
-        host->v4.v3.abi_version != PRDB_QUERY_ABI_V3_VERSION ||
-        host->v4.v3.context == NULL || host->v4.optimizer_request == NULL ||
-        host->optimizer_request == NULL || request_len == 0 || request == NULL ||
+    if (host == NULL || host->struct_size != sizeof(prdb_host_api_v1) ||
+        host->abi_version != PRDB_QUERY_ABI_VERSION ||
+        host->context == NULL || host->optimizer_request == NULL || request_len == 0 || request == NULL ||
         request_len > OPTIMIZER_REQUEST_MAX_BYTES || response_len == NULL ||
         response_capacity > PRDB_QUERY_MAX_IPC_REQUEST_BYTES ||
         (response_capacity != 0 && response == NULL) || out == NULL ||
@@ -2346,7 +2342,7 @@ int32_t prdb_sdk_optimizer_submit_group_count_v1(
                    : PRDB_SDK_OPTIMIZER_RESULT_INVALID_ARGUMENT;
     }
     callback_status = host->optimizer_request(
-        host->v4.v3.context, PRDB_IPC_OP_OPTIMIZE_GROUP_COUNT, request,
+        host->context, PRDB_IPC_OP_OPTIMIZE_GROUP_COUNT, request,
         request_len, response, response_capacity, response_len);
     if (callback_status == PRDB_QUERY_CALLBACK_RESPONSE_TOO_SMALL) {
         if (*response_len > PRDB_QUERY_MAX_IPC_REQUEST_BYTES)

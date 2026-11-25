@@ -358,9 +358,9 @@ static int test_statement_dispatch_routes_supported_dml(void) {
         "HAVING COUNT(*) >= 2 AND SUM(score) >= 4.50",
     };
     dispatch_test_context context = {0};
-    prdb_host_api_v3 host = {0};
+    prdb_host_api_v1 host = {0};
     host.struct_size = sizeof(host);
-    host.abi_version = PRDB_QUERY_ABI_V3_VERSION;
+    host.abi_version = PRDB_QUERY_ABI_VERSION;
     host.context = &context;
     host.executor_request = unused_executor_request;
     host.planner_request = fail_planner_request;
@@ -393,8 +393,8 @@ static int test_dispatch_insert_normalizes_signed_parameter(void) {
         0, 0, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0, 0, 0,
         0, 0, 0, 4, 0xd6, 0xff, 0xff, 0xff};
     dispatch_test_context context = {0};
-    prdb_host_api_v3 host = {
-        sizeof(host), PRDB_QUERY_ABI_V3_VERSION, &context,
+    prdb_host_api_v1 host = {
+        sizeof(host), PRDB_QUERY_ABI_VERSION, &context,
         unused_executor_request, fail_planner_request, discard_result,
         count_statement_failure};
     context.group_success = 1;
@@ -413,7 +413,7 @@ static int test_dispatch_grouped_select_emits_sqlr(void) {
         "SELECT id, score, SUM(score) FROM widgets GROUP BY id, score "
         "HAVING COUNT(*) >= 2 AND SUM(score) >= 4";
     dispatch_test_context context = {0};
-    prdb_host_api_v3 host = {0};
+    prdb_host_api_v1 host = {0};
     uint32_t offset = 0;
     uint16_t name_len;
 
@@ -424,7 +424,7 @@ static int test_dispatch_grouped_select_emits_sqlr(void) {
         context.executor_reply, 6, 0x22);
     context.batch_reply_len = make_group_rows(context.batch_reply);
     host.struct_size = sizeof(host);
-    host.abi_version = PRDB_QUERY_ABI_V3_VERSION;
+    host.abi_version = PRDB_QUERY_ABI_VERSION;
     host.context = &context;
     host.executor_request = unused_executor_request;
     host.planner_request = fail_planner_request;
@@ -489,7 +489,7 @@ static int test_dispatch_grouped_select_emits_sqlr(void) {
 static int test_dispatch_single_key_grouped_select_emits_sqlr(
     const uint8_t *sql, uint64_t sql_len) {
     dispatch_test_context context = {0};
-    prdb_host_api_v3 host = {0};
+    prdb_host_api_v1 host = {0};
     uint32_t offset = 0;
     uint16_t name_len;
 
@@ -500,7 +500,7 @@ static int test_dispatch_single_key_grouped_select_emits_sqlr(
         context.executor_reply, 6, 0x22);
     context.batch_reply_len = make_group_rows(context.batch_reply);
     host.struct_size = sizeof(host);
-    host.abi_version = PRDB_QUERY_ABI_V3_VERSION;
+    host.abi_version = PRDB_QUERY_ABI_VERSION;
     host.context = &context;
     host.executor_request = unused_executor_request;
     host.planner_request = fail_planner_request;
@@ -586,8 +586,8 @@ static int test_grouped_parameter_metadata(void) {
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
         dispatch_test_context context = {0};
-        prdb_host_api_v3 host = {
-            sizeof(host), PRDB_QUERY_ABI_V3_VERSION, &context,
+        prdb_host_api_v1 host = {
+            sizeof(host), PRDB_QUERY_ABI_VERSION, &context,
             unused_executor_request, fail_planner_request, discard_result,
             count_statement_failure};
         parameters[11] = cases[index].type;
@@ -643,8 +643,8 @@ static int test_join_parameter_metadata(void) {
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
         dispatch_test_context context = {0};
-        prdb_host_api_v3 host = {
-            sizeof(host), PRDB_QUERY_ABI_V3_VERSION, &context,
+        prdb_host_api_v1 host = {
+            sizeof(host), PRDB_QUERY_ABI_VERSION, &context,
             join_executor_request, fail_planner_request, discard_result,
             count_statement_failure};
         parameters[11] = cases[index].type;
@@ -690,7 +690,7 @@ static int test_dispatch_filtered_join_emits_sqlr(void) {
         0, 0, 0, 4, 3, 0, 0, 0
     };
     dispatch_test_context context = {0};
-    prdb_host_api_v3 host = {0};
+    prdb_host_api_v1 host = {0};
     int32_t status;
     uint32_t offset = 0;
     uint16_t name_len;
@@ -702,7 +702,7 @@ static int test_dispatch_filtered_join_emits_sqlr(void) {
         context.executor_reply, 6, 0x22);
     context.batch_reply_len = make_group_rows(context.batch_reply);
     host.struct_size = sizeof(host);
-    host.abi_version = PRDB_QUERY_ABI_V3_VERSION;
+    host.abi_version = PRDB_QUERY_ABI_VERSION;
     host.context = &context;
     host.executor_request = join_executor_request;
     host.planner_request = fail_planner_request;
@@ -765,7 +765,7 @@ static int test_dispatch_single_key_join_emits_sqlr(void) {
         "SELECT lefts.id, rights.score FROM lefts INNER JOIN rights "
         "ON lefts.id = rights.id LIMIT 1";
     dispatch_test_context context = {0};
-    prdb_host_api_v3 host = {0};
+    prdb_host_api_v1 host = {0};
     uint32_t offset = 0;
     uint16_t name_len;
 
@@ -782,7 +782,7 @@ static int test_dispatch_single_key_join_emits_sqlr(void) {
         context.right_executor_reply, 6, 0x23, 0x22, "rights");
     context.batch_reply_len = make_group_rows(context.batch_reply);
     host.struct_size = sizeof(host);
-    host.abi_version = PRDB_QUERY_ABI_V3_VERSION;
+    host.abi_version = PRDB_QUERY_ABI_VERSION;
     host.context = &context;
     host.executor_request = join_executor_request;
     host.planner_request = join_planner_request;
@@ -888,8 +888,8 @@ static int test_dispatch_bounds_query_heap(void) {
     static const uint8_t oversized_parameters[] = {
         'P', 'S', 'P', '1', 0xff, 0xff, 0, 0};
     dispatch_test_context context = {0};
-    prdb_host_api_v3 host = {
-        sizeof(host), PRDB_QUERY_ABI_V3_VERSION, &context,
+    prdb_host_api_v1 host = {
+        sizeof(host), PRDB_QUERY_ABI_VERSION, &context,
         unused_executor_request, fail_planner_request, discard_result,
         count_statement_failure};
     int32_t status = prdb_sdk_sql_run_v1(

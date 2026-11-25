@@ -26,7 +26,7 @@ pub struct ArtifactManifestV1 {
 /// Encode a canonical PMF1 manifest. Dependencies must already be sorted in
 /// bytewise order and unique so the output has one representation per value.
 pub fn encode_manifest_v1(manifest: &ArtifactManifestV1) -> Result<Vec<u8>, ManifestError> {
-    if !(1..=6).contains(&manifest.native_abi_version) {
+    if manifest.native_abi_version != 1 {
         return Err(ManifestError::UnsupportedAbi);
     }
     let (expected_descriptor, expected_entry) = abi_symbols(manifest.native_abi_version);
@@ -105,7 +105,7 @@ pub fn manifest_v1_from_elf(
     runtime_profile: String,
     compiler_identity: String,
 ) -> Result<ArtifactManifestV1, ManifestError> {
-    if !(1..=6).contains(&native_abi_version) {
+    if native_abi_version != 1 {
         return Err(ManifestError::UnsupportedAbi);
     }
     let (descriptor_symbol, entry_point_symbol) = abi_symbols(native_abi_version);
@@ -320,7 +320,7 @@ pub fn decode_manifest_v1(bytes: &[u8]) -> Result<ArtifactManifestV1, ManifestEr
         return Err(ManifestError::UnsupportedTarget);
     }
     let abi = bytes[6];
-    if !(1..=6).contains(&abi) || bytes[7] != 0 {
+    if abi != 1 || bytes[7] != 0 {
         return Err(ManifestError::UnsupportedAbi);
     }
     let protocol_major = read_u16(bytes, 8)?;
@@ -397,11 +397,6 @@ pub fn decode_manifest_v1(bytes: &[u8]) -> Result<ArtifactManifestV1, ManifestEr
 fn abi_symbols(abi: u8) -> (&'static str, &'static str) {
     match abi {
         1 => ("prdb_query_descriptor_v1", "prdb_query_main_v1"),
-        2 => ("prdb_query_descriptor_v2", "prdb_query_main_v2"),
-        3 => ("prdb_query_descriptor_v3", "prdb_query_main_v3"),
-        4 => ("prdb_query_descriptor_v4", "prdb_query_main_v4"),
-        5 => ("prdb_query_descriptor_v5", "prdb_query_main_v5"),
-        6 => ("prdb_query_descriptor_v6", "prdb_query_main_v6"),
         _ => unreachable!("ABI was range-checked"),
     }
 }
@@ -978,13 +973,13 @@ mod tests {
 
     fn manifest() -> ArtifactManifestV1 {
         ArtifactManifestV1 {
-            native_abi_version: 3,
+            native_abi_version: 1,
             sdk_release: 1,
             cpu_baseline: "x86_64_v1".to_owned(),
             runtime_profile: "glibc_2_31".to_owned(),
             compiler_identity: "TinyCC-0.9.27".to_owned(),
-            descriptor_symbol: "prdb_query_descriptor_v3".to_owned(),
-            entry_point_symbol: "prdb_query_main_v3".to_owned(),
+            descriptor_symbol: "prdb_query_descriptor_v1".to_owned(),
+            entry_point_symbol: "prdb_query_main_v1".to_owned(),
             dependencies: vec!["libc.so.6".to_owned(), "libm.so.6".to_owned()],
         }
     }
@@ -1019,7 +1014,7 @@ mod tests {
         assert_eq!(
             manifest_v1_from_elf(
                 &[],
-                3,
+                1,
                 1,
                 "x86_64_v1".to_owned(),
                 "test_runtime".to_owned(),
@@ -1143,7 +1138,7 @@ mod tests {
     fn elf_with_dependencies(dependencies: &[&str]) -> Vec<u8> {
         elf_with_dependencies_and_symbols(
             dependencies,
-            &[("prdb_query_descriptor_v3", 1), ("prdb_query_main_v3", 2)],
+            &[("prdb_query_descriptor_v1", 1), ("prdb_query_main_v1", 2)],
         )
     }
 
@@ -1260,99 +1255,17 @@ mod tests {
     }
 
     #[test]
-    fn manifest_v1_accepts_abi_v4_and_requires_its_exports() {
-        let mut value = manifest();
-        value.native_abi_version = 4;
-        value.descriptor_symbol = "prdb_query_descriptor_v4".to_owned();
-        value.entry_point_symbol = "prdb_query_main_v4".to_owned();
-        let encoded = encode_manifest_v1(&value).expect("encode v4 manifest");
-        assert_eq!(decode_manifest_v1(&encoded), Ok(value));
-
-        let artifact = elf_with_dependencies_and_symbols(
-            &["libc.so.6", "libm.so.6"],
-            &[("prdb_query_descriptor_v4", 1), ("prdb_query_main_v4", 2)],
-        );
-        let manifest = manifest_v1_from_elf(
-            &artifact,
-            4,
-            1,
-            "x86_64_v1".to_owned(),
-            "glibc_2_31".to_owned(),
-            "TinyCC-0.9.27".to_owned(),
-        )
-        .expect("derive v4 manifest from ELF");
-        assert_eq!(manifest.native_abi_version, 4);
-        assert_eq!(manifest.descriptor_symbol, "prdb_query_descriptor_v4");
-        assert_eq!(manifest.entry_point_symbol, "prdb_query_main_v4");
-
-        let missing_entry = elf_with_dependencies_and_symbols(
-            &["libc.so.6", "libm.so.6"],
-            &[("prdb_query_descriptor_v4", 1), ("prdb_query_main_v3", 2)],
-        );
-        assert_eq!(
-            manifest_v1_from_elf(
-                &missing_entry,
-                4,
-                1,
-                "x86_64_v1".to_owned(),
-                "glibc_2_31".to_owned(),
-                "TinyCC-0.9.27".to_owned(),
-            ),
-            Err(ManifestError::InvalidArtifact)
-        );
-    }
-
-    #[test]
-    fn manifest_v1_accepts_abi_v5_and_requires_its_exports() {
-        let mut value = manifest();
-        value.native_abi_version = 5;
-        value.descriptor_symbol = "prdb_query_descriptor_v5".to_owned();
-        value.entry_point_symbol = "prdb_query_main_v5".to_owned();
-        let encoded = encode_manifest_v1(&value).expect("encode v5 manifest");
-        assert_eq!(decode_manifest_v1(&encoded), Ok(value));
-        let artifact = elf_with_dependencies_and_symbols(
-            &["libc.so.6", "libm.so.6"],
-            &[("prdb_query_descriptor_v5", 1), ("prdb_query_main_v5", 2)],
-        );
-        let manifest = manifest_v1_from_elf(
-            &artifact,
-            5,
-            1,
-            "x86_64_v1".to_owned(),
-            "glibc_2_31".to_owned(),
-            "TinyCC-0.9.27".to_owned(),
-        )
-        .expect("derive v5 manifest from ELF");
-        assert_eq!(manifest.native_abi_version, 5);
-        assert_eq!(manifest.descriptor_symbol, "prdb_query_descriptor_v5");
-        assert_eq!(manifest.entry_point_symbol, "prdb_query_main_v5");
-    }
-
-    #[test]
-    fn manifest_v1_accepts_abi_v6_and_requires_its_exports() {
-        let mut value = manifest();
-        value.native_abi_version = 6;
-        value.descriptor_symbol = "prdb_query_descriptor_v6".to_owned();
-        value.entry_point_symbol = "prdb_query_main_v6".to_owned();
-        let encoded = encode_manifest_v1(&value).expect("encode v6 manifest");
-        assert_eq!(decode_manifest_v1(&encoded), Ok(value));
-
-        let artifact = elf_with_dependencies_and_symbols(
-            &["libc.so.6", "libm.so.6"],
-            &[("prdb_query_descriptor_v6", 1), ("prdb_query_main_v6", 2)],
-        );
-        let manifest = manifest_v1_from_elf(
-            &artifact,
-            6,
-            1,
-            "x86_64_v1".to_owned(),
-            "glibc_2_31".to_owned(),
-            "TinyCC-0.9.27".to_owned(),
-        )
-        .expect("derive v6 manifest from ELF");
-        assert_eq!(manifest.native_abi_version, 6);
-        assert_eq!(manifest.descriptor_symbol, "prdb_query_descriptor_v6");
-        assert_eq!(manifest.entry_point_symbol, "prdb_query_main_v6");
+    fn manifest_v1_rejects_removed_abi_versions() {
+        for unsupported in 2..=6 {
+            let mut value = manifest();
+            value.native_abi_version = unsupported;
+            value.descriptor_symbol = format!("prdb_query_descriptor_v{unsupported}");
+            value.entry_point_symbol = format!("prdb_query_main_v{unsupported}");
+            assert_eq!(
+                encode_manifest_v1(&value),
+                Err(ManifestError::UnsupportedAbi)
+            );
+        }
     }
 
     #[test]
@@ -1541,14 +1454,14 @@ mod tests {
             &valid_metadata,
             &elf_with_dependencies_and_symbols(
                 &["libc.so.6", "libm.so.6"],
-                &[("prdb_query_main_v3", 2)],
+                &[("prdb_query_main_v1", 2)],
             )
         ));
         assert!(!validator.validate_artifact(
             &valid_metadata,
             &elf_with_dependencies_and_symbols(
                 &["libc.so.6", "libm.so.6"],
-                &[("prdb_query_descriptor_v3", 2), ("prdb_query_main_v3", 2),],
+                &[("prdb_query_descriptor_v1", 2), ("prdb_query_main_v1", 2),],
             )
         ));
     }

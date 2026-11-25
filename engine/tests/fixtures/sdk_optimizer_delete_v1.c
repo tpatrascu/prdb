@@ -59,12 +59,10 @@ int main(void) {
     uint64_t request_len = 0;
     uint32_t error_offset = 0;
     mock_optimizer mock = {expected, sizeof(expected)};
-    prdb_host_api_v5 host = {
-        .v4 = {
-            .v3 = {sizeof(prdb_host_api_v3), PRDB_QUERY_ABI_V3_VERSION,
-                   &mock, NULL, NULL, NULL, NULL},
-            .optimizer_request = submit_select_unused,
-        },
+    prdb_host_api_v1 host = {
+        .struct_size = sizeof(prdb_host_api_v1),
+        .abi_version = PRDB_QUERY_ABI_VERSION,
+        .context = &mock,
         .optimizer_request = submit_delete,
     };
     uint8_t response[8];

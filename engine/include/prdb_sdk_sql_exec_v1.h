@@ -1,10 +1,7 @@
 #ifndef PRDB_SDK_SQL_EXEC_V1_H
 #define PRDB_SDK_SQL_EXEC_V1_H
 
-#include "prdb_query_abi_v3.h"
-#include "prdb_query_abi_v4.h"
-#include "prdb_query_abi_v5.h"
-#include "prdb_query_abi_v6.h"
+#include "prdb_query_abi_v1.h"
 #include "prdb_sdk_executor_v1.h"
 #include "prdb_sdk_optimizer_v1.h"
 #include "prdb_sdk_planner_v1.h"
@@ -56,7 +53,7 @@ typedef int32_t (*prdb_sdk_sql_join_result_row_v1_fn)(
 
 /* Row SELECT */
 int32_t prdb_sdk_sql_execute_select_v1(
-    const prdb_host_api_v3 *host, const uint8_t *schema,
+    const prdb_host_api_v1 *host, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     uint16_t max_candidates, uint32_t max_batch_bytes,
@@ -71,7 +68,7 @@ int32_t prdb_sdk_sql_execute_select_v1(
     void *result_context);
 
 int32_t prdb_sdk_sql_execute_select_typed_v1(
-    const prdb_host_api_v3 *host, const uint8_t *schema,
+    const prdb_host_api_v1 *host, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     const prdb_sdk_value_v1 *parameters,
     const prdb_sdk_sql_parameter_metadata_v1 *parameter_metadata,
@@ -88,7 +85,7 @@ int32_t prdb_sdk_sql_execute_select_typed_v1(
 
 
 int32_t prdb_sdk_sql_execute_select_ordered_v1(
-    const prdb_host_api_v3 *host, const uint8_t *schema,
+    const prdb_host_api_v1 *host, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     uint16_t max_candidates, uint32_t max_batch_bytes,
@@ -104,7 +101,7 @@ int32_t prdb_sdk_sql_execute_select_ordered_v1(
     prdb_sdk_sql_result_row_v1_fn on_row, void *result_context);
 
 int32_t prdb_sdk_sql_execute_select_spill_v1(
-    const prdb_host_api_v6 *host, const uint8_t *schema,
+    const prdb_host_api_v1 *host, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     const prdb_sdk_sql_parameter_metadata_v1 *parameter_metadata,
@@ -121,7 +118,7 @@ int32_t prdb_sdk_sql_execute_select_spill_v1(
 
 /* DML */
 int32_t prdb_sdk_sql_execute_insert_v1(
-    const prdb_host_api_v3 *host, const uint8_t *schema,
+    const prdb_host_api_v1 *host, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     uint8_t *planner_response, uint64_t planner_response_capacity,
@@ -135,7 +132,7 @@ int32_t prdb_sdk_sql_execute_insert_v1(
     uint32_t insert_value_capacity, uint8_t row_handle_out[16]);
 
 int32_t prdb_sdk_sql_execute_insert_batch_v1(
-    const prdb_host_api_v3 *host, const uint8_t *schema,
+    const prdb_host_api_v1 *host, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     uint8_t *planner_response, uint64_t planner_response_capacity,
@@ -149,7 +146,7 @@ int32_t prdb_sdk_sql_execute_insert_batch_v1(
     uint32_t insert_value_capacity, uint32_t *inserted_count_out);
 
 int32_t prdb_sdk_sql_execute_update_v1(
-    const prdb_host_api_v3 *host, const uint8_t *schema,
+    const prdb_host_api_v1 *host, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     uint16_t max_candidates, uint32_t max_batch_bytes,
@@ -167,7 +164,7 @@ int32_t prdb_sdk_sql_execute_update_v1(
     uint32_t patch_capacity, uint32_t *updated_count_out);
 
 int32_t prdb_sdk_sql_execute_delete_v1(
-    const prdb_host_api_v3 *host, const uint8_t *schema,
+    const prdb_host_api_v1 *host, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     uint16_t max_candidates, uint32_t max_batch_bytes,
@@ -184,7 +181,7 @@ int32_t prdb_sdk_sql_execute_delete_v1(
 
 /* GROUP BY & Aggregates */
 int32_t prdb_sdk_sql_execute_group_v1(
-    const prdb_host_api_v3 *host, const uint8_t *schema,
+    const prdb_host_api_v1 *host, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     uint16_t max_candidates, uint32_t max_batch_bytes,
@@ -200,7 +197,7 @@ int32_t prdb_sdk_sql_execute_group_v1(
     prdb_sdk_sql_group_row_v1_fn on_group, void *result_context);
 
 int32_t prdb_sdk_sql_execute_group_typed_v1(
-    const prdb_host_api_v3 *host, const uint8_t *schema,
+    const prdb_host_api_v1 *host, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     const prdb_sdk_value_v1 *parameters,
     const prdb_sdk_sql_parameter_metadata_v1 *parameter_metadata,
@@ -217,7 +214,7 @@ int32_t prdb_sdk_sql_execute_group_typed_v1(
     prdb_sdk_sql_group_row_v1_fn on_group, void *result_context);
 
 int32_t prdb_sdk_sql_execute_group_having_optimizer_v1(
-    const prdb_host_api_v5 *host, const uint8_t *schema,
+    const prdb_host_api_v1 *host, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     const prdb_sdk_value_v1 *parameters,
     const prdb_sdk_sql_parameter_metadata_v1 *parameter_metadata,
@@ -236,7 +233,7 @@ int32_t prdb_sdk_sql_execute_group_having_optimizer_v1(
     prdb_sdk_sql_group_row_v1_fn on_group, void *result_context);
 
 int32_t prdb_sdk_sql_execute_group_count_spill_v1(
-    const prdb_host_api_v6 *host, const uint8_t *schema,
+    const prdb_host_api_v1 *host, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     uint16_t max_candidates, uint32_t max_batch_bytes,
     uint8_t *planner_response, uint64_t planner_response_capacity,
@@ -250,7 +247,7 @@ int32_t prdb_sdk_sql_execute_group_count_spill_v1(
     void *result_context);
 
 int32_t prdb_sdk_sql_execute_group_count_optimizer_v1(
-    const prdb_host_api_v5 *host, const uint8_t *schema,
+    const prdb_host_api_v1 *host, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     uint16_t max_candidates, uint32_t max_batch_bytes,
@@ -268,7 +265,7 @@ int32_t prdb_sdk_sql_execute_group_count_optimizer_v1(
     void *result_context);
 
 int32_t prdb_sdk_sql_execute_group_aggregate_optimizer_v1(
-    const prdb_host_api_v5 *host, const uint8_t *schema,
+    const prdb_host_api_v1 *host, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     uint16_t max_candidates, uint32_t max_batch_bytes,
     uint8_t *optimizer_request, uint64_t optimizer_request_capacity,
@@ -285,7 +282,7 @@ int32_t prdb_sdk_sql_execute_group_aggregate_optimizer_v1(
     prdb_sdk_sql_group_row_v1_fn on_group, void *result_context);
 
 int32_t prdb_sdk_sql_execute_group_count_ordered_optimizer_v1(
-    const prdb_host_api_v5 *host, const uint8_t *schema,
+    const prdb_host_api_v1 *host, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     uint16_t max_candidates, uint32_t max_batch_bytes,
@@ -303,7 +300,7 @@ int32_t prdb_sdk_sql_execute_group_count_ordered_optimizer_v1(
     prdb_sdk_sql_group_row_v1_fn on_group, void *result_context);
 
 int32_t prdb_sdk_sql_execute_group_aggregate_ordered_optimizer_v1(
-    const prdb_host_api_v5 *host, const uint8_t *schema,
+    const prdb_host_api_v1 *host, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     uint16_t max_candidates, uint32_t max_batch_bytes,
     uint8_t *optimizer_request, uint64_t optimizer_request_capacity,
@@ -320,7 +317,7 @@ int32_t prdb_sdk_sql_execute_group_aggregate_ordered_optimizer_v1(
     prdb_sdk_sql_group_row_v1_fn on_group, void *result_context);
 
 int32_t prdb_sdk_sql_execute_composite_count_optimizer_v1(
-    const prdb_host_api_v5 *host, const uint8_t *schema,
+    const prdb_host_api_v1 *host, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     uint16_t max_candidates, uint32_t max_batch_bytes,
     uint8_t *optimizer_request, uint64_t optimizer_request_capacity,
@@ -337,7 +334,7 @@ int32_t prdb_sdk_sql_execute_composite_count_optimizer_v1(
     prdb_sdk_sql_group_row_v1_fn on_group, void *result_context);
 
 int32_t prdb_sdk_sql_execute_group_composite_aggregate_optimizer_v1(
-    const prdb_host_api_v5 *host, const uint8_t *schema,
+    const prdb_host_api_v1 *host, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     uint16_t max_candidates, uint32_t max_batch_bytes,
     uint8_t *optimizer_request, uint64_t optimizer_request_capacity,
@@ -354,7 +351,7 @@ int32_t prdb_sdk_sql_execute_group_composite_aggregate_optimizer_v1(
     prdb_sdk_sql_group_row_v1_fn on_group, void *result_context);
 
 int32_t prdb_sdk_sql_execute_filtered_group_composite_aggregate_optimizer_v1(
-    const prdb_host_api_v5 *host, const uint8_t *schema,
+    const prdb_host_api_v1 *host, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     uint16_t max_candidates, uint32_t max_batch_bytes,
@@ -372,7 +369,7 @@ int32_t prdb_sdk_sql_execute_filtered_group_composite_aggregate_optimizer_v1(
     prdb_sdk_sql_group_row_v1_fn on_group, void *result_context);
 
 int32_t prdb_sdk_sql_execute_ordered_composite_count_optimizer_v1(
-    const prdb_host_api_v5 *host, const uint8_t *schema,
+    const prdb_host_api_v1 *host, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     uint16_t max_candidates, uint32_t max_batch_bytes,
     uint8_t *optimizer_request, uint64_t optimizer_request_capacity,
@@ -389,7 +386,7 @@ int32_t prdb_sdk_sql_execute_ordered_composite_count_optimizer_v1(
     prdb_sdk_sql_group_row_v1_fn on_group, void *result_context);
 
 int32_t prdb_sdk_sql_execute_ordered_composite_aggregate_optimizer_v1(
-    const prdb_host_api_v5 *host, const uint8_t *schema,
+    const prdb_host_api_v1 *host, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     uint16_t max_candidates, uint32_t max_batch_bytes,
     uint8_t *optimizer_request, uint64_t optimizer_request_capacity,
@@ -407,7 +404,7 @@ int32_t prdb_sdk_sql_execute_ordered_composite_aggregate_optimizer_v1(
 
 /* INNER JOIN */
 int32_t prdb_sdk_sql_execute_inner_join_v1(
-    const prdb_host_api_v3 *host, const uint8_t *schema,
+    const prdb_host_api_v1 *host, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     uint16_t max_candidates, uint32_t max_batch_bytes,
@@ -433,7 +430,7 @@ int32_t prdb_sdk_sql_execute_inner_join_v1(
     prdb_sdk_sql_join_result_row_v1_fn on_row, void *result_context);
 
 int32_t prdb_sdk_sql_execute_inner_join_typed_v1(
-    const prdb_host_api_v3 *host, const uint8_t *schema,
+    const prdb_host_api_v1 *host, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     const prdb_sdk_value_v1 *parameters,
     const prdb_sdk_sql_parameter_metadata_v1 *metadata,
@@ -460,7 +457,7 @@ int32_t prdb_sdk_sql_execute_inner_join_typed_v1(
     prdb_sdk_sql_join_result_row_v1_fn on_row, void *result_context);
 
 int32_t prdb_sdk_sql_execute_inner_join_typed_spill_v1(
-    const prdb_host_api_v6 *host, const uint8_t *schema,
+    const prdb_host_api_v1 *host, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     const prdb_sdk_value_v1 *parameters,
     const prdb_sdk_sql_parameter_metadata_v1 *metadata,
@@ -487,7 +484,7 @@ int32_t prdb_sdk_sql_execute_inner_join_typed_spill_v1(
     prdb_sdk_sql_join_result_row_v1_fn on_row, void *result_context);
 
 int32_t prdb_sdk_sql_execute_inner_join_optimizer_v1(
-    const prdb_host_api_v5 *host, const uint8_t *schema,
+    const prdb_host_api_v1 *host, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     uint16_t max_candidates, uint32_t max_batch_bytes,

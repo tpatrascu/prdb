@@ -23,12 +23,12 @@ static int valid_identifier(const uint8_t *value, uint32_t length) {
     return 1;
 }
 
-static int32_t invoke(const prdb_host_api_v2 *host, uint16_t operation,
+static int32_t invoke(const prdb_host_api_v1 *host, uint16_t operation,
                       const uint8_t *request, uint64_t request_len,
                       uint8_t *response, uint64_t response_capacity,
                       uint64_t *response_len) {
     if (host == NULL || host->struct_size < sizeof(*host) ||
-        host->abi_version != PRDB_QUERY_ABI_V2_VERSION ||
+        host->abi_version != PRDB_QUERY_ABI_VERSION ||
         host->executor_request == NULL || request == NULL || response == NULL ||
         response_len == NULL || request_len > PRDB_QUERY_MAX_IPC_REQUEST_BYTES ||
         response_capacity > PRDB_QUERY_MAX_IPC_RESPONSE_BYTES) {
@@ -47,7 +47,7 @@ static int32_t invoke(const prdb_host_api_v2 *host, uint16_t operation,
 }
 
 int32_t prdb_sdk_executor_get_workload_budgets_v1(
-    const prdb_host_api_v2 *host, uint8_t *response,
+    const prdb_host_api_v1 *host, uint8_t *response,
     uint64_t response_capacity, uint64_t *response_len,
     prdb_sdk_workload_budgets_v1 *out, uint32_t out_capacity) {
     const uint8_t empty_request = 0;
@@ -77,7 +77,7 @@ int32_t prdb_sdk_executor_get_workload_budgets_v1(
 }
 
 int32_t prdb_sdk_executor_resolve_relation_v1(
-    const prdb_host_api_v2 *host, const uint8_t *schema, uint32_t schema_len,
+    const prdb_host_api_v1 *host, const uint8_t *schema, uint32_t schema_len,
     const uint8_t *relation, uint32_t relation_len, uint8_t *response,
     uint64_t response_capacity, uint64_t *response_len,
     prdb_sdk_executor_relation_v1 *out, uint32_t out_capacity,
@@ -130,7 +130,7 @@ int32_t prdb_sdk_executor_resolve_relation_v1(
 }
 
 int32_t prdb_sdk_executor_open_full_scan_v1(
-    const prdb_host_api_v2 *host, const uint8_t executor_handle[16],
+    const prdb_host_api_v1 *host, const uint8_t executor_handle[16],
     uint8_t *response, uint64_t response_capacity, uint64_t *response_len,
     uint8_t cursor_out[16]) {
     uint8_t request[PRDB_EXECUTOR_OPEN_SCAN_REQUEST_HEADER_BYTES] = {0};
@@ -159,7 +159,7 @@ static int valid_range_bound(const prdb_sdk_value_v1 *bound) {
 }
 
 int32_t prdb_sdk_executor_scan_index_range_v1(
-    const prdb_host_api_v2 *host, const uint8_t executor_handle[16],
+    const prdb_host_api_v1 *host, const uint8_t executor_handle[16],
     const uint8_t index_id[16], const prdb_sdk_value_v1 *lower_bound,
     uint8_t lower_inclusive, const prdb_sdk_value_v1 *upper_bound,
     uint8_t upper_inclusive, const uint8_t *column_ids,
@@ -285,7 +285,7 @@ int32_t prdb_sdk_executor_scan_index_range_v1(
 }
 
 int32_t prdb_sdk_executor_scan_index_prefix_v1(
-    const prdb_host_api_v2 *host, const uint8_t executor_handle[16],
+    const prdb_host_api_v1 *host, const uint8_t executor_handle[16],
     const uint8_t index_id[16], const prdb_sdk_value_v1 *values,
     uint8_t value_count, const uint8_t *column_ids, uint16_t column_count,
     uint8_t *request, uint64_t request_capacity, uint8_t *response,
@@ -366,7 +366,7 @@ int32_t prdb_sdk_executor_scan_index_prefix_v1(
 }
 
 int32_t prdb_sdk_executor_scan_index_ranges_v1(
-    const prdb_host_api_v2 *host, const uint8_t executor_handle[16],
+    const prdb_host_api_v1 *host, const uint8_t executor_handle[16],
     const uint8_t index_id[16],
     const prdb_sdk_executor_index_probe_v1 *probes, uint16_t probe_count,
     const uint8_t *column_ids, uint16_t column_count,
@@ -464,7 +464,7 @@ int32_t prdb_sdk_executor_scan_index_ranges_v1(
 }
 
 int32_t prdb_sdk_executor_next_batch_v1(
-    const prdb_host_api_v2 *host, const uint8_t cursor[16],
+    const prdb_host_api_v1 *host, const uint8_t cursor[16],
     uint16_t max_candidates, uint32_t max_bytes, uint8_t *response,
     uint64_t response_capacity, uint64_t *response_len,
     prdb_sdk_batch_v1 *batch, uint32_t batch_out_capacity) {
@@ -495,7 +495,7 @@ int32_t prdb_sdk_executor_next_batch_v1(
 }
 
 int32_t prdb_sdk_executor_close_cursor_v1(
-    const prdb_host_api_v2 *host, const uint8_t cursor[16], uint8_t *response,
+    const prdb_host_api_v1 *host, const uint8_t cursor[16], uint8_t *response,
     uint64_t response_capacity, uint64_t *response_len) {
     uint8_t request[PRDB_EXECUTOR_CLOSE_CURSOR_REQUEST_HEADER_BYTES];
     int32_t status;
@@ -511,7 +511,7 @@ int32_t prdb_sdk_executor_close_cursor_v1(
 }
 
 int32_t prdb_sdk_executor_stage_insert_v1(
-    const prdb_host_api_v2 *host, const uint8_t relation_handle[16],
+    const prdb_host_api_v1 *host, const uint8_t relation_handle[16],
     const prdb_sdk_executor_insert_value_v1 *values, uint16_t value_count,
     uint8_t *request, uint64_t request_capacity, uint8_t *response,
     uint64_t response_capacity, uint64_t *response_len,
@@ -597,7 +597,7 @@ int32_t prdb_sdk_executor_stage_insert_v1(
 }
 
 int32_t prdb_sdk_executor_stage_update_v1(
-    const prdb_host_api_v2 *host, const uint8_t row_handle[16],
+    const prdb_host_api_v1 *host, const uint8_t row_handle[16],
     const prdb_sdk_executor_update_patch_v1 *patches, uint16_t patch_count,
     uint8_t *request, uint64_t request_capacity, uint8_t *response,
     uint64_t response_capacity, uint64_t *response_len) {
@@ -669,7 +669,7 @@ int32_t prdb_sdk_executor_stage_update_v1(
 }
 
 int32_t prdb_sdk_executor_stage_delete_v1(
-    const prdb_host_api_v2 *host, const uint8_t row_handle[16],
+    const prdb_host_api_v1 *host, const uint8_t row_handle[16],
     uint8_t *response, uint64_t response_capacity, uint64_t *response_len) {
     uint8_t request[PRDB_EXECUTOR_STAGE_DELETE_REQUEST_HEADER_BYTES];
     int32_t status;
@@ -781,7 +781,7 @@ static int32_t encode_batch_update_record(
 }
 
 static int32_t mutation_batch_invoke(
-    const prdb_host_api_v2 *host, uint32_t operation, const uint8_t *request,
+    const prdb_host_api_v1 *host, uint32_t operation, const uint8_t *request,
     uint64_t request_len, uint8_t *response, uint64_t response_capacity,
     uint64_t *response_len) {
     int32_t status = invoke(host, operation, request, request_len, response,
@@ -793,7 +793,7 @@ static int32_t mutation_batch_invoke(
 }
 
 int32_t prdb_sdk_executor_stage_inserts_v1(
-    const prdb_host_api_v2 *host, const uint8_t relation_handle[16],
+    const prdb_host_api_v1 *host, const uint8_t relation_handle[16],
     const prdb_sdk_executor_insert_value_v1 *values, uint16_t row_count,
     uint16_t value_count, uint8_t *request, uint64_t request_capacity,
     uint8_t *response, uint64_t response_capacity, uint64_t *response_len,
@@ -841,7 +841,7 @@ int32_t prdb_sdk_executor_stage_inserts_v1(
 }
 
 int32_t prdb_sdk_executor_stage_updates_v1(
-    const prdb_host_api_v2 *host, const uint8_t *row_handles,
+    const prdb_host_api_v1 *host, const uint8_t *row_handles,
     uint16_t row_count, const prdb_sdk_executor_update_patch_v1 *patches,
     uint16_t patch_count, uint8_t *request, uint64_t request_capacity,
     uint8_t *response, uint64_t response_capacity, uint64_t *response_len) {
@@ -872,7 +872,7 @@ int32_t prdb_sdk_executor_stage_updates_v1(
 }
 
 int32_t prdb_sdk_executor_stage_deletes_v1(
-    const prdb_host_api_v2 *host, const uint8_t *row_handles,
+    const prdb_host_api_v1 *host, const uint8_t *row_handles,
     uint16_t row_count, uint8_t *request, uint64_t request_capacity,
     uint8_t *response, uint64_t response_capacity, uint64_t *response_len) {
     uint64_t offset = 4;
@@ -895,7 +895,7 @@ int32_t prdb_sdk_executor_stage_deletes_v1(
 }
 
 int32_t prdb_sdk_executor_check_cancelled_v1(
-    const prdb_host_api_v2 *host, int32_t *cancelled_out) {
+    const prdb_host_api_v1 *host, int32_t *cancelled_out) {
     const uint8_t empty_request = 0;
     uint8_t response[PRDB_EXECUTOR_CANCELLATION_CHECK_RESPONSE_HEADER_BYTES];
     uint8_t cancelled;

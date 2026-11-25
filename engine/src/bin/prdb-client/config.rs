@@ -527,8 +527,8 @@ pub(super) fn run_configured_interactive(
             return Err("explicit port does not match the selected configured instance".to_owned());
         }
     }
-    if instance.sdk.native_abi != 3 {
-        return Err("interactive-sql currently generates native ABI 3 queries; select ABI 3 for this instance".to_owned());
+    if instance.sdk.native_abi != 1 {
+        return Err("interactive-sql currently generates native ABI 1 queries; select ABI 1 for this instance".to_owned());
     }
     let tools = config
         .client_tools

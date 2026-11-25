@@ -870,7 +870,7 @@ pub fn run_sandboxed_v3_sql_error_fixture(
                 .map_err(|error| format!("install test SDK repository release: {error:?}"))?;
             let derived = manifest_v1_from_elf(
                 &artifact,
-                3,
+                1,
                 1,
                 "x86_64-v1".to_owned(),
                 runtime_profile.to_owned(),

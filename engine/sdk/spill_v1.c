@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-static int32_t spill_call(const prdb_host_api_v6 *host, uint16_t operation,
+static int32_t spill_call(const prdb_host_api_v1 *host, uint16_t operation,
                           const uint8_t *request, uint64_t request_len,
                           uint8_t *response, uint64_t response_capacity,
                           uint64_t *response_len) {
@@ -13,12 +13,12 @@ static int32_t spill_call(const prdb_host_api_v6 *host, uint16_t operation,
         return -1;
     }
     *response_len = 0;
-    return host->spill_request(host->v5.v4.v3.context, operation, request,
+    return host->spill_request(host->context, operation, request,
                                request_len, response, response_capacity,
                                response_len);
 }
 
-int32_t prdb_sdk_spill_create_v1(const prdb_host_api_v6 *host,
+int32_t prdb_sdk_spill_create_v1(const prdb_host_api_v1 *host,
                                  prdb_sdk_spill_stream_v1 *stream) {
     uint64_t response_len = 0;
     if (stream == NULL) return -1;
@@ -35,7 +35,7 @@ int32_t prdb_sdk_spill_create_v1(const prdb_host_api_v6 *host,
     return 0;
 }
 
-int32_t prdb_sdk_spill_append_v1(const prdb_host_api_v6 *host,
+int32_t prdb_sdk_spill_append_v1(const prdb_host_api_v1 *host,
                                  const prdb_sdk_spill_stream_v1 *stream,
                                  const uint8_t *bytes, uint64_t bytes_len) {
     if (stream == NULL || stream->valid != 1 ||
@@ -55,7 +55,7 @@ int32_t prdb_sdk_spill_append_v1(const prdb_host_api_v6 *host,
     return status;
 }
 
-int32_t prdb_sdk_spill_seal_v1(const prdb_host_api_v6 *host,
+int32_t prdb_sdk_spill_seal_v1(const prdb_host_api_v1 *host,
                                const prdb_sdk_spill_stream_v1 *stream) {
     uint64_t response_len = 0;
     if (stream == NULL || stream->valid != 1) return -1;
@@ -65,7 +65,7 @@ int32_t prdb_sdk_spill_seal_v1(const prdb_host_api_v6 *host,
     return status;
 }
 
-int32_t prdb_sdk_spill_read_at_v1(const prdb_host_api_v6 *host,
+int32_t prdb_sdk_spill_read_at_v1(const prdb_host_api_v1 *host,
                                   const prdb_sdk_spill_stream_v1 *stream,
                                   uint64_t offset, uint8_t *bytes,
                                   uint32_t capacity, uint64_t *bytes_len) {
@@ -89,7 +89,7 @@ int32_t prdb_sdk_spill_read_at_v1(const prdb_host_api_v6 *host,
     return 0;
 }
 
-int32_t prdb_sdk_spill_destroy_v1(const prdb_host_api_v6 *host,
+int32_t prdb_sdk_spill_destroy_v1(const prdb_host_api_v1 *host,
                                   prdb_sdk_spill_stream_v1 *stream) {
     uint64_t response_len = 0;
     if (stream == NULL || stream->valid != 1) return -1;

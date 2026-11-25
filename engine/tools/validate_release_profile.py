@@ -112,7 +112,7 @@ def main() -> None:
         / "linux-x86_64"
         / CPU_BASELINE
         / PROFILE
-        / "sdk-1-abis1,2,3,4,5,6"
+        / "sdk-1-abis1"
     )
     sdk_library = sdk_release_dir / "libprdb_sql.so.1"
     sdk_metadata_path = sdk_release_dir / "sdk-release.json"

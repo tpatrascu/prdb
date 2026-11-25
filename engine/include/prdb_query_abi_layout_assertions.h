@@ -4,10 +4,17 @@
 
 #include <stddef.h>
 
-_Static_assert(sizeof(prdb_host_api_v1) == 8, "prdb_host_api_v1 size");
-_Static_assert(_Alignof(prdb_host_api_v1) == 4, "prdb_host_api_v1 alignment");
+_Static_assert(sizeof(prdb_host_api_v1) == 64, "prdb_host_api_v1 size");
+_Static_assert(_Alignof(prdb_host_api_v1) == 8, "prdb_host_api_v1 alignment");
 _Static_assert(offsetof(prdb_host_api_v1, struct_size) == 0, "prdb_host_api_v1.struct_size offset");
 _Static_assert(offsetof(prdb_host_api_v1, abi_version) == 4, "prdb_host_api_v1.abi_version offset");
+_Static_assert(offsetof(prdb_host_api_v1, context) == 8, "prdb_host_api_v1.context offset");
+_Static_assert(offsetof(prdb_host_api_v1, executor_request) == 16, "prdb_host_api_v1.executor_request offset");
+_Static_assert(offsetof(prdb_host_api_v1, planner_request) == 24, "prdb_host_api_v1.planner_request offset");
+_Static_assert(offsetof(prdb_host_api_v1, write_result) == 32, "prdb_host_api_v1.write_result offset");
+_Static_assert(offsetof(prdb_host_api_v1, statement_failure) == 40, "prdb_host_api_v1.statement_failure offset");
+_Static_assert(offsetof(prdb_host_api_v1, optimizer_request) == 48, "prdb_host_api_v1.optimizer_request offset");
+_Static_assert(offsetof(prdb_host_api_v1, spill_request) == 56, "prdb_host_api_v1.spill_request offset");
 
 _Static_assert(sizeof(prdb_invocation_v1) == 24, "prdb_invocation_v1 size");
 _Static_assert(_Alignof(prdb_invocation_v1) == 8, "prdb_invocation_v1 alignment");
@@ -22,109 +29,5 @@ _Static_assert(offsetof(prdb_query_descriptor_v1_record, struct_size) == 0, "prd
 _Static_assert(offsetof(prdb_query_descriptor_v1_record, abi_version) == 4, "prdb_query_descriptor_v1_record.abi_version offset");
 _Static_assert(offsetof(prdb_query_descriptor_v1_record, host_api_size) == 8, "prdb_query_descriptor_v1_record.host_api_size offset");
 _Static_assert(offsetof(prdb_query_descriptor_v1_record, invocation_size) == 12, "prdb_query_descriptor_v1_record.invocation_size offset");
-
-_Static_assert(sizeof(prdb_host_api_v2) == 40, "prdb_host_api_v2 size");
-_Static_assert(_Alignof(prdb_host_api_v2) == 8, "prdb_host_api_v2 alignment");
-_Static_assert(offsetof(prdb_host_api_v2, struct_size) == 0, "prdb_host_api_v2.struct_size offset");
-_Static_assert(offsetof(prdb_host_api_v2, abi_version) == 4, "prdb_host_api_v2.abi_version offset");
-_Static_assert(offsetof(prdb_host_api_v2, context) == 8, "prdb_host_api_v2.context offset");
-_Static_assert(offsetof(prdb_host_api_v2, executor_request) == 16, "prdb_host_api_v2.executor_request offset");
-_Static_assert(offsetof(prdb_host_api_v2, planner_request) == 24, "prdb_host_api_v2.planner_request offset");
-_Static_assert(offsetof(prdb_host_api_v2, write_result) == 32, "prdb_host_api_v2.write_result offset");
-
-_Static_assert(sizeof(prdb_invocation_v2) == 24, "prdb_invocation_v2 size");
-_Static_assert(_Alignof(prdb_invocation_v2) == 8, "prdb_invocation_v2 alignment");
-_Static_assert(offsetof(prdb_invocation_v2, struct_size) == 0, "prdb_invocation_v2.struct_size offset");
-_Static_assert(offsetof(prdb_invocation_v2, abi_version) == 4, "prdb_invocation_v2.abi_version offset");
-_Static_assert(offsetof(prdb_invocation_v2, parameters) == 8, "prdb_invocation_v2.parameters offset");
-_Static_assert(offsetof(prdb_invocation_v2, parameters_len) == 16, "prdb_invocation_v2.parameters_len offset");
-
-_Static_assert(sizeof(prdb_query_descriptor_v2_record) == 16, "prdb_query_descriptor_v2_record size");
-_Static_assert(_Alignof(prdb_query_descriptor_v2_record) == 4, "prdb_query_descriptor_v2_record alignment");
-_Static_assert(offsetof(prdb_query_descriptor_v2_record, struct_size) == 0, "prdb_query_descriptor_v2_record.struct_size offset");
-_Static_assert(offsetof(prdb_query_descriptor_v2_record, abi_version) == 4, "prdb_query_descriptor_v2_record.abi_version offset");
-_Static_assert(offsetof(prdb_query_descriptor_v2_record, host_api_size) == 8, "prdb_query_descriptor_v2_record.host_api_size offset");
-_Static_assert(offsetof(prdb_query_descriptor_v2_record, invocation_size) == 12, "prdb_query_descriptor_v2_record.invocation_size offset");
-
-_Static_assert(sizeof(prdb_host_api_v3) == 48, "prdb_host_api_v3 size");
-_Static_assert(_Alignof(prdb_host_api_v3) == 8, "prdb_host_api_v3 alignment");
-_Static_assert(offsetof(prdb_host_api_v3, struct_size) == 0, "prdb_host_api_v3.struct_size offset");
-_Static_assert(offsetof(prdb_host_api_v3, abi_version) == 4, "prdb_host_api_v3.abi_version offset");
-_Static_assert(offsetof(prdb_host_api_v3, context) == 8, "prdb_host_api_v3.context offset");
-_Static_assert(offsetof(prdb_host_api_v3, executor_request) == 16, "prdb_host_api_v3.executor_request offset");
-_Static_assert(offsetof(prdb_host_api_v3, planner_request) == 24, "prdb_host_api_v3.planner_request offset");
-_Static_assert(offsetof(prdb_host_api_v3, write_result) == 32, "prdb_host_api_v3.write_result offset");
-_Static_assert(offsetof(prdb_host_api_v3, statement_failure) == 40, "prdb_host_api_v3.statement_failure offset");
-
-_Static_assert(sizeof(prdb_invocation_v3) == 24, "prdb_invocation_v3 size");
-_Static_assert(_Alignof(prdb_invocation_v3) == 8, "prdb_invocation_v3 alignment");
-_Static_assert(offsetof(prdb_invocation_v3, struct_size) == 0, "prdb_invocation_v3.struct_size offset");
-_Static_assert(offsetof(prdb_invocation_v3, abi_version) == 4, "prdb_invocation_v3.abi_version offset");
-_Static_assert(offsetof(prdb_invocation_v3, parameters) == 8, "prdb_invocation_v3.parameters offset");
-_Static_assert(offsetof(prdb_invocation_v3, parameters_len) == 16, "prdb_invocation_v3.parameters_len offset");
-
-_Static_assert(sizeof(prdb_query_descriptor_v3_record) == 16, "prdb_query_descriptor_v3_record size");
-_Static_assert(_Alignof(prdb_query_descriptor_v3_record) == 4, "prdb_query_descriptor_v3_record alignment");
-_Static_assert(offsetof(prdb_query_descriptor_v3_record, struct_size) == 0, "prdb_query_descriptor_v3_record.struct_size offset");
-_Static_assert(offsetof(prdb_query_descriptor_v3_record, abi_version) == 4, "prdb_query_descriptor_v3_record.abi_version offset");
-_Static_assert(offsetof(prdb_query_descriptor_v3_record, host_api_size) == 8, "prdb_query_descriptor_v3_record.host_api_size offset");
-_Static_assert(offsetof(prdb_query_descriptor_v3_record, invocation_size) == 12, "prdb_query_descriptor_v3_record.invocation_size offset");
-
-_Static_assert(sizeof(prdb_host_api_v4) == 56, "prdb_host_api_v4 size");
-_Static_assert(_Alignof(prdb_host_api_v4) == 8, "prdb_host_api_v4 alignment");
-_Static_assert(offsetof(prdb_host_api_v4, v3) == 0, "prdb_host_api_v4.v3 offset");
-_Static_assert(offsetof(prdb_host_api_v4, optimizer_request) == 48, "prdb_host_api_v4.optimizer_request offset");
-
-_Static_assert(sizeof(prdb_invocation_v4) == 24, "prdb_invocation_v4 size");
-_Static_assert(_Alignof(prdb_invocation_v4) == 8, "prdb_invocation_v4 alignment");
-_Static_assert(offsetof(prdb_invocation_v4, struct_size) == 0, "prdb_invocation_v4.struct_size offset");
-_Static_assert(offsetof(prdb_invocation_v4, abi_version) == 4, "prdb_invocation_v4.abi_version offset");
-_Static_assert(offsetof(prdb_invocation_v4, parameters) == 8, "prdb_invocation_v4.parameters offset");
-_Static_assert(offsetof(prdb_invocation_v4, parameters_len) == 16, "prdb_invocation_v4.parameters_len offset");
-
-_Static_assert(sizeof(prdb_query_descriptor_v4_record) == 16, "prdb_query_descriptor_v4_record size");
-_Static_assert(_Alignof(prdb_query_descriptor_v4_record) == 4, "prdb_query_descriptor_v4_record alignment");
-_Static_assert(offsetof(prdb_query_descriptor_v4_record, struct_size) == 0, "prdb_query_descriptor_v4_record.struct_size offset");
-_Static_assert(offsetof(prdb_query_descriptor_v4_record, abi_version) == 4, "prdb_query_descriptor_v4_record.abi_version offset");
-_Static_assert(offsetof(prdb_query_descriptor_v4_record, host_api_size) == 8, "prdb_query_descriptor_v4_record.host_api_size offset");
-_Static_assert(offsetof(prdb_query_descriptor_v4_record, invocation_size) == 12, "prdb_query_descriptor_v4_record.invocation_size offset");
-
-_Static_assert(sizeof(prdb_host_api_v5) == 64, "prdb_host_api_v5 size");
-_Static_assert(_Alignof(prdb_host_api_v5) == 8, "prdb_host_api_v5 alignment");
-_Static_assert(offsetof(prdb_host_api_v5, v4) == 0, "prdb_host_api_v5.v4 offset");
-_Static_assert(offsetof(prdb_host_api_v5, optimizer_request) == 56, "prdb_host_api_v5.optimizer_request offset");
-
-_Static_assert(sizeof(prdb_invocation_v5) == 24, "prdb_invocation_v5 size");
-_Static_assert(_Alignof(prdb_invocation_v5) == 8, "prdb_invocation_v5 alignment");
-_Static_assert(offsetof(prdb_invocation_v5, struct_size) == 0, "prdb_invocation_v5.struct_size offset");
-_Static_assert(offsetof(prdb_invocation_v5, abi_version) == 4, "prdb_invocation_v5.abi_version offset");
-_Static_assert(offsetof(prdb_invocation_v5, parameters) == 8, "prdb_invocation_v5.parameters offset");
-_Static_assert(offsetof(prdb_invocation_v5, parameters_len) == 16, "prdb_invocation_v5.parameters_len offset");
-
-_Static_assert(sizeof(prdb_query_descriptor_v5_record) == 16, "prdb_query_descriptor_v5_record size");
-_Static_assert(_Alignof(prdb_query_descriptor_v5_record) == 4, "prdb_query_descriptor_v5_record alignment");
-_Static_assert(offsetof(prdb_query_descriptor_v5_record, struct_size) == 0, "prdb_query_descriptor_v5_record.struct_size offset");
-_Static_assert(offsetof(prdb_query_descriptor_v5_record, abi_version) == 4, "prdb_query_descriptor_v5_record.abi_version offset");
-_Static_assert(offsetof(prdb_query_descriptor_v5_record, host_api_size) == 8, "prdb_query_descriptor_v5_record.host_api_size offset");
-_Static_assert(offsetof(prdb_query_descriptor_v5_record, invocation_size) == 12, "prdb_query_descriptor_v5_record.invocation_size offset");
-
-_Static_assert(sizeof(prdb_host_api_v6) == 72, "prdb_host_api_v6 size");
-_Static_assert(_Alignof(prdb_host_api_v6) == 8, "prdb_host_api_v6 alignment");
-_Static_assert(offsetof(prdb_host_api_v6, v5) == 0, "prdb_host_api_v6.v5 offset");
-_Static_assert(offsetof(prdb_host_api_v6, spill_request) == 64, "prdb_host_api_v6.spill_request offset");
-
-_Static_assert(sizeof(prdb_invocation_v6) == 24, "prdb_invocation_v6 size");
-_Static_assert(_Alignof(prdb_invocation_v6) == 8, "prdb_invocation_v6 alignment");
-_Static_assert(offsetof(prdb_invocation_v6, struct_size) == 0, "prdb_invocation_v6.struct_size offset");
-_Static_assert(offsetof(prdb_invocation_v6, abi_version) == 4, "prdb_invocation_v6.abi_version offset");
-_Static_assert(offsetof(prdb_invocation_v6, parameters) == 8, "prdb_invocation_v6.parameters offset");
-_Static_assert(offsetof(prdb_invocation_v6, parameters_len) == 16, "prdb_invocation_v6.parameters_len offset");
-
-_Static_assert(sizeof(prdb_query_descriptor_v6_record) == 16, "prdb_query_descriptor_v6_record size");
-_Static_assert(_Alignof(prdb_query_descriptor_v6_record) == 4, "prdb_query_descriptor_v6_record alignment");
-_Static_assert(offsetof(prdb_query_descriptor_v6_record, struct_size) == 0, "prdb_query_descriptor_v6_record.struct_size offset");
-_Static_assert(offsetof(prdb_query_descriptor_v6_record, abi_version) == 4, "prdb_query_descriptor_v6_record.abi_version offset");
-_Static_assert(offsetof(prdb_query_descriptor_v6_record, host_api_size) == 8, "prdb_query_descriptor_v6_record.host_api_size offset");
-_Static_assert(offsetof(prdb_query_descriptor_v6_record, invocation_size) == 12, "prdb_query_descriptor_v6_record.invocation_size offset");
 
 #endif /* PRDB_QUERY_ABI_LAYOUT_ASSERTIONS_H */

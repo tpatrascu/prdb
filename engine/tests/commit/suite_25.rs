@@ -408,11 +408,7 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
     let manifest = encode_manifest_v1(
         &manifest_v1_from_elf(
             &artifact,
-            if spill_enabled_only || spill_disabled_only {
-                6
-            } else {
-                4
-            },
+            1,
             1,
             "x86_64-v1".to_owned(),
             "nixos-x86_64-glibc-2.42".to_owned(),

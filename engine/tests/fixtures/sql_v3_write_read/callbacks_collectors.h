@@ -3,8 +3,8 @@ static int32_t observe_range_executor_request(
     uint64_t request_len, uint8_t *response, uint64_t response_capacity,
     uint64_t *response_len) {
     if (range_observer_original_host == NULL ||
-        context != range_observer_original_host->v3.context ||
-        range_observer_original_host->v3.executor_request == NULL) {
+        context != range_observer_original_host->context ||
+        range_observer_original_host->executor_request == NULL) {
         return PRDB_QUERY_CALLBACK_INVALID_ARGUMENT;
     }
     if (operation == PRDB_IPC_OP_SCAN_INDEX_RANGE) {
@@ -14,7 +14,7 @@ static int32_t observe_range_executor_request(
     } else if (operation == PRDB_IPC_OP_SCAN_INDEX_RANGES) {
         ++range_observer_scan_ranges_requests;
     }
-    return range_observer_original_host->v3.executor_request(
+    return range_observer_original_host->executor_request(
         context, operation, request, request_len, response,
         response_capacity, response_len);
 }
@@ -24,7 +24,7 @@ static int32_t cancel_range_observer_executor_request(
     uint64_t request_len, uint8_t *response, uint64_t response_capacity,
     uint64_t *response_len) {
     if (range_observer_original_host == NULL ||
-        context != range_observer_original_host->v3.context ||
+        context != range_observer_original_host->context ||
         response == NULL || response_len == NULL) {
         return PRDB_QUERY_CALLBACK_INVALID_ARGUMENT;
     }
@@ -64,7 +64,7 @@ static int monotonic_time_ns(uint64_t *value_out) {
     return 1;
 }
 
-static int32_t report_range_timing(const prdb_host_api_v3 *host, uint8_t kind,
+static int32_t report_range_timing(const prdb_host_api_v1 *host, uint8_t kind,
                                    uint64_t elapsed_ns) {
     uint8_t payload[16] = {'O', 'P', '5', 'R', 'N', 'G', '1', kind};
     if (host == NULL || host->write_result == NULL) {
@@ -78,7 +78,7 @@ static int32_t report_range_timing(const prdb_host_api_v3 *host, uint8_t kind,
                : PRDB_QUERY_CALLBACK_IO_ERROR;
 }
 
-static int32_t report_indexed_join_timing(const prdb_host_api_v3 *host,
+static int32_t report_indexed_join_timing(const prdb_host_api_v1 *host,
                                           uint8_t kind,
                                           uint64_t elapsed_ns) {
     uint8_t payload[16] = {'O', 'P', '1', '0', 'J', '0', '1', kind};
@@ -98,9 +98,9 @@ static int32_t cancel_update_executor_request(
     uint64_t request_len, uint8_t *response, uint64_t response_capacity,
     uint64_t *response_len) {
     if (cancel_update_original_host == NULL ||
-        context != cancel_update_original_host->v4.v3.context ||
-        cancel_update_original_host->v4.v3.executor_request == NULL ||
-        cancel_update_original_host->v4.v3.write_result == NULL ||
+        context != cancel_update_original_host->context ||
+        cancel_update_original_host->executor_request == NULL ||
+        cancel_update_original_host->write_result == NULL ||
         response == NULL || response_len == NULL) {
         return PRDB_QUERY_CALLBACK_INVALID_ARGUMENT;
     }
@@ -110,11 +110,11 @@ static int32_t cancel_update_executor_request(
         if (fail_next_stage_update > 1) {
             static const uint8_t accepted[] = "UPDATE_STAGE_BATCH_ACCEPTED";
             --fail_next_stage_update;
-            int32_t status = cancel_update_original_host->v4.v3.executor_request(
+            int32_t status = cancel_update_original_host->executor_request(
                 context, operation, request, request_len, response,
                 response_capacity, response_len);
             if (status != PRDB_QUERY_CALLBACK_OK ||
-                cancel_update_original_host->v4.v3.write_result(
+                cancel_update_original_host->write_result(
                     context, accepted, sizeof(accepted) - 1) != 0) {
                 return PRDB_QUERY_CALLBACK_IO_ERROR;
             }
@@ -122,7 +122,7 @@ static int32_t cancel_update_executor_request(
         }
         static const uint8_t injected[] = "UPDATE_STAGE_FAILURE_INJECTED";
         fail_next_stage_update = 0;
-        (void)cancel_update_original_host->v4.v3.write_result(
+        (void)cancel_update_original_host->write_result(
             context, injected, sizeof(injected) - 1);
         return PRDB_QUERY_CALLBACK_IO_ERROR;
     }
@@ -131,19 +131,19 @@ static int32_t cancel_update_executor_request(
         observe_next_stage_update != 0) {
         static const uint8_t reached[] = "UPDATE_STAGE_REACHED";
         observe_next_stage_update = 0;
-        if (cancel_update_original_host->v4.v3.write_result(
+        if (cancel_update_original_host->write_result(
                 context, reached, sizeof(reached) - 1) != 0) {
             return PRDB_QUERY_CALLBACK_IO_ERROR;
         }
     }
     if (observe_only_stage_update != 0) {
-        int32_t status = cancel_update_original_host->v4.v3.executor_request(
+        int32_t status = cancel_update_original_host->executor_request(
             context, operation, request, request_len, response,
             response_capacity, response_len);
         if (operation == PRDB_IPC_OP_STAGE_UPDATE ||
             operation == PRDB_IPC_OP_STAGE_UPDATES) {
             static const uint8_t returned[] = "UPDATE_STAGE_RETURNED";
-            if (cancel_update_original_host->v4.v3.write_result(
+            if (cancel_update_original_host->write_result(
                     context, returned, sizeof(returned) - 1) != 0) {
                 return PRDB_QUERY_CALLBACK_IO_ERROR;
             }
@@ -152,14 +152,14 @@ static int32_t cancel_update_executor_request(
     }
     if (operation != PRDB_IPC_OP_EXECUTOR_CHECK_CANCELLATION ||
         cancel_update_ready_sent != 0) {
-        return cancel_update_original_host->v4.v3.executor_request(
+        return cancel_update_original_host->executor_request(
             context, operation, request, request_len, response,
             response_capacity, response_len);
     }
 
     static const uint8_t ready[] = "CANCEL_READY";
     static const uint8_t observed[] = "CANCEL_OBSERVED";
-    if (cancel_update_original_host->v4.v3.write_result(
+    if (cancel_update_original_host->write_result(
             context, ready, sizeof(ready) - 1) != 0) {
         return PRDB_QUERY_CALLBACK_IO_ERROR;
     }
@@ -169,12 +169,12 @@ static int32_t cancel_update_executor_request(
         if (sleep_without_signal_interruption(poll_interval) != 0) {
             return PRDB_QUERY_CALLBACK_IO_ERROR;
         }
-        int32_t status = cancel_update_original_host->v4.v3.executor_request(
+        int32_t status = cancel_update_original_host->executor_request(
             context, operation, request, request_len, response,
             response_capacity, response_len);
         if (status != PRDB_QUERY_CALLBACK_OK) return status;
         if (*response_len == 3 && response_capacity >= 3 && response[2] == 1) {
-            return cancel_update_original_host->v4.v3.write_result(
+            return cancel_update_original_host->write_result(
                        context, observed, sizeof(observed) - 1) == 0
                        ? PRDB_QUERY_CALLBACK_OK
                        : PRDB_QUERY_CALLBACK_IO_ERROR;
@@ -253,7 +253,7 @@ static int32_t collect_reference_range_row(
 }
 
 typedef struct ordered_optimizer_result_context {
-    const prdb_host_api_v3 *host;
+    const prdb_host_api_v1 *host;
     const prdb_sdk_sql_column_shape_v1 *columns;
     const prdb_sdk_executor_relation_v1 *relation;
     uint8_t *record_buffer;
@@ -325,7 +325,7 @@ static int32_t emit_ordered_optimizer_row(
 }
 
 typedef struct result_context {
-    const prdb_host_api_v3 *host;
+    const prdb_host_api_v1 *host;
     uint32_t expected_state;
     const uint8_t *expected_value;
     uint64_t expected_value_len;
@@ -337,7 +337,7 @@ typedef struct result_context {
 } result_context;
 
 typedef struct grouped_result_context {
-    const prdb_host_api_v3 *host;
+    const prdb_host_api_v1 *host;
     const prdb_sdk_sql_column_shape_v1 *group_column;
     const prdb_sdk_sql_column_shape_v1 *aggregate_column;
     uint8_t *output;
@@ -347,7 +347,7 @@ typedef struct grouped_result_context {
 } grouped_result_context;
 
 typedef struct analytical_pressure_result_context {
-    const prdb_host_api_v3 *host;
+    const prdb_host_api_v1 *host;
     uint8_t seen[64];
     uint32_t group_count;
 } analytical_pressure_result_context;
@@ -425,7 +425,7 @@ static int32_t verify_analytical_pressure_sum(
 }
 
 typedef struct joined_result_context {
-    const prdb_host_api_v3 *host;
+    const prdb_host_api_v1 *host;
     const prdb_sdk_sql_column_shape_v1 *left_columns;
     const prdb_sdk_sql_column_shape_v1 *right_columns;
     uint8_t *output;
@@ -441,7 +441,7 @@ typedef struct indexed_join_benchmark_result_context {
 } indexed_join_benchmark_result_context;
 
 typedef struct composite_grouped_result_context {
-    const prdb_host_api_v3 *host;
+    const prdb_host_api_v1 *host;
     const prdb_sdk_sql_column_shape_v1 *columns;
     uint32_t column_count;
     uint8_t *output;
@@ -1580,7 +1580,7 @@ static int32_t count_unexpected_group(
     return 0;
 }
 
-static int32_t report_failure(const prdb_host_api_v3 *host,
+static int32_t report_failure(const prdb_host_api_v1 *host,
                               const uint8_t *message, uint64_t length) {
     (void)host->write_result(host->context, message, length);
     return 1;

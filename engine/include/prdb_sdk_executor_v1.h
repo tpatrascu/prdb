@@ -1,7 +1,7 @@
 #ifndef PRDB_SDK_EXECUTOR_V1_H
 #define PRDB_SDK_EXECUTOR_V1_H
 
-#include "prdb_query_abi_v2.h"
+#include "prdb_query_abi_v1.h"
 #include "prdb_query_abi_constants.h"
 #include "prdb_sdk_batch_v1.h"
 #include "prdb_sdk_planner_v1.h"
@@ -36,7 +36,7 @@ typedef struct prdb_sdk_workload_budgets_v1 {
  * The operation is answered locally by the trusted executor and is not sent
  * to storage IPC. */
 int32_t prdb_sdk_executor_get_workload_budgets_v1(
-    const prdb_host_api_v2 *host, uint8_t *response,
+    const prdb_host_api_v1 *host, uint8_t *response,
     uint64_t response_capacity, uint64_t *response_len,
     prdb_sdk_workload_budgets_v1 *out, uint32_t out_capacity);
 
@@ -86,7 +86,7 @@ typedef struct prdb_sdk_executor_index_probe_v1 {
 /* Resolve requires an explicit schema because InvocationV2 has no default
  * schema field. Request and response buffers are caller-owned and bounded. */
 int32_t prdb_sdk_executor_resolve_relation_v1(
-    const prdb_host_api_v2 *host,
+    const prdb_host_api_v1 *host,
     const uint8_t *schema, uint32_t schema_len,
     const uint8_t *relation, uint32_t relation_len,
     uint8_t *response, uint64_t response_capacity, uint64_t *response_len,
@@ -94,7 +94,7 @@ int32_t prdb_sdk_executor_resolve_relation_v1(
     prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_capacity);
 
 int32_t prdb_sdk_executor_open_full_scan_v1(
-    const prdb_host_api_v2 *host, const uint8_t executor_handle[16],
+    const prdb_host_api_v1 *host, const uint8_t executor_handle[16],
     uint8_t *response, uint64_t response_capacity, uint64_t *response_len,
     uint8_t cursor_out[16]);
 
@@ -102,7 +102,7 @@ int32_t prdb_sdk_executor_open_full_scan_v1(
  * VALUE or absent; result column IDs are packed 16-byte identifiers. The
  * decoded rows borrow response and intentionally contain no row handles. */
 int32_t prdb_sdk_executor_scan_index_range_v1(
-    const prdb_host_api_v2 *host, const uint8_t executor_handle[16],
+    const prdb_host_api_v1 *host, const uint8_t executor_handle[16],
     const uint8_t index_id[16], const prdb_sdk_value_v1 *lower_bound,
     uint8_t lower_inclusive, const prdb_sdk_value_v1 *upper_bound,
     uint8_t upper_inclusive, const uint8_t *column_ids,
@@ -112,7 +112,7 @@ int32_t prdb_sdk_executor_scan_index_range_v1(
 
 /* Probes a composite index using two to eight non-NULL leading key values. */
 int32_t prdb_sdk_executor_scan_index_prefix_v1(
-    const prdb_host_api_v2 *host, const uint8_t executor_handle[16],
+    const prdb_host_api_v1 *host, const uint8_t executor_handle[16],
     const uint8_t index_id[16], const prdb_sdk_value_v1 *values,
     uint8_t value_count, const uint8_t *column_ids, uint16_t column_count,
     uint8_t *request, uint64_t request_capacity, uint8_t *response,
@@ -122,7 +122,7 @@ int32_t prdb_sdk_executor_scan_index_prefix_v1(
 /* Runs 1..128 independent non-NULL point or leading-prefix probes in one
  * frame. Result groups remain in probe order and borrow the response bytes. */
 int32_t prdb_sdk_executor_scan_index_ranges_v1(
-    const prdb_host_api_v2 *host, const uint8_t executor_handle[16],
+    const prdb_host_api_v1 *host, const uint8_t executor_handle[16],
     const uint8_t index_id[16],
     const prdb_sdk_executor_index_probe_v1 *probes, uint16_t probe_count,
     const uint8_t *column_ids, uint16_t column_count,
@@ -131,19 +131,19 @@ int32_t prdb_sdk_executor_scan_index_ranges_v1(
     prdb_sdk_index_ranges_v1 *ranges_out, uint32_t ranges_out_capacity);
 
 int32_t prdb_sdk_executor_next_batch_v1(
-    const prdb_host_api_v2 *host, const uint8_t cursor[16],
+    const prdb_host_api_v1 *host, const uint8_t cursor[16],
     uint16_t max_candidates, uint32_t max_bytes,
     uint8_t *response, uint64_t response_capacity, uint64_t *response_len,
     prdb_sdk_batch_v1 *batch, uint32_t batch_out_capacity);
 
 int32_t prdb_sdk_executor_close_cursor_v1(
-    const prdb_host_api_v2 *host, const uint8_t cursor[16],
+    const prdb_host_api_v1 *host, const uint8_t cursor[16],
     uint8_t *response, uint64_t response_capacity, uint64_t *response_len);
 
 /* Encodes the caller's complete schema-order insert shape into request before
  * submitting it. VALUE/NULL/DEFAULT use the public state constants below. */
 int32_t prdb_sdk_executor_stage_insert_v1(
-    const prdb_host_api_v2 *host, const uint8_t relation_handle[16],
+    const prdb_host_api_v1 *host, const uint8_t relation_handle[16],
     const prdb_sdk_executor_insert_value_v1 *values, uint16_t value_count,
     uint8_t *request, uint64_t request_capacity, uint8_t *response,
     uint64_t response_capacity, uint64_t *response_len,
@@ -152,7 +152,7 @@ int32_t prdb_sdk_executor_stage_insert_v1(
 /* Patches accept VALUE/NULL only. Duplicate and out-of-range ordinals are
  * rejected before the host callback is invoked. */
 int32_t prdb_sdk_executor_stage_update_v1(
-    const prdb_host_api_v2 *host, const uint8_t row_handle[16],
+    const prdb_host_api_v1 *host, const uint8_t row_handle[16],
     const prdb_sdk_executor_update_patch_v1 *patches, uint16_t patch_count,
     uint8_t *request, uint64_t request_capacity, uint8_t *response,
     uint64_t response_capacity, uint64_t *response_len);
@@ -160,7 +160,7 @@ int32_t prdb_sdk_executor_stage_update_v1(
 /* Stages deletion of a connection-local row handle. Storage rechecks its
  * invocation, snapshot, grant, policy and row-version authority. */
 int32_t prdb_sdk_executor_stage_delete_v1(
-    const prdb_host_api_v2 *host, const uint8_t row_handle[16],
+    const prdb_host_api_v1 *host, const uint8_t row_handle[16],
     uint8_t *response, uint64_t response_capacity, uint64_t *response_len);
 
 /* Batch mutations use a version/count header followed by length-delimited
@@ -168,18 +168,18 @@ int32_t prdb_sdk_executor_stage_delete_v1(
  * 1 MiB IPC frame; the storage handler aborts the invocation on any member
  * failure. Insert values are row-major; update patches apply to each handle. */
 int32_t prdb_sdk_executor_stage_inserts_v1(
-    const prdb_host_api_v2 *host, const uint8_t relation_handle[16],
+    const prdb_host_api_v1 *host, const uint8_t relation_handle[16],
     const prdb_sdk_executor_insert_value_v1 *values, uint16_t row_count,
     uint16_t value_count, uint8_t *request, uint64_t request_capacity,
     uint8_t *response, uint64_t response_capacity, uint64_t *response_len,
     uint8_t *row_handles_out, uint64_t row_handles_capacity);
 int32_t prdb_sdk_executor_stage_updates_v1(
-    const prdb_host_api_v2 *host, const uint8_t *row_handles,
+    const prdb_host_api_v1 *host, const uint8_t *row_handles,
     uint16_t row_count, const prdb_sdk_executor_update_patch_v1 *patches,
     uint16_t patch_count, uint8_t *request, uint64_t request_capacity,
     uint8_t *response, uint64_t response_capacity, uint64_t *response_len);
 int32_t prdb_sdk_executor_stage_deletes_v1(
-    const prdb_host_api_v2 *host, const uint8_t *row_handles,
+    const prdb_host_api_v1 *host, const uint8_t *row_handles,
     uint16_t row_count, uint8_t *request, uint64_t request_capacity,
     uint8_t *response, uint64_t response_capacity, uint64_t *response_len);
 
@@ -187,6 +187,6 @@ int32_t prdb_sdk_executor_stage_deletes_v1(
  * cancelled_out (0 or 1). Query runners should poll between bounded work
  * batches and stop promptly when the result is 1. */
 int32_t prdb_sdk_executor_check_cancelled_v1(
-    const prdb_host_api_v2 *host, int32_t *cancelled_out);
+    const prdb_host_api_v1 *host, int32_t *cancelled_out);
 
 #endif

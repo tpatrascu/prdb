@@ -141,9 +141,9 @@ int main(void) {
     static prdb_sdk_sql_column_shape_v1 join_left_columns[3];
     static prdb_sdk_sql_column_shape_v1 join_right_columns[3];
     static resolve_context resolve = {0};
-    static prdb_host_api_v2 host = {0};
-    static prdb_host_api_v4 host_v4 = {0};
-    static prdb_host_api_v5 host_v5 = {0};
+    static prdb_host_api_v1 host = {0};
+    static prdb_host_api_v1 host_v4 = {0};
+    static prdb_host_api_v1 host_v5 = {0};
     static prdb_sdk_executor_relation_v1 acquired_relation;
     static prdb_sdk_sql_column_shape_v1 acquired_columns[4];
     static prdb_sdk_optimizer_scan_state_v1 scan_state;
@@ -307,7 +307,7 @@ int main(void) {
     resolve.cancellation_response[1] = 1;
     resolve.close_response[1] = 1;
     host.struct_size = sizeof(host);
-    host.abi_version = PRDB_QUERY_ABI_V2_VERSION;
+    host.abi_version = PRDB_QUERY_ABI_VERSION;
     host.context = &resolve;
     host.executor_request = resolve_plan_relation;
     {
@@ -758,12 +758,12 @@ int main(void) {
            PRDB_SDK_SQL_OK);
     resolve.optimizer_response_len = build_optimizer_response(
         resolve.optimizer_response, limit_one_plan, payload_len);
-    host_v4.v3.struct_size = sizeof(host_v4.v3);
-    host_v4.v3.abi_version = PRDB_QUERY_ABI_V3_VERSION;
-    host_v4.v3.context = &resolve;
-    host_v4.v3.executor_request = resolve_plan_relation;
-    host_v4.v3.write_result = write_result;
-    host_v4.v3.statement_failure = statement_failure;
+    host_v4.struct_size = sizeof(host_v4);
+    host_v4.abi_version = PRDB_QUERY_ABI_VERSION;
+    host_v4.context = &resolve;
+    host_v4.executor_request = resolve_plan_relation;
+    host_v4.write_result = write_result;
+    host_v4.statement_failure = statement_failure;
     host_v4.optimizer_request = optimizer_request;
 
     {
@@ -2076,7 +2076,7 @@ int main(void) {
     resolve.stage_delete_calls = 0;
     resolve.statement_failures = 0;
     resolve.event_count = 0;
-    host_v5.v4 = host_v4;
+    host_v5 = host_v4;
     host_v5.optimizer_request = optimizer_request_v5;
     assert(prdb_sdk_optimizer_encode_delete_v1(
                &delete_statement, execute_delete_parameters, 1,

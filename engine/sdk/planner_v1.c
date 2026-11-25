@@ -292,7 +292,7 @@ static int planner_identifier(const uint8_t *value, uint32_t length) {
 }
 
 int32_t prdb_sdk_planner_describe_relation_v1(
-    const prdb_host_api_v2 *host, const uint8_t *schema, uint32_t schema_len,
+    const prdb_host_api_v1 *host, const uint8_t *schema, uint32_t schema_len,
     const uint8_t *relation_name, uint32_t relation_name_len, uint8_t *response,
     uint64_t response_capacity, uint64_t *response_len,
     prdb_sdk_planner_relation_v1 *out, uint32_t out_capacity,
@@ -303,7 +303,7 @@ int32_t prdb_sdk_planner_describe_relation_v1(
     int32_t decode_status;
     uint32_t request_len;
     if (host == NULL || host->struct_size < sizeof(*host) ||
-        host->abi_version != PRDB_QUERY_ABI_V2_VERSION ||
+        host->abi_version != PRDB_QUERY_ABI_VERSION ||
         host->planner_request == NULL || !planner_identifier(schema, schema_len) ||
         !planner_identifier(relation_name, relation_name_len) || response == NULL ||
         response_len == NULL || out == NULL || out_capacity < sizeof(*out) ||

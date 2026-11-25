@@ -3,7 +3,7 @@
 
 #include "prdb_sdk_sql_exec_v1.h"
 #include "prdb_sdk_sql_result_v1.h"
-#include "prdb_query_abi_v6.h"
+#include "prdb_query_abi_v1.h"
 
 #define PRDB_SDK_SQL_DISPATCH_ABI_V1_VERSION UINT32_C(1)
 #define PRDB_SDK_SQL_DISPATCH_MAX_PARAMETER_BYTES UINT64_C(1048576)
@@ -32,7 +32,7 @@ int32_t prdb_sdk_sql_decode_parameters_v1(
  * bounded executor APIs. Invalid PSP1/SQL input and execution errors latch
  * failure. */
 int32_t prdb_sdk_sql_run_v1(
-    const prdb_host_api_v3 *host, const uint8_t *schema,
+    const prdb_host_api_v1 *host, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     const uint8_t *parameters, uint64_t parameters_len);
 
@@ -40,7 +40,7 @@ int32_t prdb_sdk_sql_run_v1(
  * UPDATE v1, and DELETE v1 use bounded mutation APIs; SELECT input is
  * delegated to the SELECT entry point. Errors latch statement failure. */
 int32_t prdb_sdk_sql_run_statement_v1(
-    const prdb_host_api_v3 *host, const uint8_t *schema,
+    const prdb_host_api_v1 *host, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     const uint8_t *parameters, uint64_t parameters_len);
 
@@ -48,7 +48,7 @@ int32_t prdb_sdk_sql_run_statement_v1(
  * supported COUNT(*) GROUP BY shapes, and alias-aware JOINs use the trusted
  * opaque spill callback. A null callback retains bounded in-memory execution. */
 int32_t prdb_sdk_sql_run_statement_v2(
-    const prdb_host_api_v6 *host, const uint8_t *schema,
+    const prdb_host_api_v1 *host, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     const uint8_t *parameters, uint64_t parameters_len);
 
@@ -56,7 +56,7 @@ int32_t prdb_sdk_sql_run_statement_v2(
  * validated access path. This entry point requires the ABI v4 optimizer
  * callback; the legacy v1/v2 dispatchers remain available unchanged. */
 int32_t prdb_sdk_sql_run_statement_optimizer_v1(
-    const prdb_host_api_v4 *host, const uint8_t *schema,
+    const prdb_host_api_v1 *host, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     const uint8_t *parameters, uint64_t parameters_len);
 

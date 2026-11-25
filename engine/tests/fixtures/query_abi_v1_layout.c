@@ -2,7 +2,7 @@
 
 #include <stddef.h>
 
-_Static_assert(sizeof(prdb_host_api_v1) == 8, "host ABI size");
+_Static_assert(sizeof(prdb_host_api_v1) == 64, "host ABI size");
 _Static_assert(_Alignof(prdb_host_api_v1) == 4, "host ABI alignment");
 _Static_assert(sizeof(prdb_invocation_v1) == 24, "invocation ABI size");
 _Static_assert(_Alignof(prdb_invocation_v1) == 8, "invocation ABI alignment");

@@ -149,7 +149,7 @@ def main() -> int:
         if (
             not native_abis
             or native_abis != sorted(set(native_abis))
-            or any(not 1 <= abi <= 6 for abi in native_abis)
+            or any(abi != 1 for abi in native_abis)
         ):
             raise ValueError("native ABI list must be sorted unique versions in 1..=6")
         if len({args.library.resolve(), args.metadata.resolve(), args.checksum.resolve()}) != 3:

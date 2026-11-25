@@ -771,7 +771,7 @@ static int32_t run_query(mock_state *mock, row_capture *capture,
         PRDB_SDK_SQL_EXEC_JOIN_MAX_ROWS] = {{{0}}};
     prdb_sdk_sql_join_materialized_row_v1 right_rows[
         PRDB_SDK_SQL_EXEC_JOIN_MAX_ROWS] = {{{0}}};
-    prdb_host_api_v3 host = {sizeof(host), PRDB_QUERY_ABI_V3_VERSION,
+    prdb_host_api_v1 host = {sizeof(host), PRDB_QUERY_ABI_VERSION,
                              mock, executor_request, planner_request, NULL,
                              statement_failure};
     uint32_t name_len = (uint32_t)strlen("account_id");
@@ -821,7 +821,7 @@ static int32_t run_query_v19(mock_state *mock, row_capture *capture,
         PRDB_SDK_SQL_EXEC_JOIN_MAX_ROWS] = {{{0}}};
     prdb_sdk_sql_join_materialized_row_v1 right_rows[
         PRDB_SDK_SQL_EXEC_JOIN_MAX_ROWS] = {{{0}}};
-    prdb_host_api_v3 host = {sizeof(host), PRDB_QUERY_ABI_V3_VERSION,
+    prdb_host_api_v1 host = {sizeof(host), PRDB_QUERY_ABI_VERSION,
                              mock, executor_request, planner_request, NULL,
                              statement_failure};
     memcpy(integer_names[0], "account_id", sizeof("account_id") - 1);
@@ -873,12 +873,12 @@ static int32_t run_query_optimizer_with_materialized_capacity(
         PRDB_SDK_SQL_EXEC_JOIN_MAX_ROWS] = {{{0}}};
     prdb_sdk_sql_join_materialized_row_v1 right_rows[
         PRDB_SDK_SQL_EXEC_JOIN_MAX_ROWS] = {{{0}}};
-    prdb_host_api_v3 host3 = {sizeof(host3), PRDB_QUERY_ABI_V3_VERSION,
+    prdb_host_api_v1 host3 = {sizeof(host3), PRDB_QUERY_ABI_VERSION,
                               mock, executor_request, planner_request,
                               write_result,
                               statement_failure};
-    prdb_host_api_v4 host4 = {host3, optimizer_request_v4};
-    prdb_host_api_v5 host5 = {host4, optimizer_request_v5};
+    prdb_host_api_v1 host5 = host3;
+    host5.optimizer_request = optimizer_request_v5;
     memcpy(integer_names[0], "account_id", sizeof("account_id") - 1);
     memcpy(integer_names[1], "value", sizeof("value") - 1);
     for (uint32_t index = 0; index < 2; ++index) {
@@ -945,7 +945,7 @@ static int32_t run_query_v20(mock_state *mock, row_capture *capture,
         PRDB_SDK_SQL_EXEC_JOIN_MAX_ROWS] = {{{0}}};
     prdb_sdk_sql_join_materialized_row_v1 right_rows[
         PRDB_SDK_SQL_EXEC_JOIN_MAX_ROWS] = {{{0}}};
-    prdb_host_api_v3 host = {sizeof(host), PRDB_QUERY_ABI_V3_VERSION,
+    prdb_host_api_v1 host = {sizeof(host), PRDB_QUERY_ABI_VERSION,
                              mock, executor_request, planner_request, NULL,
                              statement_failure};
     memcpy(integer_names[0], "account_id", sizeof("account_id") - 1);
@@ -996,11 +996,11 @@ static int32_t run_query_spill_v21(
         PRDB_SDK_SQL_EXEC_JOIN_MAX_ROWS] = {{{0}}};
     prdb_sdk_sql_join_materialized_row_v1 right_rows[
         PRDB_SDK_SQL_EXEC_JOIN_MAX_ROWS] = {{{0}}};
-    prdb_host_api_v3 host3 = {sizeof(host3), PRDB_QUERY_ABI_V3_VERSION,
+    prdb_host_api_v1 host3 = {sizeof(host3), PRDB_QUERY_ABI_VERSION,
                               mock, executor_request, planner_request, NULL,
                               statement_failure};
-    prdb_host_api_v6 host6 = {0};
-    host6.v5.v4.v3 = host3;
+    prdb_host_api_v1 host6 = {0};
+    host6 = host3;
     host6.spill_request = spill_request;
     memcpy(integer_names[0], "account_id", sizeof("account_id") - 1);
     memcpy(integer_names[1], "value", sizeof("value") - 1);
@@ -1032,11 +1032,11 @@ static int32_t run_query_spill_v21(
 static int32_t run_statement_spill_v21(mock_state *mock, const uint8_t *sql,
                                        uint64_t sql_len) {
     static const uint8_t schema[] = "app";
-    prdb_host_api_v3 host3 = {sizeof(host3), PRDB_QUERY_ABI_V3_VERSION,
+    prdb_host_api_v1 host3 = {sizeof(host3), PRDB_QUERY_ABI_VERSION,
                               mock, executor_request, planner_request,
                               write_result, statement_failure};
-    prdb_host_api_v6 host6 = {0};
-    host6.v5.v4.v3 = host3;
+    prdb_host_api_v1 host6 = {0};
+    host6 = host3;
     host6.spill_request = spill_request;
     return prdb_sdk_sql_run_statement_v2(
         &host6, schema, sizeof(schema) - 1, sql, sql_len, NULL, 0);
@@ -1045,11 +1045,11 @@ static int32_t run_statement_spill_v21(mock_state *mock, const uint8_t *sql,
 static int32_t run_statement_no_spill_v6(mock_state *mock, const uint8_t *sql,
                                          uint64_t sql_len) {
     static const uint8_t schema[] = "app";
-    prdb_host_api_v3 host3 = {sizeof(host3), PRDB_QUERY_ABI_V3_VERSION,
+    prdb_host_api_v1 host3 = {sizeof(host3), PRDB_QUERY_ABI_VERSION,
                               mock, executor_request, planner_request,
                               write_result, statement_failure};
-    prdb_host_api_v6 host6 = {0};
-    host6.v5.v4.v3 = host3;
+    prdb_host_api_v1 host6 = {0};
+    host6 = host3;
     return prdb_sdk_sql_run_statement_v2(
         &host6, schema, sizeof(schema) - 1, sql, sql_len, NULL, 0);
 }
@@ -1077,11 +1077,11 @@ static int32_t run_query_optimizer_v20(
         PRDB_SDK_SQL_EXEC_JOIN_MAX_ROWS] = {{{0}}};
     prdb_sdk_sql_join_materialized_row_v1 right_rows[
         PRDB_SDK_SQL_EXEC_JOIN_MAX_ROWS] = {{{0}}};
-    prdb_host_api_v3 host3 = {sizeof(host3), PRDB_QUERY_ABI_V3_VERSION,
+    prdb_host_api_v1 host3 = {sizeof(host3), PRDB_QUERY_ABI_VERSION,
                               mock, executor_request, planner_request, NULL,
                               statement_failure};
-    prdb_host_api_v4 host4 = {host3, optimizer_request_v4};
-    prdb_host_api_v5 host5 = {host4, optimizer_request_v5};
+    prdb_host_api_v1 host5 = host3;
+    host5.optimizer_request = optimizer_request_v5;
     memcpy(integer_names[0], "account_id", sizeof("account_id") - 1);
     memcpy(integer_names[1], "value", sizeof("value") - 1);
     for (uint32_t index = 0; index < 2; ++index) {

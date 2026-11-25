@@ -1829,8 +1829,7 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let release =
-            build_dir.join("releases/linux-x86_64/x86_64-v1/test-runtime/sdk-1-abis1,2,3,4,5,6");
+        let release = build_dir.join("releases/linux-x86_64/x86_64-v1/test-runtime/sdk-1-abis1");
         let metadata = fs::read(release.join("sdk-release.json")).unwrap();
         let library = fs::read(release.join("libprdb_sql.so.1")).unwrap();
         let allowed = HashSet::from(["libc.so.6".to_owned()]);
@@ -1848,13 +1847,13 @@ mod tests {
         repository.install(&metadata, &library, &allowed).unwrap();
 
         let manifest = encode_manifest_v1(&ArtifactManifestV1 {
-            native_abi_version: 4,
+            native_abi_version: 1,
             sdk_release: 1,
             cpu_baseline: "x86_64-v1".to_owned(),
             runtime_profile: "test-runtime".to_owned(),
             compiler_identity: "supervisor test".to_owned(),
-            descriptor_symbol: "prdb_query_descriptor_v4".to_owned(),
-            entry_point_symbol: "prdb_query_main_v4".to_owned(),
+            descriptor_symbol: "prdb_query_descriptor_v1".to_owned(),
+            entry_point_symbol: "prdb_query_main_v1".to_owned(),
             dependencies: vec!["libc.so.6".to_owned(), "libprdb_sql.so.1".to_owned()],
         })
         .unwrap();

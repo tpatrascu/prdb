@@ -282,7 +282,7 @@ static int32_t run_query(mock_state *mock, row_capture *capture,
         PRDB_SDK_SQL_EXEC_JOIN_MAX_ROWS] = {{{0}}};
     prdb_sdk_sql_join_materialized_row_v1 right_rows[
         PRDB_SDK_SQL_EXEC_JOIN_MAX_ROWS] = {{{0}}};
-    prdb_host_api_v3 host = {sizeof(host), PRDB_QUERY_ABI_V3_VERSION,
+    prdb_host_api_v1 host = {sizeof(host), PRDB_QUERY_ABI_VERSION,
                              mock, executor_request, planner_request, NULL,
                              statement_failure};
     uint32_t name_len = (uint32_t)strlen("account_id");
@@ -332,7 +332,7 @@ static int32_t run_query_v16(mock_state *mock, row_capture *capture,
         PRDB_SDK_SQL_EXEC_JOIN_MAX_ROWS] = {{{0}}};
     prdb_sdk_sql_join_materialized_row_v1 right_rows[
         PRDB_SDK_SQL_EXEC_JOIN_MAX_ROWS] = {{{0}}};
-    prdb_host_api_v3 host = {sizeof(host), PRDB_QUERY_ABI_V3_VERSION,
+    prdb_host_api_v1 host = {sizeof(host), PRDB_QUERY_ABI_VERSION,
                              mock, executor_request, planner_request, NULL,
                              statement_failure};
     memcpy(integer_names[0], "account_id", sizeof("account_id") - 1);

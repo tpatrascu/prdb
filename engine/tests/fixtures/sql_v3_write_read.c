@@ -11,22 +11,16 @@
 #include <string.h>
 #include <time.h>
 
-const prdb_query_descriptor_v3_record prdb_query_descriptor_v3 = {
-    sizeof(prdb_query_descriptor_v3_record), PRDB_QUERY_ABI_V3_VERSION,
-    sizeof(prdb_host_api_v3), sizeof(prdb_invocation_v3)};
-const prdb_query_descriptor_v4_record prdb_query_descriptor_v4 = {
-    sizeof(prdb_query_descriptor_v4_record), PRDB_QUERY_ABI_V4_VERSION,
-    sizeof(prdb_host_api_v4), sizeof(prdb_invocation_v4)};
-const prdb_query_descriptor_v5_record prdb_query_descriptor_v5 = {
-    sizeof(prdb_query_descriptor_v5_record), PRDB_QUERY_ABI_V5_VERSION,
-    sizeof(prdb_host_api_v5), sizeof(prdb_invocation_v5)};
+const prdb_query_descriptor_v1_record prdb_query_descriptor_v1 = {
+    sizeof(prdb_query_descriptor_v1_record), PRDB_QUERY_ABI_VERSION,
+    sizeof(prdb_host_api_v1), sizeof(prdb_invocation_v1)};
 
-static const prdb_host_api_v5 *cancel_update_original_host;
+static const prdb_host_api_v1 *cancel_update_original_host;
 static uint32_t cancel_update_ready_sent;
 static uint32_t fail_next_stage_update;
 static uint32_t observe_next_stage_update;
 static uint32_t observe_only_stage_update;
-static const prdb_host_api_v4 *range_observer_original_host;
+static const prdb_host_api_v1 *range_observer_original_host;
 static uint32_t range_observer_scan_requests;
 static uint32_t range_observer_open_scan_requests;
 static uint32_t range_observer_scan_ranges_requests;
@@ -36,9 +30,9 @@ static uint32_t range_observer_cancellation_checks;
 #include "sql_v3_write_read/callbacks_collectors.h"
 
 static int32_t run_write_read_fixture(
-    const prdb_host_api_v3 *host, const prdb_invocation_v3 *invocation,
-    const prdb_host_api_v4 *optimizer_host,
-    const prdb_host_api_v5 *optimizer_host_v5) {
+    const prdb_host_api_v1 *host, const prdb_invocation_v1 *invocation,
+    const prdb_host_api_v1 *optimizer_host,
+    const prdb_host_api_v1 *optimizer_host_v5) {
     static const uint8_t insert_sql[] = "INSERT INTO records VALUES (NULL)";
     static const uint8_t generated_identity_insert_sql[] =
         "INSERT INTO identity_records (id) VALUES (DEFAULT)";
@@ -382,7 +376,7 @@ static int32_t run_write_read_fixture(
 
     if (host == NULL || invocation == NULL ||
         host->struct_size < sizeof(*host) ||
-        host->abi_version != PRDB_QUERY_ABI_V3_VERSION ||
+        host->abi_version != PRDB_QUERY_ABI_VERSION ||
         host->executor_request == NULL || host->planner_request == NULL ||
         host->write_result == NULL || host->statement_failure == NULL) {
         return 1;
@@ -418,7 +412,7 @@ static int32_t run_write_read_fixture(
             0, 0, 0, 4, 7, 0, 0, 0,
             0, 0, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0, 1, 0,
             0, 0, 0, 0};
-        prdb_host_api_v4 observed_host;
+        prdb_host_api_v1 observed_host;
 
         if (optimizer_host == NULL) return 1;
         observed_host = *optimizer_host;
@@ -426,7 +420,7 @@ static int32_t run_write_read_fixture(
         range_observer_scan_ranges_requests = 0;
         range_observer_open_scan_requests = 0;
         range_observer_cancellation_checks = 0;
-        observed_host.v3.executor_request = invocation->parameters[0] == '^'
+        observed_host.executor_request = invocation->parameters[0] == '^'
             ? cancel_range_observer_executor_request
             : observe_range_executor_request;
         status = prdb_sdk_sql_run_statement_optimizer_v1(
@@ -848,7 +842,7 @@ static int32_t run_write_read_fixture(
         prdb_sdk_sql_column_shape_v1 columns[2] = {{0}};
         prdb_sdk_select_binding_v1 binding = {0};
         prdb_sdk_value_v1 scratch[2] = {{0}};
-        prdb_host_api_v5 cancel_host;
+        prdb_host_api_v1 cancel_host;
         uint32_t updated = UINT32_MAX;
         int32_t update_status;
 
@@ -862,7 +856,7 @@ static int32_t run_write_read_fixture(
         cancel_host = *optimizer_host_v5;
         cancel_update_original_host = optimizer_host_v5;
         cancel_update_ready_sent = 0;
-        cancel_host.v4.v3.executor_request = cancel_update_executor_request;
+        cancel_host.executor_request = cancel_update_executor_request;
         update_status = prdb_sdk_optimizer_execute_update_ast_v1(
             &cancel_host, &update, parameters, 2, schema, sizeof(schema) - 1,
             16, sizeof(batch_response), request, sizeof(request), response,
@@ -904,7 +898,7 @@ static int32_t run_write_read_fixture(
         prdb_sdk_sql_column_shape_v1 columns[2] = {{0}};
         prdb_sdk_select_binding_v1 binding = {0};
         prdb_sdk_value_v1 scratch[2] = {{0}};
-        prdb_host_api_v5 failure_host;
+        prdb_host_api_v1 failure_host;
         uint32_t updated = UINT32_MAX;
         int32_t update_status;
 
@@ -922,7 +916,7 @@ static int32_t run_write_read_fixture(
         /* Keep each encoded UPDATE batch to one row so the second staging
          * request can fail after the first one has been accepted. */
         fail_next_stage_update = 2;
-        failure_host.v4.v3.executor_request = cancel_update_executor_request;
+        failure_host.executor_request = cancel_update_executor_request;
         update_status = prdb_sdk_optimizer_execute_update_ast_v1(
             &failure_host, &update, parameters, 2, schema, sizeof(schema) - 1,
             16, 64, request, sizeof(request), response,
@@ -1014,7 +1008,7 @@ static int32_t run_write_read_fixture(
         prdb_sdk_sql_column_shape_v1 columns[2] = {{0}};
         prdb_sdk_select_binding_v1 binding = {0};
         prdb_sdk_value_v1 scratch[2] = {{0}};
-        prdb_host_api_v5 observed_host;
+        prdb_host_api_v1 observed_host;
         uint32_t updated = 0;
         int32_t update_status;
 
@@ -1031,7 +1025,7 @@ static int32_t run_write_read_fixture(
             }
         }
         observed_host = *optimizer_host_v5;
-        observed_host.v4.v3.executor_request = cancel_update_executor_request;
+        observed_host.executor_request = cancel_update_executor_request;
         cancel_update_original_host = optimizer_host_v5;
         observe_next_stage_update = 1;
         observe_only_stage_update = 1;
@@ -2641,7 +2635,7 @@ static int32_t run_write_read_fixture(
         prdb_sdk_value_v1 optimizer_source_cells[9] = {{0}};
         prdb_sdk_value_v1 optimizer_projected_values[9] = {{0}};
         optimizer_result_context optimizer_results = {0};
-        prdb_host_api_v4 range_observer_host = {0};
+        prdb_host_api_v1 range_observer_host = {0};
         uint32_t optimizer_rows = 0;
         uint32_t parse_error_offset = 0;
         int32_t optimizer_range_status = PRDB_SDK_OPTIMIZER_PLAN_OK;
@@ -2677,7 +2671,7 @@ static int32_t run_write_read_fixture(
             range_observer_original_host = optimizer_host;
             range_observer_scan_requests = 0;
             range_observer_open_scan_requests = 0;
-            range_observer_host.v3.executor_request =
+            range_observer_host.executor_request =
                 observe_range_executor_request;
             if (prdb_sdk_sql_parse_select_v1(
                     optimizer_small_estimate_select_sql,
@@ -2755,7 +2749,7 @@ static int32_t run_write_read_fixture(
             range_observer_host = *optimizer_host;
             range_observer_original_host = optimizer_host;
             range_observer_scan_requests = 0;
-            range_observer_host.v3.executor_request =
+            range_observer_host.executor_request =
                 observe_range_executor_request;
             optimizer_range_status =
                 prdb_sdk_optimizer_execute_select_ast_with_parameters_v1(
@@ -3217,27 +3211,12 @@ static int32_t run_write_read_fixture(
     return 0;
 }
 
-int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
-                           const prdb_invocation_v3 *invocation) {
-    return run_write_read_fixture(host, invocation, NULL, NULL);
-}
-
-int32_t prdb_query_main_v4(const prdb_host_api_v4 *host,
-                           const prdb_invocation_v4 *invocation) {
-    if (host == NULL || host->v3.struct_size < sizeof(host->v3) ||
-        host->v3.abi_version != PRDB_QUERY_ABI_V3_VERSION ||
+int32_t prdb_query_main_v1(const prdb_host_api_v1 *host,
+                           const prdb_invocation_v1 *invocation) {
+    if (host == NULL || host->struct_size < sizeof(*host) ||
+        host->abi_version != PRDB_QUERY_ABI_VERSION ||
         host->optimizer_request == NULL) {
         return 1;
     }
-    return run_write_read_fixture(&host->v3, invocation, host, NULL);
-}
-
-int32_t prdb_query_main_v5(const prdb_host_api_v5 *host,
-                           const prdb_invocation_v5 *invocation) {
-    if (host == NULL || host->v4.v3.struct_size < sizeof(host->v4.v3) ||
-        host->v4.v3.abi_version != PRDB_QUERY_ABI_V3_VERSION ||
-        host->v4.optimizer_request == NULL || host->optimizer_request == NULL) {
-        return 1;
-    }
-    return run_write_read_fixture(&host->v4.v3, invocation, &host->v4, host);
+    return run_write_read_fixture(host, invocation, host, host);
 }

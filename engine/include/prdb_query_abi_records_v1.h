@@ -5,6 +5,13 @@
 typedef struct prdb_host_api_v1 {
     uint32_t struct_size;
     uint32_t abi_version;
+    void * context;
+    prdb_query_ipc_request_v1_fn executor_request;
+    prdb_query_ipc_request_v1_fn planner_request;
+    prdb_query_write_result_v1_fn write_result;
+    prdb_query_statement_failure_v1_fn statement_failure;
+    prdb_query_optimizer_request_v1_fn optimizer_request;
+    prdb_query_spill_request_v1_fn spill_request;
 } prdb_host_api_v1;
 
 typedef struct prdb_invocation_v1 {

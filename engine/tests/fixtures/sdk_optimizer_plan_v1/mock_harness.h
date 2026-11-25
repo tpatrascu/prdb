@@ -1152,11 +1152,12 @@ typedef struct resolve_context {
     uint32_t event_count;
 } resolve_context;
 
-static int32_t optimizer_request(void *context, const uint8_t *request,
-                                 uint64_t request_len, uint8_t *response,
-                                 uint64_t response_capacity,
+static int32_t optimizer_request(void *context, uint16_t operation,
+                                 const uint8_t *request, uint64_t request_len,
+                                 uint8_t *response, uint64_t response_capacity,
                                  uint64_t *response_len) {
     resolve_context *resolved = (resolve_context *)context;
+    (void)operation;
     assert(request_len >= 16 && request[0] == 0 && request[1] == 1);
     if (resolved->event_count < 32) {
         resolved->events[resolved->event_count++] = UINT16_C(0xffff);
@@ -1184,7 +1185,7 @@ static int32_t optimizer_request_v5(
     assert(request[2] == (operation == PRDB_IPC_OP_OPTIMIZE_DELETE
                               ? PRDB_OPTIMIZER_DELETE_STATEMENT
                               : PRDB_OPTIMIZER_UPDATE_STATEMENT));
-    return optimizer_request(context, request, request_len, response,
+    return optimizer_request(context, operation, request, request_len, response,
                              response_capacity, response_len);
 }
 

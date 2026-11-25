@@ -90,10 +90,7 @@ pub fn package_query_repository(options: &PackageOptions) -> Result<PackageSumma
     let shared_linker = canonical_compiler(&options.shared_linker)?;
     let patchelf = canonical_compiler(&options.patchelf)?;
     let include_dir = fs::canonicalize(&options.include_dir)?;
-    if !include_dir.is_dir()
-        || !(1..=4).contains(&options.native_abi_version)
-        || options.sdk_release == 0
-    {
+    if !include_dir.is_dir() || options.native_abi_version != 1 || options.sdk_release == 0 {
         return Err(PackageError::InvalidConfiguration);
     }
     validate_client_sql_library(&sdk_library, options.sdk_release)?;

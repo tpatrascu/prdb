@@ -69,7 +69,7 @@ The version-1 file is UTF-8 JSON with this canonical shape (all keys shown are r
         "target": "linux-x86_64",
         "cpu_baseline": "x86_64-v1",
         "runtime_profile": "nixos-glibc-2.42",
-        "native_abi": 5
+        "native_abi": 1
       },
       "default_credential": "alice",
       "credentials": [

@@ -3,8 +3,8 @@
     {
       "c_type": "prdb_host_api_v1",
       "rust_type": "HostApiV1",
-      "size": 8,
-      "alignment": 4,
+      "size": 64,
+      "alignment": 8,
       "fields": [
         {
           "name": "struct_size",
@@ -21,15 +21,68 @@
           "rust_type": "u32",
           "c_name": "abi_version",
           "rust_name": "abi_version"
+        },
+        {
+          "name": "context",
+          "offset": 8,
+          "c_type": "void *",
+          "rust_type": "*mut std::ffi::c_void",
+          "c_name": "context",
+          "rust_name": "context"
+        },
+        {
+          "name": "executor_request",
+          "offset": 16,
+          "c_type": "prdb_query_ipc_request_v1_fn",
+          "rust_type": "Option<QueryIpcRequestV1>",
+          "c_name": "executor_request",
+          "rust_name": "executor_request"
+        },
+        {
+          "name": "planner_request",
+          "offset": 24,
+          "c_type": "prdb_query_ipc_request_v1_fn",
+          "rust_type": "Option<QueryIpcRequestV1>",
+          "c_name": "planner_request",
+          "rust_name": "planner_request"
+        },
+        {
+          "name": "write_result",
+          "offset": 32,
+          "c_type": "prdb_query_write_result_v1_fn",
+          "rust_type": "Option<QueryWriteResultV1>",
+          "c_name": "write_result",
+          "rust_name": "write_result"
+        },
+        {
+          "name": "statement_failure",
+          "offset": 40,
+          "c_type": "prdb_query_statement_failure_v1_fn",
+          "rust_type": "Option<QueryStatementFailureV1>",
+          "c_name": "statement_failure",
+          "rust_name": "statement_failure"
+        },
+        {
+          "name": "optimizer_request",
+          "offset": 48,
+          "c_type": "prdb_query_optimizer_request_v1_fn",
+          "rust_type": "Option<QueryOptimizerRequestV1>",
+          "c_name": "optimizer_request",
+          "rust_name": "optimizer_request"
+        },
+        {
+          "name": "spill_request",
+          "offset": 56,
+          "c_type": "prdb_query_spill_request_v1_fn",
+          "rust_type": "Option<QuerySpillRequestV1>",
+          "c_name": "spill_request",
+          "rust_name": "spill_request"
         }
       ],
       "version": "1",
       "derives": [
         "Clone",
-        "Copy",
-        "Debug",
-        "Eq",
-        "PartialEq"
+        "Copy"
       ],
       "kind": "record"
     },
@@ -130,720 +183,6 @@
         "PartialEq"
       ],
       "kind": "record"
-    },
-    {
-      "c_type": "prdb_host_api_v2",
-      "rust_type": "HostApiV2",
-      "size": 40,
-      "alignment": 8,
-      "fields": [
-        {
-          "name": "struct_size",
-          "offset": 0,
-          "c_type": "uint32_t",
-          "rust_type": "u32",
-          "c_name": "struct_size",
-          "rust_name": "struct_size"
-        },
-        {
-          "name": "abi_version",
-          "offset": 4,
-          "c_type": "uint32_t",
-          "rust_type": "u32",
-          "c_name": "abi_version",
-          "rust_name": "abi_version"
-        },
-        {
-          "name": "context",
-          "offset": 8,
-          "c_type": "void *",
-          "rust_type": "*mut std::ffi::c_void",
-          "c_name": "context",
-          "rust_name": "context"
-        },
-        {
-          "name": "executor_request",
-          "offset": 16,
-          "c_type": "prdb_query_ipc_request_v2_fn",
-          "rust_type": "Option<QueryIpcRequestV2>",
-          "c_name": "executor_request",
-          "rust_name": "executor_request"
-        },
-        {
-          "name": "planner_request",
-          "offset": 24,
-          "c_type": "prdb_query_ipc_request_v2_fn",
-          "rust_type": "Option<QueryIpcRequestV2>",
-          "c_name": "planner_request",
-          "rust_name": "planner_request"
-        },
-        {
-          "name": "write_result",
-          "offset": 32,
-          "c_type": "prdb_query_write_result_v2_fn",
-          "rust_type": "Option<QueryWriteResultV2>",
-          "c_name": "write_result",
-          "rust_name": "write_result"
-        }
-      ],
-      "version": "2",
-      "derives": [
-        "Clone",
-        "Copy"
-      ],
-      "kind": "record"
-    },
-    {
-      "c_type": "prdb_invocation_v2",
-      "rust_type": "InvocationV2",
-      "size": 24,
-      "alignment": 8,
-      "fields": [
-        {
-          "name": "struct_size",
-          "offset": 0,
-          "c_type": "uint32_t",
-          "rust_type": "u32",
-          "c_name": "struct_size",
-          "rust_name": "struct_size"
-        },
-        {
-          "name": "abi_version",
-          "offset": 4,
-          "c_type": "uint32_t",
-          "rust_type": "u32",
-          "c_name": "abi_version",
-          "rust_name": "abi_version"
-        },
-        {
-          "name": "parameters",
-          "offset": 8,
-          "c_type": "const uint8_t *",
-          "rust_type": "*const u8",
-          "c_name": "parameters",
-          "rust_name": "parameters"
-        },
-        {
-          "name": "parameters_len",
-          "offset": 16,
-          "c_type": "uint64_t",
-          "rust_type": "u64",
-          "c_name": "parameters_len",
-          "rust_name": "parameters_len"
-        }
-      ],
-      "version": "2",
-      "derives": [
-        "Clone",
-        "Copy",
-        "Debug",
-        "Eq",
-        "PartialEq"
-      ],
-      "kind": "record"
-    },
-    {
-      "c_type": "prdb_query_descriptor_v2_record",
-      "rust_type": "QueryDescriptorV2",
-      "size": 16,
-      "alignment": 4,
-      "fields": [
-        {
-          "name": "struct_size",
-          "offset": 0,
-          "c_type": "uint32_t",
-          "rust_type": "u32",
-          "c_name": "struct_size",
-          "rust_name": "struct_size"
-        },
-        {
-          "name": "abi_version",
-          "offset": 4,
-          "c_type": "uint32_t",
-          "rust_type": "u32",
-          "c_name": "abi_version",
-          "rust_name": "abi_version"
-        },
-        {
-          "name": "host_api_size",
-          "offset": 8,
-          "c_type": "uint32_t",
-          "rust_type": "u32",
-          "c_name": "host_api_size",
-          "rust_name": "host_api_size"
-        },
-        {
-          "name": "invocation_size",
-          "offset": 12,
-          "c_type": "uint32_t",
-          "rust_type": "u32",
-          "c_name": "invocation_size",
-          "rust_name": "invocation_size"
-        }
-      ],
-      "version": "2",
-      "derives": [
-        "Clone",
-        "Copy",
-        "Debug",
-        "Eq",
-        "PartialEq"
-      ],
-      "kind": "record"
-    },
-    {
-      "c_type": "prdb_host_api_v3",
-      "rust_type": "HostApiV3",
-      "size": 48,
-      "alignment": 8,
-      "fields": [
-        {
-          "name": "struct_size",
-          "offset": 0,
-          "c_type": "uint32_t",
-          "rust_type": "u32",
-          "c_name": "struct_size",
-          "rust_name": "struct_size"
-        },
-        {
-          "name": "abi_version",
-          "offset": 4,
-          "c_type": "uint32_t",
-          "rust_type": "u32",
-          "c_name": "abi_version",
-          "rust_name": "abi_version"
-        },
-        {
-          "name": "context",
-          "offset": 8,
-          "c_type": "void *",
-          "rust_type": "*mut std::ffi::c_void",
-          "c_name": "context",
-          "rust_name": "context"
-        },
-        {
-          "name": "executor_request",
-          "offset": 16,
-          "c_type": "prdb_query_ipc_request_v2_fn",
-          "rust_type": "Option<QueryIpcRequestV2>",
-          "c_name": "executor_request",
-          "rust_name": "executor_request"
-        },
-        {
-          "name": "planner_request",
-          "offset": 24,
-          "c_type": "prdb_query_ipc_request_v2_fn",
-          "rust_type": "Option<QueryIpcRequestV2>",
-          "c_name": "planner_request",
-          "rust_name": "planner_request"
-        },
-        {
-          "name": "write_result",
-          "offset": 32,
-          "c_type": "prdb_query_write_result_v2_fn",
-          "rust_type": "Option<QueryWriteResultV2>",
-          "c_name": "write_result",
-          "rust_name": "write_result"
-        },
-        {
-          "name": "statement_failure",
-          "offset": 40,
-          "c_type": "prdb_query_statement_failure_v3_fn",
-          "rust_type": "Option<QueryStatementFailureV3>",
-          "c_name": "statement_failure",
-          "rust_name": "statement_failure"
-        }
-      ],
-      "version": "3",
-      "derives": [
-        "Clone",
-        "Copy"
-      ],
-      "kind": "record"
-    },
-    {
-      "c_type": "prdb_invocation_v3",
-      "rust_type": "InvocationV3",
-      "size": 24,
-      "alignment": 8,
-      "fields": [
-        {
-          "name": "struct_size",
-          "offset": 0,
-          "c_type": "uint32_t",
-          "rust_type": "u32",
-          "c_name": "struct_size",
-          "rust_name": "struct_size"
-        },
-        {
-          "name": "abi_version",
-          "offset": 4,
-          "c_type": "uint32_t",
-          "rust_type": "u32",
-          "c_name": "abi_version",
-          "rust_name": "abi_version"
-        },
-        {
-          "name": "parameters",
-          "offset": 8,
-          "c_type": "const uint8_t *",
-          "rust_type": "*const u8",
-          "c_name": "parameters",
-          "rust_name": "parameters"
-        },
-        {
-          "name": "parameters_len",
-          "offset": 16,
-          "c_type": "uint64_t",
-          "rust_type": "u64",
-          "c_name": "parameters_len",
-          "rust_name": "parameters_len"
-        }
-      ],
-      "version": "3",
-      "derives": [
-        "Clone",
-        "Copy"
-      ],
-      "kind": "alias",
-      "alias_c_type": "prdb_invocation_v2",
-      "alias_rust_type": "InvocationV2"
-    },
-    {
-      "c_type": "prdb_query_descriptor_v3_record",
-      "rust_type": "QueryDescriptorV3",
-      "size": 16,
-      "alignment": 4,
-      "fields": [
-        {
-          "name": "struct_size",
-          "offset": 0,
-          "c_type": "uint32_t",
-          "rust_type": "u32",
-          "c_name": "struct_size",
-          "rust_name": "struct_size"
-        },
-        {
-          "name": "abi_version",
-          "offset": 4,
-          "c_type": "uint32_t",
-          "rust_type": "u32",
-          "c_name": "abi_version",
-          "rust_name": "abi_version"
-        },
-        {
-          "name": "host_api_size",
-          "offset": 8,
-          "c_type": "uint32_t",
-          "rust_type": "u32",
-          "c_name": "host_api_size",
-          "rust_name": "host_api_size"
-        },
-        {
-          "name": "invocation_size",
-          "offset": 12,
-          "c_type": "uint32_t",
-          "rust_type": "u32",
-          "c_name": "invocation_size",
-          "rust_name": "invocation_size"
-        }
-      ],
-      "version": "3",
-      "derives": [
-        "Clone",
-        "Copy",
-        "Debug",
-        "Eq",
-        "PartialEq"
-      ],
-      "kind": "record"
-    },
-    {
-      "c_type": "prdb_host_api_v4",
-      "rust_type": "HostApiV4",
-      "size": 56,
-      "alignment": 8,
-      "fields": [
-        {
-          "name": "v3",
-          "offset": 0,
-          "c_type": "prdb_host_api_v3",
-          "rust_type": "HostApiV3",
-          "c_name": "v3",
-          "rust_name": "v3"
-        },
-        {
-          "name": "optimizer_request",
-          "offset": 48,
-          "c_type": "prdb_query_optimizer_request_v4_fn",
-          "rust_type": "Option<QueryOptimizerRequestV4>",
-          "c_name": "optimizer_request",
-          "rust_name": "optimizer_request"
-        }
-      ],
-      "version": "4",
-      "derives": [
-        "Clone",
-        "Copy"
-      ],
-      "kind": "record"
-    },
-    {
-      "c_type": "prdb_invocation_v4",
-      "rust_type": "InvocationV4",
-      "size": 24,
-      "alignment": 8,
-      "fields": [
-        {
-          "name": "struct_size",
-          "offset": 0,
-          "c_type": "uint32_t",
-          "rust_type": "u32",
-          "c_name": "struct_size",
-          "rust_name": "struct_size"
-        },
-        {
-          "name": "abi_version",
-          "offset": 4,
-          "c_type": "uint32_t",
-          "rust_type": "u32",
-          "c_name": "abi_version",
-          "rust_name": "abi_version"
-        },
-        {
-          "name": "parameters",
-          "offset": 8,
-          "c_type": "const uint8_t *",
-          "rust_type": "*const u8",
-          "c_name": "parameters",
-          "rust_name": "parameters"
-        },
-        {
-          "name": "parameters_len",
-          "offset": 16,
-          "c_type": "uint64_t",
-          "rust_type": "u64",
-          "c_name": "parameters_len",
-          "rust_name": "parameters_len"
-        }
-      ],
-      "version": "4",
-      "derives": [
-        "Clone",
-        "Copy"
-      ],
-      "kind": "alias",
-      "alias_c_type": "prdb_invocation_v2",
-      "alias_rust_type": "InvocationV2"
-    },
-    {
-      "c_type": "prdb_query_descriptor_v4_record",
-      "rust_type": "QueryDescriptorV4",
-      "size": 16,
-      "alignment": 4,
-      "fields": [
-        {
-          "name": "struct_size",
-          "offset": 0,
-          "c_type": "uint32_t",
-          "rust_type": "u32",
-          "c_name": "struct_size",
-          "rust_name": "struct_size"
-        },
-        {
-          "name": "abi_version",
-          "offset": 4,
-          "c_type": "uint32_t",
-          "rust_type": "u32",
-          "c_name": "abi_version",
-          "rust_name": "abi_version"
-        },
-        {
-          "name": "host_api_size",
-          "offset": 8,
-          "c_type": "uint32_t",
-          "rust_type": "u32",
-          "c_name": "host_api_size",
-          "rust_name": "host_api_size"
-        },
-        {
-          "name": "invocation_size",
-          "offset": 12,
-          "c_type": "uint32_t",
-          "rust_type": "u32",
-          "c_name": "invocation_size",
-          "rust_name": "invocation_size"
-        }
-      ],
-      "version": "4",
-      "derives": [
-        "Clone",
-        "Copy",
-        "Debug",
-        "Eq",
-        "PartialEq"
-      ],
-      "kind": "record"
-    },
-    {
-      "c_type": "prdb_host_api_v5",
-      "rust_type": "HostApiV5",
-      "size": 64,
-      "alignment": 8,
-      "fields": [
-        {
-          "name": "v4",
-          "offset": 0,
-          "c_type": "prdb_host_api_v4",
-          "rust_type": "HostApiV4",
-          "c_name": "v4",
-          "rust_name": "v4"
-        },
-        {
-          "name": "optimizer_request",
-          "offset": 56,
-          "c_type": "prdb_query_optimizer_request_v5_fn",
-          "rust_type": "Option<QueryOptimizerRequestV5>",
-          "c_name": "optimizer_request",
-          "rust_name": "optimizer_request"
-        }
-      ],
-      "version": "5",
-      "derives": [
-        "Clone",
-        "Copy"
-      ],
-      "kind": "record"
-    },
-    {
-      "c_type": "prdb_invocation_v5",
-      "rust_type": "InvocationV5",
-      "size": 24,
-      "alignment": 8,
-      "fields": [
-        {
-          "name": "struct_size",
-          "offset": 0,
-          "c_type": "uint32_t",
-          "rust_type": "u32",
-          "c_name": "struct_size",
-          "rust_name": "struct_size"
-        },
-        {
-          "name": "abi_version",
-          "offset": 4,
-          "c_type": "uint32_t",
-          "rust_type": "u32",
-          "c_name": "abi_version",
-          "rust_name": "abi_version"
-        },
-        {
-          "name": "parameters",
-          "offset": 8,
-          "c_type": "const uint8_t *",
-          "rust_type": "*const u8",
-          "c_name": "parameters",
-          "rust_name": "parameters"
-        },
-        {
-          "name": "parameters_len",
-          "offset": 16,
-          "c_type": "uint64_t",
-          "rust_type": "u64",
-          "c_name": "parameters_len",
-          "rust_name": "parameters_len"
-        }
-      ],
-      "version": "5",
-      "derives": [
-        "Clone",
-        "Copy",
-        "Debug",
-        "Eq",
-        "PartialEq"
-      ],
-      "kind": "alias",
-      "alias_c_type": "prdb_invocation_v2",
-      "alias_rust_type": "InvocationV2"
-    },
-    {
-      "c_type": "prdb_query_descriptor_v5_record",
-      "rust_type": "QueryDescriptorV5",
-      "size": 16,
-      "alignment": 4,
-      "fields": [
-        {
-          "name": "struct_size",
-          "offset": 0,
-          "c_type": "uint32_t",
-          "rust_type": "u32",
-          "c_name": "struct_size",
-          "rust_name": "struct_size"
-        },
-        {
-          "name": "abi_version",
-          "offset": 4,
-          "c_type": "uint32_t",
-          "rust_type": "u32",
-          "c_name": "abi_version",
-          "rust_name": "abi_version"
-        },
-        {
-          "name": "host_api_size",
-          "offset": 8,
-          "c_type": "uint32_t",
-          "rust_type": "u32",
-          "c_name": "host_api_size",
-          "rust_name": "host_api_size"
-        },
-        {
-          "name": "invocation_size",
-          "offset": 12,
-          "c_type": "uint32_t",
-          "rust_type": "u32",
-          "c_name": "invocation_size",
-          "rust_name": "invocation_size"
-        }
-      ],
-      "version": "5",
-      "derives": [
-        "Clone",
-        "Copy",
-        "Debug",
-        "Eq",
-        "PartialEq"
-      ],
-      "kind": "record"
-    },
-    {
-      "c_type": "prdb_host_api_v6",
-      "rust_type": "HostApiV6",
-      "size": 72,
-      "alignment": 8,
-      "fields": [
-        {
-          "name": "v5",
-          "offset": 0,
-          "c_type": "prdb_host_api_v5",
-          "rust_type": "HostApiV5",
-          "c_name": "v5",
-          "rust_name": "v5"
-        },
-        {
-          "name": "spill_request",
-          "offset": 64,
-          "c_type": "prdb_query_spill_request_v1_fn",
-          "rust_type": "Option<QuerySpillRequestV1>",
-          "c_name": "spill_request",
-          "rust_name": "spill_request"
-        }
-      ],
-      "version": "6",
-      "derives": [
-        "Clone",
-        "Copy"
-      ],
-      "kind": "record"
-    },
-    {
-      "c_type": "prdb_invocation_v6",
-      "rust_type": "InvocationV6",
-      "size": 24,
-      "alignment": 8,
-      "fields": [
-        {
-          "name": "struct_size",
-          "offset": 0,
-          "c_type": "uint32_t",
-          "rust_type": "u32",
-          "c_name": "struct_size",
-          "rust_name": "struct_size"
-        },
-        {
-          "name": "abi_version",
-          "offset": 4,
-          "c_type": "uint32_t",
-          "rust_type": "u32",
-          "c_name": "abi_version",
-          "rust_name": "abi_version"
-        },
-        {
-          "name": "parameters",
-          "offset": 8,
-          "c_type": "const uint8_t *",
-          "rust_type": "*const u8",
-          "c_name": "parameters",
-          "rust_name": "parameters"
-        },
-        {
-          "name": "parameters_len",
-          "offset": 16,
-          "c_type": "uint64_t",
-          "rust_type": "u64",
-          "c_name": "parameters_len",
-          "rust_name": "parameters_len"
-        }
-      ],
-      "version": "6",
-      "derives": [
-        "Clone",
-        "Copy",
-        "Debug",
-        "Eq",
-        "PartialEq"
-      ],
-      "kind": "alias",
-      "alias_c_type": "prdb_invocation_v2",
-      "alias_rust_type": "InvocationV2"
-    },
-    {
-      "c_type": "prdb_query_descriptor_v6_record",
-      "rust_type": "QueryDescriptorV6",
-      "size": 16,
-      "alignment": 4,
-      "fields": [
-        {
-          "name": "struct_size",
-          "offset": 0,
-          "c_type": "uint32_t",
-          "rust_type": "u32",
-          "c_name": "struct_size",
-          "rust_name": "struct_size"
-        },
-        {
-          "name": "abi_version",
-          "offset": 4,
-          "c_type": "uint32_t",
-          "rust_type": "u32",
-          "c_name": "abi_version",
-          "rust_name": "abi_version"
-        },
-        {
-          "name": "host_api_size",
-          "offset": 8,
-          "c_type": "uint32_t",
-          "rust_type": "u32",
-          "c_name": "host_api_size",
-          "rust_name": "host_api_size"
-        },
-        {
-          "name": "invocation_size",
-          "offset": 12,
-          "c_type": "uint32_t",
-          "rust_type": "u32",
-          "c_name": "invocation_size",
-          "rust_name": "invocation_size"
-        }
-      ],
-      "version": "6",
-      "derives": [
-        "Clone",
-        "Copy",
-        "Debug",
-        "Eq",
-        "PartialEq"
-      ],
-      "kind": "record"
     }
   ],
   "constants": [
@@ -866,48 +205,6 @@
       "rust_type": "&str",
       "value": "prdb_query_main_v1",
       "c_name": "PRDB_QUERY_ENTRY_SYMBOL",
-      "c_type": "string"
-    },
-    {
-      "rust_name": "QUERY_ABI_V2_VERSION",
-      "rust_type": "u32",
-      "value": 2,
-      "c_name": "PRDB_QUERY_ABI_V2_VERSION",
-      "c_type": "UINT32_C"
-    },
-    {
-      "rust_name": "QUERY_DESCRIPTOR_V2_SYMBOL",
-      "rust_type": "&str",
-      "value": "prdb_query_descriptor_v2",
-      "c_name": "PRDB_QUERY_DESCRIPTOR_V2_SYMBOL",
-      "c_type": "string"
-    },
-    {
-      "rust_name": "QUERY_ENTRY_V2_SYMBOL",
-      "rust_type": "&str",
-      "value": "prdb_query_main_v2",
-      "c_name": "PRDB_QUERY_ENTRY_V2_SYMBOL",
-      "c_type": "string"
-    },
-    {
-      "rust_name": "QUERY_ABI_V3_VERSION",
-      "rust_type": "u32",
-      "value": 3,
-      "c_name": "PRDB_QUERY_ABI_V3_VERSION",
-      "c_type": "UINT32_C"
-    },
-    {
-      "rust_name": "QUERY_DESCRIPTOR_V3_SYMBOL",
-      "rust_type": "&str",
-      "value": "prdb_query_descriptor_v3",
-      "c_name": "PRDB_QUERY_DESCRIPTOR_V3_SYMBOL",
-      "c_type": "string"
-    },
-    {
-      "rust_name": "QUERY_ENTRY_V3_SYMBOL",
-      "rust_type": "&str",
-      "value": "prdb_query_main_v3",
-      "c_name": "PRDB_QUERY_ENTRY_V3_SYMBOL",
       "c_type": "string"
     },
     {
@@ -1499,48 +796,6 @@
       "c_type": "string"
     },
     {
-      "rust_name": "QUERY_ABI_V4_VERSION",
-      "rust_type": "u32",
-      "value": 4,
-      "c_name": "PRDB_QUERY_ABI_V4_VERSION",
-      "c_type": "UINT32_C"
-    },
-    {
-      "rust_name": "QUERY_DESCRIPTOR_V4_SYMBOL",
-      "rust_type": "&str",
-      "value": "prdb_query_descriptor_v4",
-      "c_name": "PRDB_QUERY_DESCRIPTOR_V4_SYMBOL",
-      "c_type": "string"
-    },
-    {
-      "rust_name": "QUERY_ENTRY_V4_SYMBOL",
-      "rust_type": "&str",
-      "value": "prdb_query_main_v4",
-      "c_name": "PRDB_QUERY_ENTRY_V4_SYMBOL",
-      "c_type": "string"
-    },
-    {
-      "rust_name": "QUERY_ABI_V5_VERSION",
-      "rust_type": "u32",
-      "value": 5,
-      "c_name": "PRDB_QUERY_ABI_V5_VERSION",
-      "c_type": "UINT32_C"
-    },
-    {
-      "rust_name": "QUERY_DESCRIPTOR_V5_SYMBOL",
-      "rust_type": "&str",
-      "value": "prdb_query_descriptor_v5",
-      "c_name": "PRDB_QUERY_DESCRIPTOR_V5_SYMBOL",
-      "c_type": "string"
-    },
-    {
-      "rust_name": "QUERY_ENTRY_V5_SYMBOL",
-      "rust_type": "&str",
-      "value": "prdb_query_main_v5",
-      "c_name": "PRDB_QUERY_ENTRY_V5_SYMBOL",
-      "c_type": "string"
-    },
-    {
       "rust_name": "RESOLVE_RELATION_PAYLOAD_VERSION",
       "rust_type": "u16",
       "value": 1,
@@ -1730,13 +985,6 @@
       "c_type": "UINT8_C"
     },
     {
-      "rust_name": "QUERY_ABI_V6_VERSION",
-      "rust_type": "u32",
-      "value": 6,
-      "c_name": "PRDB_QUERY_ABI_V6_VERSION",
-      "c_type": "UINT32_C"
-    },
-    {
       "rust_name": "QUERY_HOST_OP_GET_WORKLOAD_BUDGETS",
       "rust_type": "u16",
       "value": 32766,
@@ -1770,20 +1018,6 @@
       "value": 128,
       "c_name": "PRDB_DEFAULT_SQL_INDEX_PROBE_CANDIDATES",
       "c_type": "UINT32_C"
-    },
-    {
-      "rust_name": "QUERY_DESCRIPTOR_V6_SYMBOL",
-      "rust_type": "&str",
-      "value": "prdb_query_descriptor_v6",
-      "c_name": "PRDB_QUERY_DESCRIPTOR_V6_SYMBOL",
-      "c_type": "string"
-    },
-    {
-      "rust_name": "QUERY_ENTRY_V6_SYMBOL",
-      "rust_type": "&str",
-      "value": "prdb_query_main_v6",
-      "c_name": "PRDB_QUERY_ENTRY_V6_SYMBOL",
-      "c_type": "string"
     },
     {
       "rust_name": "SPILL_CHANNEL_MAGIC",

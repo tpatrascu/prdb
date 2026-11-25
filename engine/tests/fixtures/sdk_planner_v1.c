@@ -123,7 +123,7 @@ int main(void) {
         const uint8_t schema[] = "public";
         const uint8_t relation_name[] = "employees";
         planner_mock mock = {reply, length, 0};
-        prdb_host_api_v2 host = {sizeof(host), PRDB_QUERY_ABI_V2_VERSION,
+        prdb_host_api_v1 host = {sizeof(host), PRDB_QUERY_ABI_VERSION,
                                  &mock, NULL, planner_request, NULL};
         uint64_t response_len = 0;
         memcpy(reply, response, length);

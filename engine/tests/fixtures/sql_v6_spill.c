@@ -1,15 +1,15 @@
-#include "prdb_query_abi_v6.h"
+#include "prdb_query_abi_v1.h"
 #include "prdb_sdk_sql_dispatch_v1.h"
 #include "prdb_sdk_spill_v1.h"
 
 #include <stddef.h>
 
-const prdb_query_descriptor_v6_record prdb_query_descriptor_v6 = {
-    sizeof(prdb_query_descriptor_v6_record), PRDB_QUERY_ABI_V6_VERSION,
-    sizeof(prdb_host_api_v6), sizeof(prdb_invocation_v6)};
+const prdb_query_descriptor_v1_record prdb_query_descriptor_v1 = {
+    sizeof(prdb_query_descriptor_v1_record), PRDB_QUERY_ABI_VERSION,
+    sizeof(prdb_host_api_v1), sizeof(prdb_invocation_v1)};
 
-int32_t prdb_query_main_v6(const prdb_host_api_v6 *host,
-                           const prdb_invocation_v6 *invocation) {
+int32_t prdb_query_main_v1(const prdb_host_api_v1 *host,
+                           const prdb_invocation_v1 *invocation) {
     static const uint8_t schema[] = "sql_roundtrip";
     static const uint8_t spill_group_count_sql[] =
         "SELECT left_key, COUNT(*) FROM decimal_grouped_records "
@@ -68,9 +68,9 @@ int32_t prdb_query_main_v6(const prdb_host_api_v6 *host,
         0,   0,   0,   4,   /* payload length */
         2,   0,   0,   0};  /* little-endian INTEGER value */
     if (host == NULL || invocation == NULL ||
-        host->v5.v4.v3.struct_size < sizeof(host->v5.v4.v3) ||
-        host->v5.v4.v3.abi_version != PRDB_QUERY_ABI_V3_VERSION ||
-        invocation->abi_version != PRDB_QUERY_ABI_V6_VERSION ||
+        host->struct_size < sizeof(*host) ||
+        host->abi_version != PRDB_QUERY_ABI_VERSION ||
+        invocation->abi_version != PRDB_QUERY_ABI_VERSION ||
         invocation->parameters_len != 1 || invocation->parameters == NULL) {
         return 1;
     }
@@ -81,7 +81,7 @@ int32_t prdb_query_main_v6(const prdb_host_api_v6 *host,
         if (prdb_sdk_spill_create_v1(host, &stream) != 0 ||
             prdb_sdk_spill_append_v1(host, &stream, spill_bytes,
                                      sizeof(spill_bytes) - 1) != 0 ||
-            host->v5.v4.v3.write_result(host->v5.v4.v3.context, provisional,
+            host->write_result(host->context, provisional,
                                         sizeof(provisional) - 1) != 0) {
             return 1;
         }
@@ -105,7 +105,7 @@ int32_t prdb_query_main_v6(const prdb_host_api_v6 *host,
             prdb_sdk_spill_seal_v1(host, &pressure_stream) != 0) {
             return 1;
         }
-        if (host->v5.v4.v3.write_result(host->v5.v4.v3.context, pressure_marker,
+        if (host->write_result(host->context, pressure_marker,
                                         sizeof(pressure_marker) - 1) != 0) {
             prdb_sdk_spill_destroy_v1(host, &pressure_stream);
             return 1;

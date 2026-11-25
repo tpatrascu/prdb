@@ -1,13 +1,13 @@
-#include "prdb_query_abi_v2.h"
+#include "prdb_query_abi_v1.h"
 
 #include <assert.h>
 #include <string.h>
 
-const prdb_query_descriptor_v2_record prdb_query_descriptor_v2 = {
-    sizeof(prdb_query_descriptor_v2_record),
-    PRDB_QUERY_ABI_V2_VERSION,
-    sizeof(prdb_host_api_v2),
-    sizeof(prdb_invocation_v2),
+const prdb_query_descriptor_v1_record prdb_query_descriptor_v1 = {
+    sizeof(prdb_query_descriptor_v1_record),
+    PRDB_QUERY_ABI_VERSION,
+    sizeof(prdb_host_api_v1),
+    sizeof(prdb_invocation_v1),
 };
 
 typedef struct test_context {
@@ -48,8 +48,8 @@ static int32_t test_write_result(void *opaque, const uint8_t *bytes,
     return PRDB_QUERY_CALLBACK_OK;
 }
 
-int32_t prdb_query_main_v2(const prdb_host_api_v2 *host,
-                           const prdb_invocation_v2 *invocation) {
+int32_t prdb_query_main_v1(const prdb_host_api_v1 *host,
+                           const prdb_invocation_v1 *invocation) {
     static const uint8_t expected_parameters[] = {0x61, 0x62, 0x63};
     static const uint8_t request[] = {0x41, 0x42};
     static const uint8_t expected_response[] = {0x43, 0x44, 0x45};
@@ -59,10 +59,10 @@ int32_t prdb_query_main_v2(const prdb_host_api_v2 *host,
 
     assert(host != 0);
     assert(host->struct_size == sizeof(*host));
-    assert(host->abi_version == PRDB_QUERY_ABI_V2_VERSION);
+    assert(host->abi_version == PRDB_QUERY_ABI_VERSION);
     assert(invocation != 0);
     assert(invocation->struct_size == sizeof(*invocation));
-    assert(invocation->abi_version == PRDB_QUERY_ABI_V2_VERSION);
+    assert(invocation->abi_version == PRDB_QUERY_ABI_VERSION);
     assert(invocation->parameters_len == sizeof(expected_parameters));
     assert(invocation->parameters != 0);
     assert(memcmp(invocation->parameters, expected_parameters,
@@ -88,28 +88,28 @@ int main(void) {
     static const uint8_t parameters[] = {0x61, 0x62, 0x63};
     static const uint8_t expected_output[] = {0x31, 0x32};
     test_context context = {{0}, 0};
-    const prdb_host_api_v2 host = {
-        sizeof(prdb_host_api_v2),
-        PRDB_QUERY_ABI_V2_VERSION,
+    const prdb_host_api_v1 host = {
+        sizeof(prdb_host_api_v1),
+        PRDB_QUERY_ABI_VERSION,
         &context,
         test_executor_request,
         test_executor_request,
         test_write_result,
     };
-    const prdb_invocation_v2 invocation = {
-        sizeof(prdb_invocation_v2),
-        PRDB_QUERY_ABI_V2_VERSION,
+    const prdb_invocation_v1 invocation = {
+        sizeof(prdb_invocation_v1),
+        PRDB_QUERY_ABI_VERSION,
         parameters,
         sizeof(parameters),
     };
 
-    assert(prdb_query_descriptor_v2.struct_size ==
-           sizeof(prdb_query_descriptor_v2));
-    assert(prdb_query_descriptor_v2.abi_version ==
-           PRDB_QUERY_ABI_V2_VERSION);
-    assert(prdb_query_descriptor_v2.host_api_size == sizeof(host));
-    assert(prdb_query_descriptor_v2.invocation_size == sizeof(invocation));
-    assert(prdb_query_main_v2(&host, &invocation) == 0);
+    assert(prdb_query_descriptor_v1.struct_size ==
+           sizeof(prdb_query_descriptor_v1));
+    assert(prdb_query_descriptor_v1.abi_version ==
+           PRDB_QUERY_ABI_VERSION);
+    assert(prdb_query_descriptor_v1.host_api_size == sizeof(host));
+    assert(prdb_query_descriptor_v1.invocation_size == sizeof(invocation));
+    assert(prdb_query_main_v1(&host, &invocation) == 0);
     assert(context.result_len == sizeof(expected_output));
     assert(memcmp(context.result, expected_output, sizeof(expected_output)) ==
            0);

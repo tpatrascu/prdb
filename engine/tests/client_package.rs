@@ -766,8 +766,7 @@ fn generated_query_artifact_is_independent_of_parameter_values() {
     let temp = unique_temp_dir();
     fs::create_dir(&temp).unwrap();
     let sdk_build = temp.join("sdk");
-    let sdk_release =
-        sdk_build.join("releases/linux-x86_64/x86_64-v1/test-runtime/sdk-1-abis1,2,3,4,5,6");
+    let sdk_release = sdk_build.join("releases/linux-x86_64/x86_64-v1/test-runtime/sdk-1-abis1");
     let source_path = temp.join("query.c");
     let scope_path = temp.join("scope.psc1");
     let mut scope = b"PSC1\0\x01\x01\x01".to_vec();
@@ -823,7 +822,7 @@ fn generated_query_artifact_is_independent_of_parameter_values() {
             .arg(&package_path)
             .args([
                 "--abi",
-                "3",
+                "1",
                 "--sdk-release",
                 "1",
                 "--cpu-baseline",
@@ -874,12 +873,12 @@ fn packager_compiles_and_atomically_publishes_metadata_without_loading_query() {
     let package = temp.join("package");
     fs::write(
         &source,
-        b"#include \"prdb_query_abi_v4.h\"\n\
+        b"#include \"prdb_query_abi_v1.h\"\n\
           #include <stdlib.h>\n\
-          const prdb_query_descriptor_v4_record prdb_query_descriptor_v4 = {\n\
-            sizeof(prdb_query_descriptor_v4_record), 4, sizeof(prdb_host_api_v4), sizeof(prdb_invocation_v4)};\n\
+          const prdb_query_descriptor_v1_record prdb_query_descriptor_v1 = {\n\
+            sizeof(prdb_query_descriptor_v1_record), 1, sizeof(prdb_host_api_v1), sizeof(prdb_invocation_v1)};\n\
           __attribute__((constructor)) static void must_not_load(void) { abort(); }\n\
-          int32_t prdb_query_main_v4(const prdb_host_api_v4 *h, const prdb_invocation_v4 *i) { (void)h; (void)i; return 0; }\n",
+          int32_t prdb_query_main_v1(const prdb_host_api_v1 *h, const prdb_invocation_v1 *i) { (void)h; (void)i; return 0; }\n",
     )
     .unwrap();
     let mut scope_bytes = b"PSC1\0\x01\x02\x02".to_vec();
@@ -903,8 +902,7 @@ fn packager_compiles_and_atomically_publishes_metadata_without_loading_query() {
         String::from_utf8_lossy(&build.stderr)
     );
 
-    let release_dir =
-        sdk_build.join("releases/linux-x86_64/x86_64-v1/test-runtime/sdk-1-abis1,2,3,4,5,6");
+    let release_dir = sdk_build.join("releases/linux-x86_64/x86_64-v1/test-runtime/sdk-1-abis1");
     let library = release_dir.join("libprdb_sql.so.1");
     let status = Command::new(env!("CARGO_BIN_EXE_prdb-packager"))
         .arg("--source")
@@ -921,7 +919,7 @@ fn packager_compiles_and_atomically_publishes_metadata_without_loading_query() {
         .arg(&package)
         .args([
             "--abi",
-            "4",
+            "1",
             "--sdk-release",
             "1",
             "--cpu-baseline",
@@ -943,12 +941,12 @@ fn packager_compiles_and_atomically_publishes_metadata_without_loading_query() {
     let artifact = fs::read(package.join("query.so")).unwrap();
     let manifest_bytes = fs::read(package.join("manifest.pmf1")).unwrap();
     let manifest = decode_manifest_v1(&manifest_bytes).unwrap();
-    assert_eq!(manifest.native_abi_version, 4);
+    assert_eq!(manifest.native_abi_version, 1);
     assert_eq!(manifest.sdk_release, 1);
     assert_eq!(manifest.cpu_baseline, "x86_64-v1");
     assert_eq!(manifest.runtime_profile, "test-runtime");
-    assert_eq!(manifest.descriptor_symbol, "prdb_query_descriptor_v4");
-    assert_eq!(manifest.entry_point_symbol, "prdb_query_main_v4");
+    assert_eq!(manifest.descriptor_symbol, "prdb_query_descriptor_v1");
+    assert_eq!(manifest.entry_point_symbol, "prdb_query_main_v1");
     assert_eq!(
         fs::read(package.join("requested_scope.psc1")).unwrap(),
         scope_bytes
@@ -1011,7 +1009,7 @@ fn packager_compiles_and_atomically_publishes_metadata_without_loading_query() {
         .arg(temp.join("rejected-release-package"))
         .args([
             "--abi",
-            "4",
+            "1",
             "--sdk-release",
             "2",
             "--cpu-baseline",
@@ -1203,7 +1201,7 @@ fn packager_compiles_and_atomically_publishes_metadata_without_loading_query() {
         .arg(&repository_package)
         .args([
             "--abi",
-            "4",
+            "1",
             "--sdk-release",
             "1",
             "--cpu-baseline",
@@ -1329,7 +1327,7 @@ fn packager_compiles_and_atomically_publishes_metadata_without_loading_query() {
         fs::copy(entry.path(), local_include.join(entry.file_name())).unwrap();
     }
     let local_release =
-        local_sdk_root.join("releases/linux-x86_64/x86_64-v1/test-runtime/sdk-1-abis1,2,3,4,5,6");
+        local_sdk_root.join("releases/linux-x86_64/x86_64-v1/test-runtime/sdk-1-abis1");
     fs::create_dir_all(&local_release).unwrap();
     for entry in fs::read_dir(&release_dir).unwrap() {
         let entry = entry.unwrap();
@@ -1355,7 +1353,7 @@ fn packager_compiles_and_atomically_publishes_metadata_without_loading_query() {
                 target: "linux-x86_64".to_owned(),
                 cpu_baseline: "x86_64-v1".to_owned(),
                 runtime_profile: "test-runtime".to_owned(),
-                native_abi: 4,
+                native_abi: 1,
             },
             default_credential: "alice".to_owned(),
             credentials: vec![ConfigCredential {
@@ -1402,7 +1400,7 @@ fn packager_compiles_and_atomically_publishes_metadata_without_loading_query() {
     let interactive_address = interactive_listener.local_addr().unwrap();
     configured.instances[0].address = interactive_address.ip().to_string();
     configured.instances[0].port = interactive_address.port();
-    configured.instances[0].sdk.native_abi = 3;
+    configured.instances[0].sdk.native_abi = 1;
     configured.save_atomic(&client_config_path).unwrap();
     let credentials = config_dir.join("alice.credentials");
     write_client_credentials(
@@ -1521,7 +1519,7 @@ fn packager_compiles_and_atomically_publishes_metadata_without_loading_query() {
             .arg("--runtime-profile")
             .arg("test-runtime")
             .arg("--abi")
-            .arg("3")
+            .arg("1")
             .arg("--default-credential")
             .arg("alice")
             .arg("--username")
@@ -1565,7 +1563,7 @@ fn packager_compiles_and_atomically_publishes_metadata_without_loading_query() {
     configured.instances[0].address = admin_address.ip().to_string();
     configured.instances[0].port = admin_address.port();
     configured.instances[0].sdk.release = 1;
-    configured.instances[0].sdk.native_abi = 3;
+    configured.instances[0].sdk.native_abi = 1;
     configured.save_atomic(&client_config_path).unwrap();
     let admin_library = fs::read(release_dir.join("libprdb_sql.so.1")).unwrap();
     let admin_digest: [u8; 32] = Sha256::digest(&admin_library).into();
@@ -1603,7 +1601,7 @@ fn packager_compiles_and_atomically_publishes_metadata_without_loading_query() {
                 &mut stream,
                 &list,
                 format!(
-                    r#"{{"sdk_libraries":[{{"release":1,"native_abis":[1,2,3,4,5],"target":"linux-x86_64","cpu_baseline":"x86_64-v1","runtime_profile":"test-runtime","soname":"libprdb_sql.so.1","sha256":"{admin_digest}","needed":["libc.so.6"],"library_bytes":{admin_library_bytes}}}],"next_cursor":null}}"#
+                    r#"{{"sdk_libraries":[{{"release":1,"native_abis":[1],"target":"linux-x86_64","cpu_baseline":"x86_64-v1","runtime_profile":"test-runtime","soname":"libprdb_sql.so.1","sha256":"{admin_digest}","needed":["libc.so.6"],"library_bytes":{admin_library_bytes}}}],"next_cursor":null}}"#
                 )
                 .as_bytes(),
             );
@@ -1623,7 +1621,7 @@ fn packager_compiles_and_atomically_publishes_metadata_without_loading_query() {
         "{}",
         String::from_utf8_lossy(&list_output.stderr)
     );
-    assert!(String::from_utf8_lossy(&list_output.stdout).contains("1 abi=[1, 2, 3, 4, 5]"));
+    assert!(String::from_utf8_lossy(&list_output.stdout).contains("1 abi=[1]"));
     let select_output = Command::new(env!("CARGO_BIN_EXE_prdb-client"))
         .arg("sdk-library")
         .arg("select")
@@ -1634,7 +1632,7 @@ fn packager_compiles_and_atomically_publishes_metadata_without_loading_query() {
         .arg("--release")
         .arg("1")
         .arg("--abi")
-        .arg("3")
+        .arg("1")
         .output()
         .unwrap();
     assert!(
@@ -1665,7 +1663,7 @@ fn packager_compiles_and_atomically_publishes_metadata_without_loading_query() {
         .arg(&package)
         .args([
             "--abi",
-            "3",
+            "1",
             "--sdk-release",
             "1",
             "--cpu-baseline",
@@ -1720,9 +1718,10 @@ fn packager_validates_abi_v4_exports_on_the_maintained_optimizer_fixture() {
         .arg("--source")
         .arg(root.join("engine/tests/fixtures/sql_v3_write_read.c"))
         .arg("--sdk-library")
-        .arg(sdk_build.join(
-            "releases/linux-x86_64/x86_64-v1/test-runtime/sdk-1-abis1,2,3,4,5,6/libprdb_sql.so.1",
-        ))
+        .arg(
+            sdk_build
+                .join("releases/linux-x86_64/x86_64-v1/test-runtime/sdk-1-abis1/libprdb_sql.so.1"),
+        )
         .arg("--shared-linker")
         .arg("cc")
         .arg("--include-dir")
@@ -1733,7 +1732,7 @@ fn packager_validates_abi_v4_exports_on_the_maintained_optimizer_fixture() {
         .arg(&package)
         .args([
             "--abi",
-            "4",
+            "1",
             "--sdk-release",
             "1",
             "--cpu-baseline",
@@ -1754,9 +1753,9 @@ fn packager_validates_abi_v4_exports_on_the_maintained_optimizer_fixture() {
 
     let manifest = decode_manifest_v1(&fs::read(package.join("manifest.pmf1")).unwrap())
         .expect("decode maintained fixture manifest");
-    assert_eq!(manifest.native_abi_version, 4);
-    assert_eq!(manifest.descriptor_symbol, "prdb_query_descriptor_v4");
-    assert_eq!(manifest.entry_point_symbol, "prdb_query_main_v4");
+    assert_eq!(manifest.native_abi_version, 1);
+    assert_eq!(manifest.descriptor_symbol, "prdb_query_descriptor_v1");
+    assert_eq!(manifest.entry_point_symbol, "prdb_query_main_v1");
     let artifact = fs::read(package.join("query.so")).unwrap();
     // The maintained fixture includes ordered and filtered composite
     // analytics, including a large TEXT MIN result, while remaining

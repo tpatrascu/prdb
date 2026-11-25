@@ -1,12 +1,12 @@
 #include "optimizer_plan_codec_internal.h"
 
 static int32_t latch_optimizer_statement_failure(
-    const prdb_host_api_v4 *host, int32_t status) {
+    const prdb_host_api_v1 *host, int32_t status) {
     if (status != PRDB_SDK_OPTIMIZER_PLAN_OK &&
         status != PRDB_SDK_OPTIMIZER_PLAN_INVALID_ARGUMENT &&
-        host != NULL && host->v3.statement_failure != NULL) {
-        (void)host->v3.statement_failure(
-            host->v3.context, PRDB_QUERY_STATEMENT_FAILURE_SQL);
+        host != NULL && host->statement_failure != NULL) {
+        (void)host->statement_failure(
+            host->context, PRDB_QUERY_STATEMENT_FAILURE_SQL);
     }
     return status;
 }
@@ -260,7 +260,7 @@ static int match_optimizer_filter_node(
 }
 
 static int32_t validate_select_plan_internal(
-    const prdb_host_api_v2 *host, const prdb_sdk_select_v1 *statement,
+    const prdb_host_api_v1 *host, const prdb_sdk_select_v1 *statement,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     int allow_filter,
     const uint8_t *schema, uint32_t schema_len,
@@ -372,7 +372,7 @@ static int32_t validate_select_plan_internal(
 }
 
 int32_t prdb_sdk_optimizer_execute_unfiltered_plan_v1(
-    const prdb_host_api_v2 *host, const uint8_t *plan_payload,
+    const prdb_host_api_v1 *host, const uint8_t *plan_payload,
     uint64_t plan_payload_len, uint16_t max_candidates,
     uint32_t max_batch_bytes, uint8_t *relation_response,
     uint64_t relation_response_capacity, uint8_t *scan_response,
@@ -397,7 +397,7 @@ int32_t prdb_sdk_optimizer_execute_unfiltered_plan_v1(
 }
 
 int32_t prdb_sdk_optimizer_validate_select_plan_v1(
-    const prdb_host_api_v2 *host, const prdb_sdk_select_v1 *statement,
+    const prdb_host_api_v1 *host, const prdb_sdk_select_v1 *statement,
     const uint8_t *schema, uint32_t schema_len,
     const uint8_t *plan_payload, uint64_t plan_payload_len,
     uint8_t *response, uint64_t response_capacity,
@@ -408,7 +408,7 @@ int32_t prdb_sdk_optimizer_validate_select_plan_v1(
 }
 
 int32_t prdb_sdk_optimizer_validate_select_plan_with_parameters_v1(
-    const prdb_host_api_v2 *host, const prdb_sdk_select_v1 *statement,
+    const prdb_host_api_v1 *host, const prdb_sdk_select_v1 *statement,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     const uint8_t *schema, uint32_t schema_len,
     const uint8_t *plan_payload, uint64_t plan_payload_len,
@@ -421,7 +421,7 @@ int32_t prdb_sdk_optimizer_validate_select_plan_with_parameters_v1(
 }
 
 int32_t prdb_sdk_optimizer_validate_delete_plan_with_parameters_v1(
-    const prdb_host_api_v2 *host, const prdb_sdk_delete_v1 *statement,
+    const prdb_host_api_v1 *host, const prdb_sdk_delete_v1 *statement,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     const uint8_t *schema, uint32_t schema_len,
     const uint8_t *plan_payload, uint64_t plan_payload_len,
@@ -496,7 +496,7 @@ int32_t prdb_sdk_optimizer_validate_delete_plan_with_parameters_v1(
 }
 
 int32_t prdb_sdk_optimizer_validate_update_plan_with_parameters_v1(
-    const prdb_host_api_v2 *host, const prdb_sdk_update_v1 *statement,
+    const prdb_host_api_v1 *host, const prdb_sdk_update_v1 *statement,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     const uint8_t *schema, uint32_t schema_len,
     const uint8_t *plan_payload, uint64_t plan_payload_len,
@@ -633,7 +633,7 @@ int32_t prdb_sdk_optimizer_validate_update_plan_with_parameters_v1(
 }
 
 int32_t prdb_sdk_optimizer_execute_delete_ast_v1(
-    const prdb_host_api_v5 *host, const prdb_sdk_delete_v1 *statement,
+    const prdb_host_api_v1 *host, const prdb_sdk_delete_v1 *statement,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     const uint8_t *schema, uint32_t schema_len, uint16_t max_candidates,
     uint32_t max_batch_bytes, uint8_t *request, uint64_t request_capacity,
@@ -649,7 +649,7 @@ int32_t prdb_sdk_optimizer_execute_delete_ast_v1(
     prdb_sdk_value_v1 *cell_scratch, uint32_t cell_scratch_capacity,
     uint8_t *target_handles, uint32_t target_capacity,
     uint32_t *deleted_count_out) {
-    prdb_host_api_v2 base_host = {0};
+    prdb_host_api_v1 base_host = {0};
     prdb_sdk_optimizer_response_v1 decoded_response = {0};
     prdb_sdk_batch_v1 batch = {0};
     prdb_sdk_row_iterator_v1 rows = {0};
@@ -670,12 +670,12 @@ int32_t prdb_sdk_optimizer_execute_delete_ast_v1(
     const prdb_sdk_select_v1 *predicate;
 
     if (host == NULL ||
-        host->v4.v3.struct_size < sizeof(prdb_host_api_v3) ||
-        host->v4.v3.abi_version != PRDB_QUERY_ABI_V3_VERSION ||
-        host->v4.v3.context == NULL ||
-        host->v4.v3.executor_request == NULL ||
-        host->v4.v3.statement_failure == NULL ||
-        host->v4.optimizer_request == NULL || host->optimizer_request == NULL ||
+        host->struct_size < sizeof(prdb_host_api_v1) ||
+        host->abi_version != PRDB_QUERY_ABI_VERSION ||
+        host->context == NULL ||
+        host->executor_request == NULL ||
+        host->statement_failure == NULL ||
+        host->optimizer_request == NULL ||
         request == NULL || optimizer_response == NULL ||
         relation_response == NULL || scan_response == NULL ||
         batch_response == NULL || relation_out == NULL ||
@@ -721,11 +721,11 @@ int32_t prdb_sdk_optimizer_execute_delete_ast_v1(
     }
     *deleted_count_out = 0;
     base_host.struct_size = sizeof(base_host);
-    base_host.abi_version = PRDB_QUERY_ABI_V2_VERSION;
-    base_host.context = host->v4.v3.context;
-    base_host.executor_request = host->v4.v3.executor_request;
-    base_host.planner_request = host->v4.v3.planner_request;
-    base_host.write_result = host->v4.v3.write_result;
+    base_host.abi_version = PRDB_QUERY_ABI_VERSION;
+    base_host.context = host->context;
+    base_host.executor_request = host->executor_request;
+    base_host.planner_request = host->planner_request;
+    base_host.write_result = host->write_result;
     predicate = &statement->predicate_statement;
 
     status = prdb_sdk_optimizer_encode_delete_v1(
@@ -757,14 +757,14 @@ int32_t prdb_sdk_optimizer_execute_delete_ast_v1(
         status = PRDB_SDK_OPTIMIZER_PLAN_CALLBACK_ERROR;
     }
     if (status != PRDB_SDK_OPTIMIZER_PLAN_OK)
-        return latch_optimizer_statement_failure(&host->v4, status);
+        return latch_optimizer_statement_failure(host, status);
 
     status = prdb_sdk_optimizer_validate_delete_plan_with_parameters_v1(
         &base_host, statement, parameters, parameter_count, schema, schema_len,
         decoded_response.plan, decoded_response.plan_len, relation_response,
         relation_response_capacity, &relation_response_len);
     if (status != PRDB_SDK_OPTIMIZER_PLAN_OK)
-        return latch_optimizer_statement_failure(&host->v4, status);
+        return latch_optimizer_statement_failure(host, status);
 
     status = prdb_sdk_optimizer_open_plan_scan_v1(
         &base_host, decoded_response.plan, decoded_response.plan_len,
@@ -773,11 +773,11 @@ int32_t prdb_sdk_optimizer_execute_delete_ast_v1(
         relation_out, relation_out_capacity, relation_columns,
         relation_column_capacity, cursor, &scan_opened);
     if (status != PRDB_SDK_OPTIMIZER_PLAN_OK)
-        return latch_optimizer_statement_failure(&host->v4, status);
+        return latch_optimizer_statement_failure(host, status);
     if (relation_out->column_count > PRDB_SDK_SQL_MAX_RELATION_COLUMNS ||
         relation_out->column_count > cell_scratch_capacity) {
         return latch_optimizer_statement_failure(
-            &host->v4, PRDB_SDK_OPTIMIZER_PLAN_INVALID_ARGUMENT);
+            host, PRDB_SDK_OPTIMIZER_PLAN_INVALID_ARGUMENT);
     }
     status = prdb_sdk_sql_bind_select_v1(
         predicate, relation_out->name, relation_out->name_len,
@@ -785,7 +785,7 @@ int32_t prdb_sdk_optimizer_execute_delete_ast_v1(
         binding_capacity);
     if (status != PRDB_SDK_SQL_BIND_OK) {
         return latch_optimizer_statement_failure(
-            &host->v4, PRDB_SDK_OPTIMIZER_PLAN_IDENTITY_MISMATCH);
+            host, PRDB_SDK_OPTIMIZER_PLAN_IDENTITY_MISMATCH);
     }
     if (scan_opened == 0) return PRDB_SDK_OPTIMIZER_PLAN_OK;
     cursor_open = 1;
@@ -855,10 +855,10 @@ int32_t prdb_sdk_optimizer_execute_delete_ast_v1(
         }
     }
     if (final_status != PRDB_SDK_OPTIMIZER_PLAN_OK)
-        return latch_optimizer_statement_failure(&host->v4, final_status);
+        return latch_optimizer_statement_failure(host, final_status);
     if (4U + 2U * page_count + close_count + target_count > 256U) {
         return latch_optimizer_statement_failure(
-            &host->v4, PRDB_SDK_OPTIMIZER_PLAN_REQUEST_LIMIT);
+            host, PRDB_SDK_OPTIMIZER_PLAN_REQUEST_LIMIT);
     }
     for (uint32_t index = 0; index < target_count; ++index) {
         status = prdb_sdk_executor_stage_delete_v1(
@@ -866,7 +866,7 @@ int32_t prdb_sdk_optimizer_execute_delete_ast_v1(
             scan_response, scan_response_capacity, &scan_response_len);
         if (status != PRDB_SDK_EXECUTOR_OK) {
             return latch_optimizer_statement_failure(
-                &host->v4, PRDB_SDK_OPTIMIZER_PLAN_CALLBACK_ERROR);
+                host, PRDB_SDK_OPTIMIZER_PLAN_CALLBACK_ERROR);
         }
     }
     *deleted_count_out = target_count;
@@ -874,7 +874,7 @@ int32_t prdb_sdk_optimizer_execute_delete_ast_v1(
 }
 
 int32_t prdb_sdk_optimizer_execute_update_ast_v1(
-    const prdb_host_api_v5 *host, const prdb_sdk_update_v1 *statement,
+    const prdb_host_api_v1 *host, const prdb_sdk_update_v1 *statement,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     const uint8_t *schema, uint32_t schema_len, uint16_t max_candidates,
     uint32_t max_batch_bytes, uint8_t *request, uint64_t request_capacity,
@@ -890,7 +890,7 @@ int32_t prdb_sdk_optimizer_execute_update_ast_v1(
     prdb_sdk_value_v1 *cell_scratch, uint32_t cell_scratch_capacity,
     uint8_t *target_handles, uint32_t target_capacity,
     uint32_t *updated_count_out) {
-    prdb_host_api_v2 base_host = {0};
+    prdb_host_api_v1 base_host = {0};
     prdb_sdk_optimizer_response_v1 decoded_response = {0};
     prdb_sdk_optimizer_update_plan_v1 update = {0};
     prdb_sdk_batch_v1 batch = {0};
@@ -914,12 +914,12 @@ int32_t prdb_sdk_optimizer_execute_update_ast_v1(
     const prdb_sdk_select_v1 *predicate;
 
     if (host == NULL ||
-        host->v4.v3.struct_size < sizeof(prdb_host_api_v3) ||
-        host->v4.v3.abi_version != PRDB_QUERY_ABI_V3_VERSION ||
-        host->v4.v3.context == NULL ||
-        host->v4.v3.executor_request == NULL ||
-        host->v4.v3.statement_failure == NULL ||
-        host->v4.optimizer_request == NULL || host->optimizer_request == NULL ||
+        host->struct_size < sizeof(prdb_host_api_v1) ||
+        host->abi_version != PRDB_QUERY_ABI_VERSION ||
+        host->context == NULL ||
+        host->executor_request == NULL ||
+        host->statement_failure == NULL ||
+        host->optimizer_request == NULL ||
         request == NULL || optimizer_response == NULL ||
         relation_response == NULL || scan_response == NULL ||
         batch_response == NULL || relation_out == NULL ||
@@ -965,11 +965,11 @@ int32_t prdb_sdk_optimizer_execute_update_ast_v1(
     }
     *updated_count_out = 0;
     base_host.struct_size = sizeof(base_host);
-    base_host.abi_version = PRDB_QUERY_ABI_V2_VERSION;
-    base_host.context = host->v4.v3.context;
-    base_host.executor_request = host->v4.v3.executor_request;
-    base_host.planner_request = host->v4.v3.planner_request;
-    base_host.write_result = host->v4.v3.write_result;
+    base_host.abi_version = PRDB_QUERY_ABI_VERSION;
+    base_host.context = host->context;
+    base_host.executor_request = host->executor_request;
+    base_host.planner_request = host->planner_request;
+    base_host.write_result = host->write_result;
     predicate = &statement->predicate_statement;
 
     status = prdb_sdk_optimizer_encode_update_v1(
@@ -1001,14 +1001,14 @@ int32_t prdb_sdk_optimizer_execute_update_ast_v1(
         status = PRDB_SDK_OPTIMIZER_PLAN_CALLBACK_ERROR;
     }
     if (status != PRDB_SDK_OPTIMIZER_PLAN_OK)
-        return latch_optimizer_statement_failure(&host->v4, status);
+        return latch_optimizer_statement_failure(host, status);
 
     status = prdb_sdk_optimizer_validate_update_plan_with_parameters_v1(
         &base_host, statement, parameters, parameter_count, schema, schema_len,
         decoded_response.plan, decoded_response.plan_len, relation_response,
         relation_response_capacity, &relation_response_len);
     if (status != PRDB_SDK_OPTIMIZER_PLAN_OK)
-        return latch_optimizer_statement_failure(&host->v4, status);
+        return latch_optimizer_statement_failure(host, status);
 
     status = prdb_sdk_optimizer_open_plan_scan_v1(
         &base_host, decoded_response.plan, decoded_response.plan_len,
@@ -1017,11 +1017,11 @@ int32_t prdb_sdk_optimizer_execute_update_ast_v1(
         relation_out, relation_out_capacity, relation_columns,
         relation_column_capacity, cursor, &scan_opened);
     if (status != PRDB_SDK_OPTIMIZER_PLAN_OK)
-        return latch_optimizer_statement_failure(&host->v4, status);
+        return latch_optimizer_statement_failure(host, status);
     if (relation_out->column_count > PRDB_SDK_SQL_MAX_RELATION_COLUMNS ||
         relation_out->column_count > cell_scratch_capacity) {
         return latch_optimizer_statement_failure(
-            &host->v4, PRDB_SDK_OPTIMIZER_PLAN_INVALID_ARGUMENT);
+            host, PRDB_SDK_OPTIMIZER_PLAN_INVALID_ARGUMENT);
     }
     status = prdb_sdk_sql_bind_select_v1(
         predicate, relation_out->name, relation_out->name_len,
@@ -1029,7 +1029,7 @@ int32_t prdb_sdk_optimizer_execute_update_ast_v1(
         binding_capacity);
     if (status != PRDB_SDK_SQL_BIND_OK) {
         return latch_optimizer_statement_failure(
-            &host->v4, PRDB_SDK_OPTIMIZER_PLAN_IDENTITY_MISMATCH);
+            host, PRDB_SDK_OPTIMIZER_PLAN_IDENTITY_MISMATCH);
     }
     if (scan_opened != 0) {
         cursor_open = 1;
@@ -1101,17 +1101,17 @@ int32_t prdb_sdk_optimizer_execute_update_ast_v1(
         }
     }
     if (final_status != PRDB_SDK_OPTIMIZER_PLAN_OK)
-        return latch_optimizer_statement_failure(&host->v4, final_status);
+        return latch_optimizer_statement_failure(host, final_status);
     if (4U + 2U * page_count + close_count + target_count > 256U) {
         return latch_optimizer_statement_failure(
-            &host->v4, PRDB_SDK_OPTIMIZER_PLAN_REQUEST_LIMIT);
+            host, PRDB_SDK_OPTIMIZER_PLAN_REQUEST_LIMIT);
     }
 
     status = prdb_sdk_optimizer_decode_update_plan_v1(
         decoded_response.plan, decoded_response.plan_len, &update,
         sizeof(update));
     if (status != PRDB_SDK_OPTIMIZER_PLAN_OK)
-        return latch_optimizer_statement_failure(&host->v4, status);
+        return latch_optimizer_statement_failure(host, status);
     for (uint32_t index = 0; index < update.assignment_count; ++index) {
         patches[index].struct_size = sizeof(patches[index]);
         patches[index].abi_version = PRDB_SDK_EXECUTOR_ABI_V1_VERSION;
@@ -1133,7 +1133,7 @@ int32_t prdb_sdk_optimizer_execute_update_ast_v1(
             scan_response, scan_response_capacity, &scan_response_len);
         if (status != PRDB_SDK_EXECUTOR_OK) {
             return latch_optimizer_statement_failure(
-                &host->v4, PRDB_SDK_OPTIMIZER_PLAN_CALLBACK_ERROR);
+                host, PRDB_SDK_OPTIMIZER_PLAN_CALLBACK_ERROR);
         }
     }
     *updated_count_out = target_count;
@@ -1141,7 +1141,7 @@ int32_t prdb_sdk_optimizer_execute_update_ast_v1(
 }
 
 static int32_t execute_select_ast_internal(
-    const prdb_host_api_v4 *host, const prdb_sdk_select_v1 *statement,
+    const prdb_host_api_v1 *host, const prdb_sdk_select_v1 *statement,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     int parameterized,
     const uint8_t *schema, uint32_t schema_len, uint16_t max_candidates,
@@ -1160,15 +1160,15 @@ static int32_t execute_select_ast_internal(
     prdb_sdk_optimizer_projected_row_v1_fn on_row, void *row_context,
     uint32_t *delivered_rows_out) {
     prdb_sdk_optimizer_response_v1 decoded_response = {0};
-    prdb_host_api_v2 base_host = {0};
+    prdb_host_api_v1 base_host = {0};
     uint64_t request_len = 0;
     uint64_t optimizer_response_len = 0;
     int32_t status;
 
-    if (host == NULL || host->v3.struct_size < sizeof(host->v3) ||
-        host->v3.abi_version != PRDB_QUERY_ABI_V3_VERSION ||
-        host->v3.executor_request == NULL ||
-        host->v3.statement_failure == NULL || host->optimizer_request == NULL ||
+    if (host == NULL || host->struct_size < sizeof(*host) ||
+        host->abi_version != PRDB_QUERY_ABI_VERSION ||
+        host->executor_request == NULL ||
+        host->statement_failure == NULL || host->optimizer_request == NULL ||
         delivered_rows_out == NULL) {
         return PRDB_SDK_OPTIMIZER_PLAN_INVALID_ARGUMENT;
     }
@@ -1211,11 +1211,11 @@ static int32_t execute_select_ast_internal(
         return latch_optimizer_statement_failure(host, status);
     }
     base_host.struct_size = sizeof(base_host);
-    base_host.abi_version = PRDB_QUERY_ABI_V2_VERSION;
-    base_host.context = host->v3.context;
-    base_host.executor_request = host->v3.executor_request;
-    base_host.planner_request = host->v3.planner_request;
-    base_host.write_result = host->v3.write_result;
+    base_host.abi_version = PRDB_QUERY_ABI_VERSION;
+    base_host.context = host->context;
+    base_host.executor_request = host->executor_request;
+    base_host.planner_request = host->planner_request;
+    base_host.write_result = host->write_result;
     status = parameterized != 0
                  ? prdb_sdk_optimizer_validate_select_plan_with_parameters_v1(
                        &base_host, statement, parameters, parameter_count,
@@ -1245,7 +1245,7 @@ static int32_t execute_select_ast_internal(
 }
 
 int32_t prdb_sdk_optimizer_execute_ordered_select_ast_v1(
-    const prdb_host_api_v4 *host, const prdb_sdk_select_v1 *statement,
+    const prdb_host_api_v1 *host, const prdb_sdk_select_v1 *statement,
     const uint8_t *schema, uint32_t schema_len, uint16_t max_candidates,
     uint32_t max_batch_bytes, uint8_t *request, uint64_t request_capacity,
     uint8_t *optimizer_response, uint64_t optimizer_response_capacity,
@@ -1264,7 +1264,7 @@ int32_t prdb_sdk_optimizer_execute_ordered_select_ast_v1(
     prdb_sdk_optimizer_response_v1 response = {0};
     prdb_sdk_optimizer_ordered_select_plan_v1 ordered = {0};
     prdb_sdk_select_binding_v1 binding = {0};
-    prdb_host_api_v2 executor_host = {0};
+    prdb_host_api_v1 executor_host = {0};
     prdb_sdk_batch_v1 batch = {0};
     prdb_sdk_row_iterator_v1 rows = {0};
     prdb_sdk_row_v1 ordered_rows[PRDB_SDK_SQL_ORDER_MAX_ROWS];
@@ -1285,10 +1285,10 @@ int32_t prdb_sdk_optimizer_execute_ordered_select_ast_v1(
     const void *output_regions[10];
     uint64_t output_region_lengths[10];
 
-    if (host == NULL || host->v3.struct_size < sizeof(host->v3) ||
-        host->v3.abi_version != PRDB_QUERY_ABI_V3_VERSION ||
-        host->v3.statement_failure == NULL ||
-        host->v3.executor_request == NULL || host->optimizer_request == NULL ||
+    if (host == NULL || host->struct_size < sizeof(*host) ||
+        host->abi_version != PRDB_QUERY_ABI_VERSION ||
+        host->statement_failure == NULL ||
+        host->executor_request == NULL || host->optimizer_request == NULL ||
         statement == NULL || statement->struct_size != sizeof(*statement) ||
         statement->abi_version != PRDB_SDK_SQL_ABI_V1_VERSION ||
         statement->sql == NULL || statement->sql_len == 0 ||
@@ -1405,11 +1405,11 @@ int32_t prdb_sdk_optimizer_execute_ordered_select_ast_v1(
     }
 
     executor_host.struct_size = sizeof(executor_host);
-    executor_host.abi_version = PRDB_QUERY_ABI_V2_VERSION;
-    executor_host.context = host->v3.context;
-    executor_host.executor_request = host->v3.executor_request;
-    executor_host.planner_request = host->v3.planner_request;
-    executor_host.write_result = host->v3.write_result;
+    executor_host.abi_version = PRDB_QUERY_ABI_VERSION;
+    executor_host.context = host->context;
+    executor_host.executor_request = host->executor_request;
+    executor_host.planner_request = host->planner_request;
+    executor_host.write_result = host->write_result;
     status = prdb_sdk_optimizer_acquire_plan_relation_v1(
         &executor_host, response.plan, response.plan_len, relation_response,
         relation_response_capacity, &relation_response_len, relation_out,
@@ -1635,7 +1635,7 @@ int32_t prdb_sdk_optimizer_execute_ordered_select_ast_v1(
 }
 
 int32_t prdb_sdk_optimizer_execute_select_ast_v1(
-    const prdb_host_api_v4 *host, const prdb_sdk_select_v1 *statement,
+    const prdb_host_api_v1 *host, const prdb_sdk_select_v1 *statement,
     const uint8_t *schema, uint32_t schema_len, uint16_t max_candidates,
     uint32_t max_batch_bytes, uint8_t *request, uint64_t request_capacity,
     uint8_t *optimizer_response, uint64_t optimizer_response_capacity,
@@ -1662,7 +1662,7 @@ int32_t prdb_sdk_optimizer_execute_select_ast_v1(
 }
 
 int32_t prdb_sdk_optimizer_execute_select_ast_with_parameters_v1(
-    const prdb_host_api_v4 *host, const prdb_sdk_select_v1 *statement,
+    const prdb_host_api_v1 *host, const prdb_sdk_select_v1 *statement,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     const uint8_t *schema, uint32_t schema_len, uint16_t max_candidates,
     uint32_t max_batch_bytes, uint8_t *request, uint64_t request_capacity,
@@ -1690,7 +1690,7 @@ int32_t prdb_sdk_optimizer_execute_select_ast_with_parameters_v1(
 }
 
 typedef struct optimizer_result_context_v1 {
-    const prdb_host_api_v3 *host;
+    const prdb_host_api_v1 *host;
     const prdb_sdk_sql_column_shape_v1 *columns;
     const prdb_sdk_executor_relation_v1 *relation;
     uint8_t *record_buffer;
@@ -1719,7 +1719,7 @@ static int32_t emit_optimizer_projected_row_v1(
 }
 
 static int32_t execute_select_ast_to_result_internal(
-    const prdb_host_api_v4 *host, const prdb_sdk_select_v1 *statement,
+    const prdb_host_api_v1 *host, const prdb_sdk_select_v1 *statement,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     int parameterized,
     const uint8_t *schema, uint32_t schema_len, uint16_t max_candidates,
@@ -1737,12 +1737,12 @@ static int32_t execute_select_ast_to_result_internal(
     uint32_t projected_value_capacity, uint8_t *result_record_buffer,
     uint64_t result_record_capacity, uint32_t *delivered_rows_out) {
     optimizer_result_context_v1 result = {0};
-    if (host == NULL || host->v3.write_result == NULL || relation_out == NULL ||
+    if (host == NULL || host->write_result == NULL || relation_out == NULL ||
         relation_columns == NULL || relation_column_capacity == 0 ||
         result_record_buffer == NULL || result_record_capacity == 0) {
         return PRDB_SDK_OPTIMIZER_PLAN_INVALID_ARGUMENT;
     }
-    result.host = &host->v3;
+    result.host = host;
     result.columns = relation_columns;
     result.relation = relation_out;
     result.record_buffer = result_record_buffer;
@@ -1771,7 +1771,7 @@ static int32_t execute_select_ast_to_result_internal(
 }
 
 int32_t prdb_sdk_optimizer_execute_select_ast_to_result_v1(
-    const prdb_host_api_v4 *host, const prdb_sdk_select_v1 *statement,
+    const prdb_host_api_v1 *host, const prdb_sdk_select_v1 *statement,
     const uint8_t *schema, uint32_t schema_len, uint16_t max_candidates,
     uint32_t max_batch_bytes, uint8_t *request, uint64_t request_capacity,
     uint8_t *optimizer_response, uint64_t optimizer_response_capacity,
@@ -1799,7 +1799,7 @@ int32_t prdb_sdk_optimizer_execute_select_ast_to_result_v1(
 }
 
 int32_t prdb_sdk_optimizer_execute_select_ast_with_parameters_to_result_v1(
-    const prdb_host_api_v4 *host, const prdb_sdk_select_v1 *statement,
+    const prdb_host_api_v1 *host, const prdb_sdk_select_v1 *statement,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     const uint8_t *schema, uint32_t schema_len, uint16_t max_candidates,
     uint32_t max_batch_bytes, uint8_t *request, uint64_t request_capacity,
@@ -1827,7 +1827,7 @@ int32_t prdb_sdk_optimizer_execute_select_ast_with_parameters_to_result_v1(
 }
 
 int32_t prdb_sdk_optimizer_execute_select_ast_with_parameters_to_result_v2(
-    const prdb_host_api_v4 *host, const prdb_sdk_select_v1 *statement,
+    const prdb_host_api_v1 *host, const prdb_sdk_select_v1 *statement,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     const uint8_t *schema, uint32_t schema_len, uint16_t max_candidates,
     uint16_t max_index_candidates, uint32_t max_batch_bytes, uint8_t *request,

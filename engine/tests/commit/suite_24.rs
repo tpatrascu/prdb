@@ -60,7 +60,7 @@ pub(super) fn sandboxed_optimizer_metadata_submission_cancels_over_tcp()
     let artifact = std::fs::read(artifact_path)?;
     let manifest = manifest_v1_from_elf(
         &artifact,
-        4,
+        1,
         1,
         "x86_64-v1".to_owned(),
         "nixos-x86_64-glibc-2.42".to_owned(),

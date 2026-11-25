@@ -8,8 +8,8 @@
 #define GROUP_SPILL_MEMORY_BYTES UINT32_C(65536)
 
 typedef struct group_spill_context {
-    const prdb_host_api_v6 *host;
-    const prdb_host_api_v2 *executor_host;
+    const prdb_host_api_v1 *host;
+    const prdb_host_api_v1 *executor_host;
     const prdb_sdk_select_v1 *statement;
     const prdb_sdk_select_binding_v1 *binding;
     const prdb_sdk_executor_relation_v1 *relation;
@@ -35,10 +35,10 @@ typedef struct group_spill_context {
     int32_t source_status;
 } group_spill_context;
 
-static int32_t group_spill_fail(const prdb_host_api_v6 *host, int32_t status) {
-    if (status != 0 && host != NULL && host->v5.v4.v3.statement_failure != NULL)
-        (void)host->v5.v4.v3.statement_failure(
-            host->v5.v4.v3.context, PRDB_QUERY_STATEMENT_FAILURE_SQL);
+static int32_t group_spill_fail(const prdb_host_api_v1 *host, int32_t status) {
+    if (status != 0 && host != NULL && host->statement_failure != NULL)
+        (void)host->statement_failure(
+            host->context, PRDB_QUERY_STATEMENT_FAILURE_SQL);
     return status;
 }
 
@@ -273,7 +273,7 @@ static int32_t group_spill_output(void *opaque, const uint8_t *record,
 }
 
 int32_t prdb_sdk_sql_execute_group_count_spill_v1(
-    const prdb_host_api_v6 *host, const uint8_t *schema,
+    const prdb_host_api_v1 *host, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     uint16_t max_candidates, uint32_t max_batch_bytes,
     uint8_t *planner_response, uint64_t planner_response_capacity,
@@ -285,24 +285,24 @@ int32_t prdb_sdk_sql_execute_group_count_spill_v1(
     uint32_t executor_column_capacity, prdb_sdk_value_v1 *cell_scratch,
     uint32_t cell_scratch_capacity,
     prdb_sdk_sql_group_row_v1_fn on_group, void *result_context) {
-    const prdb_host_api_v3 *host_v3;
+    const prdb_host_api_v1 *host_v3;
     prdb_sdk_select_v1 statement = {0};
     prdb_sdk_select_binding_v1 binding = {0};
     prdb_sdk_planner_relation_v1 planned = {0};
     prdb_sdk_executor_relation_v1 resolved = {0};
     group_spill_context state = {0};
-    prdb_host_api_v2 base_host;
+    prdb_host_api_v1 base_host;
     uint64_t planner_len = 0, executor_len = 0, close_len = 0;
     uint8_t close_response[8] = {0};
     int32_t status;
     if (host == NULL || host->spill_request == NULL ||
-        host->v5.v4.v3.struct_size < sizeof(host->v5.v4.v3) ||
-        host->v5.v4.v3.abi_version != PRDB_QUERY_ABI_V3_VERSION ||
-        host->v5.v4.v3.statement_failure == NULL)
+        host->struct_size < sizeof(*host) ||
+        host->abi_version != PRDB_QUERY_ABI_VERSION ||
+        host->statement_failure == NULL)
         return PRDB_SDK_SQL_EXEC_INVALID_ARGUMENT;
-    host_v3 = &host->v5.v4.v3;
-    base_host = (prdb_host_api_v2){
-        sizeof(prdb_host_api_v2), PRDB_QUERY_ABI_V2_VERSION,
+    host_v3 = host;
+    base_host = (prdb_host_api_v1){
+        sizeof(prdb_host_api_v1), PRDB_QUERY_ABI_VERSION,
         host_v3->context, host_v3->executor_request, host_v3->planner_request,
         host_v3->write_result};
     if (schema == NULL || sql == NULL || on_group == NULL || max_candidates == 0 ||

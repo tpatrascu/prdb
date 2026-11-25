@@ -459,7 +459,7 @@ pub(super) fn execute_interactive_package(
         include_dir: include_dir.to_path_buf(),
         requested_scope: requested_scope.to_path_buf(),
         output_dir: package_dir.clone(),
-        native_abi_version: 3,
+        native_abi_version: 1,
         sdk_release,
         cpu_baseline: cpu_baseline.to_owned(),
         runtime_profile: runtime_profile.to_owned(),

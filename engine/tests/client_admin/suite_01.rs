@@ -220,7 +220,7 @@ pub(super) fn admin_client_lists_sdk_libraries_with_compatibility_metadata() {
         respond(
             &mut stream,
             &request,
-            br#"{"sdk_libraries":[{"release":7,"native_abis":[5],"target":"linux-x86_64","cpu_baseline":"x86_64-v1","runtime_profile":"nixos-glibc-2.42","soname":"libprdb_sql.so.7","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","needed":["libc.so.6"],"library_bytes":4096}],"next_cursor":null}"#,
+            br#"{"sdk_libraries":[{"release":7,"native_abis":[1],"target":"linux-x86_64","cpu_baseline":"x86_64-v1","runtime_profile":"nixos-glibc-2.42","soname":"libprdb_sql.so.7","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","needed":["libc.so.6"],"library_bytes":4096}],"next_cursor":null}"#,
         );
     });
 
@@ -229,7 +229,7 @@ pub(super) fn admin_client_lists_sdk_libraries_with_compatibility_metadata() {
     let releases = client.list_sdk_libraries().unwrap();
     assert_eq!(releases.len(), 1);
     assert_eq!(releases[0].sdk_release, 7);
-    assert_eq!(releases[0].native_abis, [5]);
+    assert_eq!(releases[0].native_abis, [1]);
     assert_eq!(releases[0].target, "linux-x86_64");
     assert_eq!(releases[0].soname, "libprdb_sql.so.7");
     assert_eq!(releases[0].sha256, [0xaa; 32]);
@@ -255,7 +255,7 @@ pub(super) fn admin_client_follows_opaque_sdk_library_page_cursors() {
             &mut stream,
             &request,
             format!(
-                r#"{{"sdk_libraries":[{{"release":7,"native_abis":[5],"target":"linux-x86_64","cpu_baseline":"x86_64-v1","runtime_profile":"test-runtime","soname":"libprdb_sql.so.7","sha256":"{}","needed":["libc.so.6"],"library_bytes":4096}}],"next_cursor":"{cursor}"}}"#,
+                r#"{{"sdk_libraries":[{{"release":7,"native_abis":[1],"target":"linux-x86_64","cpu_baseline":"x86_64-v1","runtime_profile":"test-runtime","soname":"libprdb_sql.so.7","sha256":"{}","needed":["libc.so.6"],"library_bytes":4096}}],"next_cursor":"{cursor}"}}"#,
                 "aa".repeat(32)
             )
             .as_bytes(),
@@ -271,7 +271,7 @@ pub(super) fn admin_client_follows_opaque_sdk_library_page_cursors() {
             &mut stream,
             &request,
             format!(
-                r#"{{"sdk_libraries":[{{"release":8,"native_abis":[5],"target":"linux-x86_64","cpu_baseline":"x86_64-v1","runtime_profile":"test-runtime","soname":"libprdb_sql.so.8","sha256":"{}","needed":["libc.so.6"],"library_bytes":4096}}],"next_cursor":null}}"#,
+                r#"{{"sdk_libraries":[{{"release":8,"native_abis":[1],"target":"linux-x86_64","cpu_baseline":"x86_64-v1","runtime_profile":"test-runtime","soname":"libprdb_sql.so.8","sha256":"{}","needed":["libc.so.6"],"library_bytes":4096}}],"next_cursor":null}}"#,
                 "bb".repeat(32)
             )
             .as_bytes(),
@@ -481,7 +481,7 @@ pub(super) fn admin_client_streams_sdk_library_install_over_control_chunks() {
             &mut stream,
             &list,
             format!(
-                r#"{{"sdk_libraries":[{{"release":7,"native_abis":[5],"target":"linux-x86_64","cpu_baseline":"x86_64-v1","runtime_profile":"test-runtime","soname":"libprdb_sql.so.7","sha256":"{server_digest}","needed":["libc.so.6"],"library_bytes":{}}}],"next_cursor":null}}"#,
+                r#"{{"sdk_libraries":[{{"release":7,"native_abis":[1],"target":"linux-x86_64","cpu_baseline":"x86_64-v1","runtime_profile":"test-runtime","soname":"libprdb_sql.so.7","sha256":"{server_digest}","needed":["libc.so.6"],"library_bytes":{}}}],"next_cursor":null}}"#,
                 library.len()
             )
             .as_bytes(),

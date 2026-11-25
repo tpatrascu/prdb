@@ -1,15 +1,14 @@
-#include "prdb_query_abi_v5.h"
-#include "prdb_query_abi_v6.h"
+#include "prdb_query_abi_v1.h"
 #include "prdb_query_abi_layout_assertions.h"
 
 #include <assert.h>
 #include <string.h>
 
-const prdb_query_descriptor_v5_record prdb_query_descriptor_v5 = {
-    sizeof(prdb_query_descriptor_v5_record),
-    PRDB_QUERY_ABI_V5_VERSION,
-    sizeof(prdb_host_api_v5),
-    sizeof(prdb_invocation_v5),
+const prdb_query_descriptor_v1_record prdb_query_descriptor_v1 = {
+    sizeof(prdb_query_descriptor_v1_record),
+    PRDB_QUERY_ABI_VERSION,
+    sizeof(prdb_host_api_v1),
+    sizeof(prdb_invocation_v1),
 };
 
 static int32_t optimizer_request_v4(void *context, const uint8_t *request,
@@ -71,17 +70,17 @@ static int32_t write_result(void *context, const uint8_t *bytes,
     return PRDB_QUERY_CALLBACK_OK;
 }
 
-int32_t prdb_query_main_v5(const prdb_host_api_v5 *host,
-                           const prdb_invocation_v5 *invocation) {
+int32_t prdb_query_main_v1(const prdb_host_api_v1 *host,
+                           const prdb_invocation_v1 *invocation) {
     static const uint8_t input[] = {0x41, 0x42};
     uint8_t output[sizeof(input)] = {0};
     uint64_t output_len = 0;
     assert(host != NULL && invocation != NULL);
-    assert(host->v4.v3.abi_version == PRDB_QUERY_ABI_V3_VERSION);
-    assert(host->v4.optimizer_request != NULL);
+    assert(host->abi_version == PRDB_QUERY_ABI_VERSION);
     assert(host->optimizer_request != NULL);
-    assert(invocation->abi_version == PRDB_QUERY_ABI_V5_VERSION);
-    assert(host->optimizer_request(host->v4.v3.context,
+    assert(host->optimizer_request != NULL);
+    assert(invocation->abi_version == PRDB_QUERY_ABI_VERSION);
+    assert(host->optimizer_request(host->context,
                                    PRDB_IPC_OP_OPTIMIZE_DELETE, input,
                                    sizeof(input), output, sizeof(output),
                                    &output_len) == PRDB_QUERY_CALLBACK_OK);
@@ -91,22 +90,17 @@ int32_t prdb_query_main_v5(const prdb_host_api_v5 *host,
 }
 
 int main(void) {
-    const prdb_host_api_v5 host = {
-        {
-            {
-                sizeof(prdb_host_api_v3), PRDB_QUERY_ABI_V3_VERSION, NULL,
-                request, request, write_result, statement_failure,
-            },
-            optimizer_request_v4,
-        },
-        optimizer_request_v5,
+    const prdb_host_api_v1 host = {
+        sizeof(prdb_host_api_v1), PRDB_QUERY_ABI_VERSION, NULL,
+        request, request, write_result, statement_failure,
+        optimizer_request_v5, NULL,
     };
-    const prdb_invocation_v5 invocation = {
-        sizeof(prdb_invocation_v5), PRDB_QUERY_ABI_V5_VERSION, NULL, 0,
+    const prdb_invocation_v1 invocation = {
+        sizeof(prdb_invocation_v1), PRDB_QUERY_ABI_VERSION, NULL, 0,
     };
-    assert(prdb_query_descriptor_v5.abi_version == PRDB_QUERY_ABI_V5_VERSION);
-    assert(prdb_query_descriptor_v5.host_api_size == sizeof(host));
-    assert(prdb_query_descriptor_v5.invocation_size == sizeof(invocation));
-    assert(prdb_query_main_v5(&host, &invocation) == 0);
+    assert(prdb_query_descriptor_v1.abi_version == PRDB_QUERY_ABI_VERSION);
+    assert(prdb_query_descriptor_v1.host_api_size == sizeof(host));
+    assert(prdb_query_descriptor_v1.invocation_size == sizeof(invocation));
+    assert(prdb_query_main_v1(&host, &invocation) == 0);
     return 0;
 }

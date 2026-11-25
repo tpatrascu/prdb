@@ -331,7 +331,7 @@ pub(super) fn configured_sdk_library_install_and_remove_commands_use_typed_gatew
                 target: "linux-x86_64".to_owned(),
                 cpu_baseline: "x86_64-v1".to_owned(),
                 runtime_profile: "test-runtime".to_owned(),
-                native_abi: 5,
+                native_abi: 1,
             },
             default_credential: "admin".to_owned(),
             credentials: vec![ConfigCredential {
@@ -409,7 +409,7 @@ pub(super) fn configured_sdk_library_install_and_remove_commands_use_typed_gatew
             &mut stream,
             &list,
             format!(
-                r#"{{"sdk_libraries":[{{"release":7,"native_abis":[5],"target":"linux-x86_64","cpu_baseline":"x86_64-v1","runtime_profile":"test-runtime","soname":"libprdb_sql.so.7","sha256":"{library_digest_text}","needed":["libc.so.6"],"library_bytes":{}}}],"next_cursor":null}}"#,
+                r#"{{"sdk_libraries":[{{"release":7,"native_abis":[1],"target":"linux-x86_64","cpu_baseline":"x86_64-v1","runtime_profile":"test-runtime","soname":"libprdb_sql.so.7","sha256":"{library_digest_text}","needed":["libc.so.6"],"library_bytes":{}}}],"next_cursor":null}}"#,
                 library.len()
             )
             .as_bytes(),

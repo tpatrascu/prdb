@@ -31,7 +31,7 @@ static int32_t capture_failure(void *opaque, uint32_t reason) {
     return 0;
 }
 
-static int32_t emit_statement(const prdb_host_api_v3 *host,
+static int32_t emit_statement(const prdb_host_api_v1 *host,
                               const uint8_t *schema, uint32_t schema_len,
                               const prdb_sdk_sql_batch_statement_v1 *statement) {
     if (schema_len != 3 || memcmp(schema, "app", 3) != 0) return 11;
@@ -75,8 +75,8 @@ static int test_ordered_result_framing(void) {
     const uint8_t sql2[] = "b";
     prdb_sdk_sql_batch_statement_v1 statements[] = {
         {sql1, 1, NULL, 0}, {sql2, 1, NULL, 0}};
-    prdb_host_api_v3 host = {
-        sizeof(host), PRDB_QUERY_ABI_V3_VERSION, &state, NULL, NULL,
+    prdb_host_api_v1 host = {
+        sizeof(host), PRDB_QUERY_ABI_VERSION, &state, NULL, NULL,
         capture_write, capture_failure};
     uint64_t offset = 0;
     runner_calls = 0;
@@ -101,8 +101,8 @@ static int test_statement_failure_stops_package(void) {
     const uint8_t sql3[] = "c";
     prdb_sdk_sql_batch_statement_v1 statements[] = {
         {sql1, 1, NULL, 0}, {sql2, 4, NULL, 0}, {sql3, 1, NULL, 0}};
-    prdb_host_api_v3 host = {
-        sizeof(host), PRDB_QUERY_ABI_V3_VERSION, &state, NULL, NULL,
+    prdb_host_api_v1 host = {
+        sizeof(host), PRDB_QUERY_ABI_VERSION, &state, NULL, NULL,
         capture_write, capture_failure};
     runner_calls = 0;
     if (prdb_sdk_sql_run_batch_v1(&host, schema, 3, 3, statements,
@@ -119,8 +119,8 @@ static int test_output_failure_latches_and_stops(void) {
     const uint8_t sql2[] = "b";
     prdb_sdk_sql_batch_statement_v1 statements[] = {
         {sql1, 1, NULL, 0}, {sql2, 1, NULL, 0}};
-    prdb_host_api_v3 host = {
-        sizeof(host), PRDB_QUERY_ABI_V3_VERSION, &state, NULL, NULL,
+    prdb_host_api_v1 host = {
+        sizeof(host), PRDB_QUERY_ABI_VERSION, &state, NULL, NULL,
         capture_write, capture_failure};
     runner_calls = 0;
     if (prdb_sdk_sql_run_batch_v1(&host, schema, 3, 2, statements,
@@ -133,8 +133,8 @@ static int test_output_failure_latches_and_stops(void) {
 static int test_rejects_over_limit_count(void) {
     capture state = {{0}, 0, 0, UINT32_MAX, 0};
     const uint8_t schema[] = "app";
-    prdb_host_api_v3 host = {
-        sizeof(host), PRDB_QUERY_ABI_V3_VERSION, &state, NULL, NULL,
+    prdb_host_api_v1 host = {
+        sizeof(host), PRDB_QUERY_ABI_VERSION, &state, NULL, NULL,
         capture_write, capture_failure};
     if (prdb_sdk_sql_run_batch_v1(&host, schema, 3,
             PRDB_SDK_SQL_BATCH_MAX_STATEMENTS + 1, NULL, emit_statement) !=

@@ -15,7 +15,7 @@ static int32_t run_query_v21_decimal(mock_state *mock, const uint8_t *sql,
         {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_DECIMAL, 10, 2}};
     prdb_sdk_value_v1 cell_scratch[2] = {{0}};
-    prdb_host_api_v3 host = {sizeof(host), PRDB_QUERY_ABI_V3_VERSION,
+    prdb_host_api_v1 host = {sizeof(host), PRDB_QUERY_ABI_VERSION,
                              mock, executor_request, planner_request, NULL,
                              statement_failure};
     return prdb_sdk_sql_execute_group_v1(
@@ -48,7 +48,7 @@ static int32_t run_query_v22_decimal(mock_state *mock, const uint8_t *sql,
         {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_DECIMAL, 10, 2}};
     prdb_sdk_value_v1 cell_scratch[2] = {{0}};
-    prdb_host_api_v3 host = {sizeof(host), PRDB_QUERY_ABI_V3_VERSION,
+    prdb_host_api_v1 host = {sizeof(host), PRDB_QUERY_ABI_VERSION,
                              mock, executor_request, planner_request, NULL,
                              statement_failure};
     return prdb_sdk_sql_execute_group_v1(
@@ -96,7 +96,7 @@ static int32_t run_query_v23_decimal(mock_state *mock, const uint8_t *sql,
         {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_DECIMAL, 10, 2}};
     prdb_sdk_value_v1 cell_scratch[2] = {{0}};
-    prdb_host_api_v3 host = {sizeof(host), PRDB_QUERY_ABI_V3_VERSION,
+    prdb_host_api_v1 host = {sizeof(host), PRDB_QUERY_ABI_VERSION,
                              mock, executor_request, planner_request, NULL,
                              statement_failure};
     return prdb_sdk_sql_execute_group_v1(
@@ -207,11 +207,10 @@ static int32_t run_query_v24_optimizer_having(
         {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0}};
     prdb_sdk_value_v1 cell_scratch[2] = {{0}};
-    prdb_host_api_v5 host = {0};
-    host.v4.v3 = (prdb_host_api_v3){
-        sizeof(prdb_host_api_v3), PRDB_QUERY_ABI_V3_VERSION, mock,
+    prdb_host_api_v1 host = {0};
+    host = (prdb_host_api_v1){
+        sizeof(prdb_host_api_v1), PRDB_QUERY_ABI_VERSION, mock,
         executor_request, planner_request, NULL, statement_failure};
-    host.v4.optimizer_request = unused_optimizer_request;
     host.optimizer_request = optimizer_request;
     mock->optimizer_enabled = 0;
     mock->optimizer_aggregate_kind = PRDB_SDK_SQL_AGGREGATE_SUM;
@@ -255,11 +254,10 @@ static int32_t run_query_v24_count_column(
         {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {score_name, 5, 1, input_type, 0, 0}};
     prdb_sdk_value_v1 cell_scratch[2] = {{0}};
-    prdb_host_api_v5 host = {0};
-    host.v4.v3 = (prdb_host_api_v3){
-        sizeof(prdb_host_api_v3), PRDB_QUERY_ABI_V3_VERSION, mock,
+    prdb_host_api_v1 host = {0};
+    host = (prdb_host_api_v1){
+        sizeof(prdb_host_api_v1), PRDB_QUERY_ABI_VERSION, mock,
         executor_request, planner_request, NULL, statement_failure};
-    host.v4.optimizer_request = unused_optimizer_request;
     host.optimizer_request = optimizer_request;
     mock->optimizer_enabled = 1;
     mock->optimizer_aggregate_kind =
@@ -443,7 +441,7 @@ static int32_t run_query_v21_decimal_wide_sum(
         {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_DECIMAL, 38, 2}};
     prdb_sdk_value_v1 cell_scratch[2] = {{0}};
-    prdb_host_api_v3 host = {sizeof(host), PRDB_QUERY_ABI_V3_VERSION,
+    prdb_host_api_v1 host = {sizeof(host), PRDB_QUERY_ABI_VERSION,
                              mock, executor_request, planner_request, NULL,
                              statement_failure};
     return prdb_sdk_sql_execute_group_v1(
@@ -486,7 +484,7 @@ static int32_t run_query_v7_integer_sum(
         {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_BIGINT, 0, 0}};
     prdb_sdk_value_v1 cell_scratch[2] = {{0}};
-    prdb_host_api_v3 host = {sizeof(host), PRDB_QUERY_ABI_V3_VERSION,
+    prdb_host_api_v1 host = {sizeof(host), PRDB_QUERY_ABI_VERSION,
                              mock, executor_request, planner_request, NULL,
                              statement_failure};
     return prdb_sdk_sql_execute_group_v1(
@@ -564,7 +562,7 @@ static int32_t run_query_v21_integer_sum(
         {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_BIGINT, 0, 0}};
     prdb_sdk_value_v1 cell_scratch[2] = {{0}};
-    prdb_host_api_v3 host = {sizeof(host), PRDB_QUERY_ABI_V3_VERSION,
+    prdb_host_api_v1 host = {sizeof(host), PRDB_QUERY_ABI_VERSION,
                              mock, executor_request, planner_request, NULL,
                              statement_failure};
     return prdb_sdk_sql_execute_group_v1(
@@ -593,7 +591,7 @@ static int32_t run_query_v21_min_decimal(mock_state *mock, const uint8_t *sql,
         {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_DECIMAL, 10, 2}};
     prdb_sdk_value_v1 cell_scratch[2] = {{0}};
-    prdb_host_api_v3 host = {sizeof(host), PRDB_QUERY_ABI_V3_VERSION,
+    prdb_host_api_v1 host = {sizeof(host), PRDB_QUERY_ABI_VERSION,
                              mock, executor_request, planner_request, NULL,
                              statement_failure};
     return prdb_sdk_sql_execute_group_v1(
@@ -622,7 +620,7 @@ static int32_t run_query_v21_max_decimal(mock_state *mock, const uint8_t *sql,
     uint8_t batch_response[512];
     uint8_t materialized_bytes[4096];
     prdb_sdk_value_v1 cell_scratch[2] = {{0}};
-    prdb_host_api_v3 host = {sizeof(host), PRDB_QUERY_ABI_V3_VERSION,
+    prdb_host_api_v1 host = {sizeof(host), PRDB_QUERY_ABI_VERSION,
                              mock, executor_request, planner_request, NULL,
                              statement_failure};
     return prdb_sdk_sql_execute_group_v1(

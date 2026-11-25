@@ -1,7 +1,7 @@
 #ifndef PRDB_SDK_SQL_BATCH_V1_H
 #define PRDB_SDK_SQL_BATCH_V1_H
 
-#include "prdb_query_abi_v3.h"
+#include "prdb_query_abi_v1.h"
 
 #define PRDB_SDK_SQL_BATCH_ABI_V1_VERSION UINT32_C(1)
 #define PRDB_SDK_SQL_BATCH_MAX_STATEMENTS UINT32_C(64)
@@ -29,7 +29,7 @@ typedef struct prdb_sdk_sql_batch_statement_v1 {
 } prdb_sdk_sql_batch_statement_v1;
 
 typedef int32_t (*prdb_sdk_sql_batch_statement_runner_v1_fn)(
-    const prdb_host_api_v3 *host, const uint8_t *schema,
+    const prdb_host_api_v1 *host, const uint8_t *schema,
     uint32_t schema_len, const prdb_sdk_sql_batch_statement_v1 *statement);
 
 /* Executes an already lexed statement list sequentially in the same host
@@ -39,7 +39,7 @@ typedef int32_t (*prdb_sdk_sql_batch_statement_runner_v1_fn)(
  * ordinal, and payload length. Any statement or output failure latches the
  * host failure callback and stops the package immediately. */
 int32_t prdb_sdk_sql_run_batch_v1(
-    const prdb_host_api_v3 *host, const uint8_t *schema,
+    const prdb_host_api_v1 *host, const uint8_t *schema,
     uint32_t schema_len, uint32_t statement_count,
     const prdb_sdk_sql_batch_statement_v1 *statements,
     prdb_sdk_sql_batch_statement_runner_v1_fn run_statement);

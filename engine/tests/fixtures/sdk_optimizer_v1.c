@@ -10,13 +10,14 @@ typedef struct mock_optimizer {
     int32_t callback_status;
 } mock_optimizer;
 
-static int32_t mock_request(void *opaque, const uint8_t *request,
-                            uint64_t request_len, uint8_t *response,
-                            uint64_t response_capacity,
+static int32_t mock_request(void *opaque, uint16_t operation,
+                            const uint8_t *request, uint64_t request_len,
+                            uint8_t *response, uint64_t response_capacity,
                             uint64_t *response_len) {
     mock_optimizer *mock = (mock_optimizer *)opaque;
     static const uint8_t expected_request[] = {0x11, 0x22, 0x33};
 
+    assert(operation == PRDB_IPC_OP_OPTIMIZE_SELECT);
     assert(request_len == sizeof(expected_request));
     assert(memcmp(request, expected_request, sizeof(expected_request)) == 0);
     if (mock->callback_status != PRDB_QUERY_CALLBACK_OK) {
@@ -71,18 +72,17 @@ static int32_t mock_request_v5(void *opaque, uint16_t operation,
     return PRDB_QUERY_CALLBACK_OK;
 }
 
-static prdb_host_api_v4 host_for(mock_optimizer *mock) {
-    prdb_host_api_v4 host = {
-        {
-            sizeof(prdb_host_api_v3),
-            PRDB_QUERY_ABI_V3_VERSION,
-            mock,
-            NULL,
-            NULL,
-            NULL,
-            NULL,
-        },
+static prdb_host_api_v1 host_for(mock_optimizer *mock) {
+    prdb_host_api_v1 host = {
+        sizeof(prdb_host_api_v1),
+        PRDB_QUERY_ABI_VERSION,
+        mock,
+        NULL,
+        NULL,
+        NULL,
+        NULL,
         mock_request,
+        NULL,
     };
     return host;
 }
@@ -188,8 +188,9 @@ int main(void) {
     static const uint8_t malformed[] = {0, 1, 0, 0, 0, 0, 2, 0xaa};
     mock_optimizer mock = {success, sizeof(success),
                            PRDB_QUERY_CALLBACK_OK};
-    prdb_host_api_v4 host = host_for(&mock);
-    prdb_host_api_v5 host_v5 = {host, mock_request_v5};
+    prdb_host_api_v1 host = host_for(&mock);
+    prdb_host_api_v1 host_v5 = host;
+    host_v5.optimizer_request = mock_request_v5;
     uint8_t response[sizeof(success)] = {0};
     uint64_t response_len = 0;
     prdb_sdk_optimizer_response_v1 decoded = {0};

@@ -73,7 +73,7 @@ int main(void) {
     prdb_sdk_select_binding_v1 binding = {0};
     prdb_sdk_value_v1 cell_scratch[2] = {{0}};
     result_capture capture = {{0}, 0, 0, 0};
-    prdb_host_api_v3 host = {sizeof(host), PRDB_QUERY_ABI_V3_VERSION,
+    prdb_host_api_v1 host = {sizeof(host), PRDB_QUERY_ABI_VERSION,
                              &capture, NULL, NULL, write_result, NULL};
     static const uint8_t expected[] = {
         'S', 'Q', 'L', 'R', 0, 1, 0, 2,
@@ -134,8 +134,8 @@ int main(void) {
             text_name, sizeof(text_name) - 1, 0, PRDB_SDK_VALUE_TYPE_TEXT, 0, 0};
         prdb_sdk_select_binding_v1 text_binding = {0};
         chunk_counter counter = {0};
-        prdb_host_api_v3 chunk_host = {sizeof(chunk_host),
-                                       PRDB_QUERY_ABI_V3_VERSION, &counter,
+        prdb_host_api_v1 chunk_host = {sizeof(chunk_host),
+                                       PRDB_QUERY_ABI_VERSION, &counter,
                                        NULL, NULL, count_result_chunk, NULL};
         prdb_sdk_batch_v1 text_batch = {0};
         prdb_sdk_row_iterator_v1 text_rows = {0};
@@ -411,8 +411,8 @@ int main(void) {
             PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_TEXT,
             group_text, sizeof(group_text)};
         chunk_counter counter = {0};
-        prdb_host_api_v3 chunk_host = {sizeof(chunk_host),
-                                       PRDB_QUERY_ABI_V3_VERSION, &counter,
+        prdb_host_api_v1 chunk_host = {sizeof(chunk_host),
+                                       PRDB_QUERY_ABI_VERSION, &counter,
                                        NULL, NULL, count_result_chunk, NULL};
         uint64_t grouped_output_len = 0;
 

@@ -859,10 +859,10 @@ int main(void) {
         .batch = batch_payload,
         .batch_len = sizeof(batch_payload),
     };
-    prdb_host_api_v3 host = {sizeof(host), PRDB_QUERY_ABI_V3_VERSION,
+    prdb_host_api_v1 host = {sizeof(host), PRDB_QUERY_ABI_VERSION,
                              &mock, executor_request, planner_request, NULL,
                              statement_failure};
-    prdb_host_api_v6 spill_host = {0};
+    prdb_host_api_v1 spill_host = {0};
     prdb_sdk_value_v1 parameter = {sizeof(parameter),
                                    PRDB_SDK_VALUE_ABI_V1_VERSION,
                                    PRDB_SDK_VALUE_STATE_VALUE,
@@ -906,13 +906,13 @@ int main(void) {
             PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_INTEGER,
             in_parameter_bytes[index], sizeof(in_parameter_bytes[index])};
     }
-    assert(sizeof(prdb_host_api_v3) == 48);
-    assert(sizeof(prdb_query_descriptor_v3_record) == 16);
-    assert(sizeof(prdb_invocation_v3) == 24);
-    spill_host.v5.v4.v3 = host;
-    spill_host.v5.v4.v3.struct_size = sizeof(spill_host.v5.v4.v3);
-    spill_host.v5.v4.v3.abi_version = PRDB_QUERY_ABI_V3_VERSION;
-    spill_host.v5.v4.v3.write_result = write_result;
+    assert(sizeof(prdb_host_api_v1) == 64);
+    assert(sizeof(prdb_query_descriptor_v1_record) == 16);
+    assert(sizeof(prdb_invocation_v1) == 24);
+    spill_host = host;
+    spill_host.struct_size = sizeof(spill_host);
+    spill_host.abi_version = PRDB_QUERY_ABI_VERSION;
+    spill_host.write_result = write_result;
     spill_host.spill_request = spill_request;
     assert(prdb_sdk_sql_execute_select_v1(
                &host, schema, sizeof(schema) - 1, sql, sizeof(sql) - 1,

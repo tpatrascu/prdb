@@ -222,8 +222,8 @@ int main(void) {
     mock.first_batch_len = make_text_batch(
         mock.first_batch, 0x11, "information_schema", 0x55);
     mock.second_batch_len = make_text_batch(mock.second_batch, 0x12, "app", 0x66);
-    prdb_host_api_v3 host = {
-        sizeof(host), PRDB_QUERY_ABI_V3_VERSION, &mock,
+    prdb_host_api_v1 host = {
+        sizeof(host), PRDB_QUERY_ABI_VERSION, &mock,
         executor_request, planner_request, NULL, statement_failure};
     prdb_sdk_value_v1 parameter = {
         sizeof(parameter), PRDB_SDK_VALUE_ABI_V1_VERSION,

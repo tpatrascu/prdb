@@ -162,13 +162,13 @@ static void assert_no_live_streams(const fixture *state) {
 }
 
 int main(void) {
-    prdb_host_api_v6 host = {0};
+    prdb_host_api_v1 host = {0};
     fixture state = {0};
     row_source left_source, right_source;
     prdb_sql_spill_heap_budget exhausted_budget = {
         PRDB_SDK_SQL_SPILL_JOIN_MAX_WORKSPACE_BYTES,
         PRDB_SDK_SQL_SPILL_JOIN_MAX_WORKSPACE_BYTES};
-    host.v5.v4.v3.context = &state;
+    host.context = &state;
     host.spill_request = mock_spill;
 
     left_source = (row_source){state.left, 0, 0};

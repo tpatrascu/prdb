@@ -66,7 +66,7 @@ static int32_t consume_sorted(void *opaque, const uint8_t *row,
 }
 
 int32_t prdb_sdk_sql_spill_group_count_v1(
-    const prdb_host_api_v6 *host, void *context, uint32_t key_bytes,
+    const prdb_host_api_v1 *host, void *context, uint32_t key_bytes,
     uint32_t memory_budget_bytes,
     prdb_sdk_sql_spill_sort_source_v1_fn source,
     prdb_sdk_sql_spill_sort_compare_v1_fn compare,

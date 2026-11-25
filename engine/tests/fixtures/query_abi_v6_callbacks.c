@@ -1,14 +1,14 @@
-#include "prdb_query_abi_v6.h"
+#include "prdb_query_abi_v1.h"
 #include "prdb_query_abi_layout_assertions.h"
 
 #include <assert.h>
 #include <string.h>
 
-const prdb_query_descriptor_v6_record prdb_query_descriptor_v6 = {
-    sizeof(prdb_query_descriptor_v6_record),
-    PRDB_QUERY_ABI_V6_VERSION,
-    sizeof(prdb_host_api_v6),
-    sizeof(prdb_invocation_v6),
+const prdb_query_descriptor_v1_record prdb_query_descriptor_v1 = {
+    sizeof(prdb_query_descriptor_v1_record),
+    PRDB_QUERY_ABI_VERSION,
+    sizeof(prdb_host_api_v1),
+    sizeof(prdb_invocation_v1),
 };
 
 static int32_t spill_noop(void *context, uint16_t operation,
@@ -21,21 +21,21 @@ static int32_t spill_noop(void *context, uint16_t operation,
     return 0;
 }
 
-int32_t prdb_query_main_v6(const prdb_host_api_v6 *host,
-                           const prdb_invocation_v6 *invocation) {
+int32_t prdb_query_main_v1(const prdb_host_api_v1 *host,
+                           const prdb_invocation_v1 *invocation) {
     if (host == NULL || invocation == NULL || host->spill_request == NULL ||
-        invocation->abi_version != PRDB_QUERY_ABI_V6_VERSION) return -1;
+        invocation->abi_version != PRDB_QUERY_ABI_VERSION) return -1;
     return 0;
 }
 
 int main(void) {
-    assert(prdb_query_descriptor_v6.abi_version == PRDB_QUERY_ABI_V6_VERSION);
-    assert(prdb_query_descriptor_v6.host_api_size == sizeof(prdb_host_api_v6));
-    assert(prdb_query_descriptor_v6.invocation_size == sizeof(prdb_invocation_v6));
-    prdb_host_api_v6 host = {0};
-    prdb_invocation_v6 invocation = {0};
+    assert(prdb_query_descriptor_v1.abi_version == PRDB_QUERY_ABI_VERSION);
+    assert(prdb_query_descriptor_v1.host_api_size == sizeof(prdb_host_api_v1));
+    assert(prdb_query_descriptor_v1.invocation_size == sizeof(prdb_invocation_v1));
+    prdb_host_api_v1 host = {0};
+    prdb_invocation_v1 invocation = {0};
     host.spill_request = spill_noop;
-    invocation.abi_version = PRDB_QUERY_ABI_V6_VERSION;
-    assert(prdb_query_main_v6(&host, &invocation) == 0);
+    invocation.abi_version = PRDB_QUERY_ABI_VERSION;
+    assert(prdb_query_main_v1(&host, &invocation) == 0);
     return 0;
 }

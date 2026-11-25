@@ -321,7 +321,7 @@ impl ClientConfig {
                 || sdk.target != "linux-x86_64"
                 || !valid_token(&sdk.cpu_baseline)
                 || !valid_token(&sdk.runtime_profile)
-                || !(1..=6).contains(&sdk.native_abi)
+                || sdk.native_abi != 1
             {
                 return Err(invalid("invalid SDK selection"));
             }
@@ -583,7 +583,7 @@ mod tests {
                     target: "linux-x86_64".to_owned(),
                     cpu_baseline: "x86_64-v1".to_owned(),
                     runtime_profile: "glibc-test".to_owned(),
-                    native_abi: 5,
+                    native_abi: 1,
                 },
                 default_credential: "alice".to_owned(),
                 credentials: vec![ClientCredential {
@@ -603,9 +603,9 @@ mod tests {
         assert!(!debug.contains(&value.instances[0].credentials[0].token_secret));
         let encoded = serde_json::to_vec(&value).unwrap();
         ClientConfig::parse(&encoded).unwrap();
-        let mut spill_abi = config();
-        spill_abi.instances[0].sdk.native_abi = 6;
-        assert!(spill_abi.validate().is_ok());
+        let mut unsupported_abi = config();
+        unsupported_abi.instances[0].sdk.native_abi = 2;
+        assert!(unsupported_abi.validate().is_err());
         assert!(ClientConfig::parse(br#"{"format":"PRDB-CLIENT-CONFIG-1","format":"PRDB-CLIENT-CONFIG-1","instances":[]}"#).is_err());
         assert!(
             ClientConfig::parse(

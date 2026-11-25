@@ -9,9 +9,9 @@
 #endif
 #include <unistd.h>
 
-const prdb_query_descriptor_v3_record prdb_query_descriptor_v3 = {
-    sizeof(prdb_query_descriptor_v3_record), PRDB_QUERY_ABI_V3_VERSION,
-    sizeof(prdb_host_api_v3), sizeof(prdb_invocation_v3)};
+const prdb_query_descriptor_v1_record prdb_query_descriptor_v1 = {
+    sizeof(prdb_query_descriptor_v1_record), PRDB_QUERY_ABI_VERSION,
+    sizeof(prdb_host_api_v1), sizeof(prdb_invocation_v1)};
 
 static int constructor_write_allowed;
 static int constructor_outside_pid_namespace;
@@ -58,8 +58,8 @@ static int32_t discard_row(void *context, const prdb_sdk_row_v1 *row,
     return 0;
 }
 
-int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
-                           const prdb_invocation_v3 *invocation) {
+int32_t prdb_query_main_v1(const prdb_host_api_v1 *host,
+                           const prdb_invocation_v1 *invocation) {
     static const uint8_t partial_output[] = "partial SQL output";
     static const uint8_t process_escape[] =
         "constructor did not run as namespace PID 1";
@@ -84,7 +84,7 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
 
     (void)invocation;
     if (host == NULL || host->struct_size < sizeof(*host) ||
-        host->abi_version != PRDB_QUERY_ABI_V3_VERSION ||
+        host->abi_version != PRDB_QUERY_ABI_VERSION ||
         host->write_result == NULL) {
         return 1;
     }

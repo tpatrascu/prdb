@@ -3,7 +3,7 @@
 #include <string.h>
 
 typedef struct batch_host_context {
-    const prdb_host_api_v3 *base;
+    const prdb_host_api_v1 *base;
     uint16_t statement_ordinal;
     int failure_latched;
 } batch_host_context;
@@ -103,10 +103,10 @@ static int32_t forward_statement_failure(void *opaque, uint32_t reason) {
     return context->base->statement_failure(context->base->context, reason);
 }
 
-static prdb_host_api_v3 wrap_host(batch_host_context *context) {
-    prdb_host_api_v3 host = {0};
+static prdb_host_api_v1 wrap_host(batch_host_context *context) {
+    prdb_host_api_v1 host = {0};
     host.struct_size = sizeof(host);
-    host.abi_version = PRDB_QUERY_ABI_V3_VERSION;
+    host.abi_version = PRDB_QUERY_ABI_VERSION;
     host.context = context;
     host.executor_request = forward_executor_request;
     host.planner_request = forward_planner_request;
@@ -116,15 +116,15 @@ static prdb_host_api_v3 wrap_host(batch_host_context *context) {
 }
 
 int32_t prdb_sdk_sql_run_batch_v1(
-    const prdb_host_api_v3 *host, const uint8_t *schema,
+    const prdb_host_api_v1 *host, const uint8_t *schema,
     uint32_t schema_len, uint32_t statement_count,
     const prdb_sdk_sql_batch_statement_v1 *statements,
     prdb_sdk_sql_batch_statement_runner_v1_fn run_statement) {
     uint64_t package_bytes = 0;
-    prdb_host_api_v3 wrapped_host;
+    prdb_host_api_v1 wrapped_host;
     batch_host_context context;
     if (host == NULL || host->struct_size < sizeof(*host) ||
-        host->abi_version != PRDB_QUERY_ABI_V3_VERSION ||
+        host->abi_version != PRDB_QUERY_ABI_VERSION ||
         host->statement_failure == NULL || host->write_result == NULL ||
         schema == NULL || schema_len == 0 || schema_len > 128 ||
         statement_count == 0 || run_statement == NULL) {

@@ -191,7 +191,7 @@ PRDB_SDK_INTERNAL int32_t prdb_sdk_internal_decode_any_optimizer_plan_v1(
 PRDB_SDK_INTERNAL uint16_t prdb_sdk_internal_response_u16(const uint8_t *bytes, uint64_t offset);
 PRDB_SDK_INTERNAL uint32_t prdb_sdk_internal_response_u32(const uint8_t *bytes, uint64_t offset);
 PRDB_SDK_INTERNAL int32_t prdb_sdk_internal_execute_unfiltered_plan_internal(
-    const prdb_host_api_v2 *host, const uint8_t *plan_payload,
+    const prdb_host_api_v1 *host, const uint8_t *plan_payload,
     uint64_t plan_payload_len, uint16_t max_candidates,
     uint16_t max_index_candidates,
     uint32_t max_batch_bytes, uint8_t *relation_response,

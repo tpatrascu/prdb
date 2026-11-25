@@ -51,7 +51,7 @@ int main(void) {
     uint8_t output[128] = {0};
     uint64_t output_len = 0;
     capture result = {{0}, 0, 0};
-    prdb_host_api_v3 host = {sizeof(host), PRDB_QUERY_ABI_V3_VERSION,
+    prdb_host_api_v1 host = {sizeof(host), PRDB_QUERY_ABI_VERSION,
                              &result, NULL, NULL, write_result, NULL};
 
     binding.struct_size = sizeof(binding);

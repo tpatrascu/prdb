@@ -81,7 +81,7 @@ int main(void) {
     memcpy(resolve_request + 9, relation, 7);
     mock_host mock = {PRDB_SDK_EXECUTOR_OP_RESOLVE_RELATION, resolve_request,
                       sizeof(resolve_request), resolve_reply, n, 0};
-    prdb_host_api_v2 host = {sizeof(host), PRDB_QUERY_ABI_V2_VERSION,
+    prdb_host_api_v1 host = {sizeof(host), PRDB_QUERY_ABI_VERSION,
                              &mock, mock_request, mock_request, NULL};
     uint8_t response[256] = {0};
     uint64_t response_len = 0;

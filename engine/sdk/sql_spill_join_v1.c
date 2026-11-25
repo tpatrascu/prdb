@@ -15,7 +15,7 @@ static int32_t check_cancel(
                : PRDB_SDK_SQL_SPILL_JOIN_CANCELLED;
 }
 
-static int32_t read_records(const prdb_host_api_v6 *host,
+static int32_t read_records(const prdb_host_api_v1 *host,
                             const prdb_sdk_spill_stream_v1 *stream,
                             uint64_t first, uint32_t count,
                             uint32_t record_bytes, uint8_t *records) {
@@ -34,7 +34,7 @@ static int32_t read_records(const prdb_host_api_v6 *host,
 }
 
 int32_t prdb_sdk_sql_spill_hash_join_v1(
-    const prdb_host_api_v6 *host, uint32_t record_bytes,
+    const prdb_host_api_v1 *host, uint32_t record_bytes,
     prdb_sdk_sql_spill_join_source_v1_fn left_source,
     void *left_source_context,
     prdb_sdk_sql_spill_join_source_v1_fn right_source,

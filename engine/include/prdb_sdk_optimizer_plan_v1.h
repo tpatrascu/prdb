@@ -5,7 +5,7 @@
 #include "prdb_sdk_sql_v1.h"
 #include "prdb_sdk_executor_v1.h"
 #include "prdb_sdk_sql_dml_v1.h"
-#include "prdb_query_abi_v5.h"
+#include "prdb_query_abi_v1.h"
 
 #define PRDB_SDK_OPTIMIZER_PLAN_ABI_V1_VERSION UINT32_C(1)
 #define PRDB_SDK_OPTIMIZER_PLAN_MAX_SCAN_COLUMNS UINT32_C(256)
@@ -530,7 +530,7 @@ int32_t prdb_sdk_optimizer_match_filtered_join_plan_v20_v1(
 /* Validate a DELETE plan against the parsed DELETE statement and its bound
  * parameters, then re-resolve its relation through executor storage. */
 int32_t prdb_sdk_optimizer_validate_delete_plan_with_parameters_v1(
-    const prdb_host_api_v2 *host, const prdb_sdk_delete_v1 *statement,
+    const prdb_host_api_v1 *host, const prdb_sdk_delete_v1 *statement,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     const uint8_t *schema, uint32_t schema_len,
     const uint8_t *plan_payload, uint64_t plan_payload_len,
@@ -540,7 +540,7 @@ int32_t prdb_sdk_optimizer_validate_delete_plan_with_parameters_v1(
 /* Validate a returned UPDATE plan against its parsed AST and parameters,
  * then re-resolve the relation through executor storage. */
 int32_t prdb_sdk_optimizer_validate_update_plan_with_parameters_v1(
-    const prdb_host_api_v2 *host, const prdb_sdk_update_v1 *statement,
+    const prdb_host_api_v1 *host, const prdb_sdk_update_v1 *statement,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     const uint8_t *schema, uint32_t schema_len,
     const uint8_t *plan_payload, uint64_t plan_payload_len,
@@ -550,7 +550,7 @@ int32_t prdb_sdk_optimizer_validate_update_plan_with_parameters_v1(
 /* Submit, verify, scan, and execute a parsed DELETE through ABI v5. Matched
  * opaque row handles are staged only through ordinary executor mutation IPC. */
 int32_t prdb_sdk_optimizer_execute_delete_ast_v1(
-    const prdb_host_api_v5 *host, const prdb_sdk_delete_v1 *statement,
+    const prdb_host_api_v1 *host, const prdb_sdk_delete_v1 *statement,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     const uint8_t *schema, uint32_t schema_len, uint16_t max_candidates,
     uint32_t max_batch_bytes, uint8_t *request, uint64_t request_capacity,
@@ -570,7 +570,7 @@ int32_t prdb_sdk_optimizer_execute_delete_ast_v1(
 /* Submit, verify, scan and execute a parsed UPDATE through ABI v5. Row handles
  * are collected before staging so scan iteration completes before writes. */
 int32_t prdb_sdk_optimizer_execute_update_ast_v1(
-    const prdb_host_api_v5 *host, const prdb_sdk_update_v1 *statement,
+    const prdb_host_api_v1 *host, const prdb_sdk_update_v1 *statement,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     const uint8_t *schema, uint32_t schema_len, uint16_t max_candidates,
     uint32_t max_batch_bytes, uint8_t *request, uint64_t request_capacity,
@@ -591,33 +591,33 @@ int32_t prdb_sdk_optimizer_execute_update_ast_v1(
  * and require its stable identity and scanned column definitions to match.
  * The response buffer remains caller-owned. No executor handle is returned. */
 int32_t prdb_sdk_optimizer_validate_executor_relation_v1(
-    const prdb_host_api_v2 *host, const uint8_t *plan_payload,
+    const prdb_host_api_v1 *host, const uint8_t *plan_payload,
     uint64_t plan_payload_len, uint8_t *response,
     uint64_t response_capacity, uint64_t *response_len);
 
 /* Re-resolve both relations in a validated kind-4 join plan through executor
  * storage and require each stable identity and scan shape to match. */
 int32_t prdb_sdk_optimizer_validate_executor_join_relations_v1(
-    const prdb_host_api_v2 *host, const uint8_t *plan_payload,
+    const prdb_host_api_v1 *host, const uint8_t *plan_payload,
     uint64_t plan_payload_len, uint8_t *response,
     uint64_t response_capacity, uint64_t *response_len);
 
 /* Re-resolve both relations in a validated kind-12 join plan through executor
  * storage and require each stable identity and filtered scan shape to match. */
 int32_t prdb_sdk_optimizer_validate_executor_filtered_join_relations_v1(
-    const prdb_host_api_v2 *host, const uint8_t *plan_payload,
+    const prdb_host_api_v1 *host, const uint8_t *plan_payload,
     uint64_t plan_payload_len, uint8_t *response,
     uint64_t response_capacity, uint64_t *response_len);
 
 /* Re-resolve the single relation in a validated kind-5 plan and compare the
  * stable identity plus the exact grouping-key column definition. */
 int32_t prdb_sdk_optimizer_validate_executor_group_count_relation_v1(
-    const prdb_host_api_v2 *host, const uint8_t *plan_payload,
+    const prdb_host_api_v1 *host, const uint8_t *plan_payload,
     uint64_t plan_payload_len, uint8_t *response,
     uint64_t response_capacity, uint64_t *response_len);
 
 int32_t prdb_sdk_optimizer_validate_executor_composite_group_count_relation_v1(
-    const prdb_host_api_v2 *host, const uint8_t *plan_payload,
+    const prdb_host_api_v1 *host, const uint8_t *plan_payload,
     uint64_t plan_payload_len, uint8_t *response,
     uint64_t response_capacity, uint64_t *response_len);
 
@@ -625,7 +625,7 @@ int32_t prdb_sdk_optimizer_validate_executor_composite_group_count_relation_v1(
  * relation handle. Relation/name outputs are valid only on success; column
  * shapes describe the full authorized relation and borrow response names. */
 int32_t prdb_sdk_optimizer_acquire_plan_relation_v1(
-    const prdb_host_api_v2 *host, const uint8_t *plan_payload,
+    const prdb_host_api_v1 *host, const uint8_t *plan_payload,
     uint64_t plan_payload_len, uint8_t *response,
     uint64_t response_capacity, uint64_t *response_len,
     prdb_sdk_executor_relation_v1 *relation_out,
@@ -636,7 +636,7 @@ int32_t prdb_sdk_optimizer_acquire_plan_relation_v1(
  * LIMIT returns success with scan_opened_out=0 and a zero cursor. Relation
  * names and column metadata borrow relation_response; cursor bytes are copied. */
 int32_t prdb_sdk_optimizer_open_plan_scan_v1(
-    const prdb_host_api_v2 *host, const uint8_t *plan_payload,
+    const prdb_host_api_v1 *host, const uint8_t *plan_payload,
     uint64_t plan_payload_len, uint8_t *relation_response,
     uint64_t relation_response_capacity, uint64_t *relation_response_len,
     uint8_t *scan_response, uint64_t scan_response_capacity,
@@ -676,7 +676,7 @@ int32_t prdb_sdk_optimizer_consume_plan_batch_v1(
  * cancellation between pages, project values, apply LIMIT, and close an early
  * cursor. Filter evaluation errors fail the statement. */
 int32_t prdb_sdk_optimizer_execute_unfiltered_plan_v1(
-    const prdb_host_api_v2 *host, const uint8_t *plan_payload,
+    const prdb_host_api_v1 *host, const uint8_t *plan_payload,
     uint64_t plan_payload_len, uint16_t max_candidates,
     uint32_t max_batch_bytes, uint8_t *relation_response,
     uint64_t relation_response_capacity, uint8_t *scan_response,
@@ -696,7 +696,7 @@ int32_t prdb_sdk_optimizer_execute_unfiltered_plan_v1(
  * ENCODE_UNSUPPORTED leaves the statement unlatchable so callers can use the
  * ordinary SQL path; execution errors latch statement failure through ABI v3. */
 int32_t prdb_sdk_optimizer_execute_select_ast_v1(
-    const prdb_host_api_v4 *host, const prdb_sdk_select_v1 *statement,
+    const prdb_host_api_v1 *host, const prdb_sdk_select_v1 *statement,
     const uint8_t *schema, uint32_t schema_len, uint16_t max_candidates,
     uint32_t max_batch_bytes, uint8_t *request, uint64_t request_capacity,
     uint8_t *optimizer_response, uint64_t optimizer_response_capacity,
@@ -716,7 +716,7 @@ int32_t prdb_sdk_optimizer_execute_select_ast_v1(
  * against the AST and executor metadata, then stable-sort at most 128 rows
  * before projecting and applying LIMIT. */
 int32_t prdb_sdk_optimizer_execute_ordered_select_ast_v1(
-    const prdb_host_api_v4 *host, const prdb_sdk_select_v1 *statement,
+    const prdb_host_api_v1 *host, const prdb_sdk_select_v1 *statement,
     const uint8_t *schema, uint32_t schema_len, uint16_t max_candidates,
     uint32_t max_batch_bytes, uint8_t *request, uint64_t request_capacity,
     uint8_t *optimizer_response, uint64_t optimizer_response_capacity,
@@ -736,7 +736,7 @@ int32_t prdb_sdk_optimizer_execute_ordered_select_ast_v1(
 /* Parameterized counterpart that submits and validates supported WHERE
  * predicates before executing a filtered plan. */
 int32_t prdb_sdk_optimizer_execute_select_ast_with_parameters_v1(
-    const prdb_host_api_v4 *host, const prdb_sdk_select_v1 *statement,
+    const prdb_host_api_v1 *host, const prdb_sdk_select_v1 *statement,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     const uint8_t *schema, uint32_t schema_len, uint16_t max_candidates,
     uint32_t max_batch_bytes, uint8_t *request, uint64_t request_capacity,
@@ -756,7 +756,7 @@ int32_t prdb_sdk_optimizer_execute_select_ast_with_parameters_v1(
 /* Execute the supported explicit-projection SELECT subset and emit one SQLR
  * v1 record per row through the host's provisional result callback. */
 int32_t prdb_sdk_optimizer_execute_select_ast_to_result_v1(
-    const prdb_host_api_v4 *host, const prdb_sdk_select_v1 *statement,
+    const prdb_host_api_v1 *host, const prdb_sdk_select_v1 *statement,
     const uint8_t *schema, uint32_t schema_len, uint16_t max_candidates,
     uint32_t max_batch_bytes, uint8_t *request, uint64_t request_capacity,
     uint8_t *optimizer_response, uint64_t optimizer_response_capacity,
@@ -772,7 +772,7 @@ int32_t prdb_sdk_optimizer_execute_select_ast_to_result_v1(
     uint64_t result_record_capacity, uint32_t *delivered_rows_out);
 
 int32_t prdb_sdk_optimizer_execute_select_ast_with_parameters_to_result_v1(
-    const prdb_host_api_v4 *host, const prdb_sdk_select_v1 *statement,
+    const prdb_host_api_v1 *host, const prdb_sdk_select_v1 *statement,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     const uint8_t *schema, uint32_t schema_len, uint16_t max_candidates,
     uint32_t max_batch_bytes, uint8_t *request, uint64_t request_capacity,
@@ -791,7 +791,7 @@ int32_t prdb_sdk_optimizer_execute_select_ast_with_parameters_to_result_v1(
 /* Versioned variant with an independent trusted cumulative candidate ceiling
  * for a batched index probe. max_candidates remains the per-page scan bound. */
 int32_t prdb_sdk_optimizer_execute_select_ast_with_parameters_to_result_v2(
-    const prdb_host_api_v4 *host, const prdb_sdk_select_v1 *statement,
+    const prdb_host_api_v1 *host, const prdb_sdk_select_v1 *statement,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     const uint8_t *schema, uint32_t schema_len, uint16_t max_candidates,
     uint16_t max_index_candidates, uint32_t max_batch_bytes,
@@ -811,7 +811,7 @@ int32_t prdb_sdk_optimizer_execute_select_ast_with_parameters_to_result_v2(
 /* Verify that a returned plan represents the submitted SQL relation,
  * projection names/order, and LIMIT using executor-authorized column names. */
 int32_t prdb_sdk_optimizer_validate_select_plan_v1(
-    const prdb_host_api_v2 *host, const prdb_sdk_select_v1 *statement,
+    const prdb_host_api_v1 *host, const prdb_sdk_select_v1 *statement,
     const uint8_t *schema, uint32_t schema_len,
     const uint8_t *plan_payload, uint64_t plan_payload_len,
     uint8_t *response, uint64_t response_capacity,
@@ -820,7 +820,7 @@ int32_t prdb_sdk_optimizer_validate_select_plan_v1(
 /* Validate a filtered returned plan against the submitted AST and supplied
  * parameters as well as executor-authorized relation metadata. */
 int32_t prdb_sdk_optimizer_validate_select_plan_with_parameters_v1(
-    const prdb_host_api_v2 *host, const prdb_sdk_select_v1 *statement,
+    const prdb_host_api_v1 *host, const prdb_sdk_select_v1 *statement,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     const uint8_t *schema, uint32_t schema_len,
     const uint8_t *plan_payload, uint64_t plan_payload_len,
