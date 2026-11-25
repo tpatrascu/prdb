@@ -200,7 +200,6 @@ pub enum ExecutorIndexRangeScan {
 }
 
 pub(crate) const MAX_AUTHORIZED_INDEX_RANGE_BYTES: usize = 16 * 1024 * 1024;
-const MAX_INDEXED_PREDICATE_OVERLAY_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
 pub(crate) struct AuthorizedIndexRangeBudget {
@@ -3247,7 +3246,7 @@ impl<'db> InvocationTransaction<'db> {
             else {
                 return Ok(None);
             };
-            if next_overlay_bytes > MAX_INDEXED_PREDICATE_OVERLAY_BYTES {
+            if next_overlay_bytes > self.max_authorized_index_range_bytes {
                 return Ok(None);
             }
             overlay_bytes = next_overlay_bytes;
