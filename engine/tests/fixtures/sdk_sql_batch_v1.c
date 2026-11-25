@@ -70,18 +70,22 @@ static int expect_event(const capture *state, uint64_t *offset,
 
 static int test_ordered_result_framing(void) {
     capture state = {{0}, 0, 0, UINT32_MAX, 0};
-    const uint8_t schema[] = "app";
     const uint8_t sql1[] = "a";
     const uint8_t sql2[] = "b";
-    prdb_sdk_sql_batch_statement_v1 statements[] = {
-        {sql1, 1, NULL, 0}, {sql2, 1, NULL, 0}};
+    const uint8_t sql_data[] = {
+        'P', 'S', 'Q', '1', 0, 3, 0, 2, 'a', 'p', 'p',
+        0, 0, 0, 0, 0, 0, 0, 1, 'a',
+        0, 0, 0, 0, 0, 0, 0, 1, 'b'};
+    prdb_invocation_v1 invocation = {
+        sizeof(invocation), PRDB_QUERY_ABI_VERSION, NULL, 0,
+        sql_data, sizeof(sql_data)};
     prdb_host_api_v1 host = {
         sizeof(host), PRDB_QUERY_ABI_VERSION, &state, NULL, NULL,
         capture_write, capture_failure};
     uint64_t offset = 0;
     runner_calls = 0;
-    if (prdb_sdk_sql_run_batch_v1(&host, schema, 3, 2, statements,
-                                  emit_statement) != PRDB_SDK_SQL_BATCH_OK ||
+    if (prdb_sdk_sql_run_batch_v1(&host, &invocation, emit_statement) !=
+            PRDB_SDK_SQL_BATCH_OK ||
         runner_calls != 2 || state.failure_calls != 0) return 1;
     if (!expect_event(&state, &offset, PRDB_SDK_SQL_BATCH_EVENT_START, 0, NULL, 0) ||
         !expect_event(&state, &offset, PRDB_SDK_SQL_BATCH_EVENT_DATA, 0, sql1, 1) ||
@@ -95,18 +99,19 @@ static int test_ordered_result_framing(void) {
 
 static int test_statement_failure_stops_package(void) {
     capture state = {{0}, 0, 0, UINT32_MAX, 0};
-    const uint8_t schema[] = "app";
-    const uint8_t sql1[] = "a";
-    const uint8_t sql2[] = "fail";
-    const uint8_t sql3[] = "c";
-    prdb_sdk_sql_batch_statement_v1 statements[] = {
-        {sql1, 1, NULL, 0}, {sql2, 4, NULL, 0}, {sql3, 1, NULL, 0}};
+    const uint8_t sql_data[] = {
+        'P', 'S', 'Q', '1', 0, 3, 0, 3, 'a', 'p', 'p',
+        0, 0, 0, 0, 0, 0, 0, 1, 'a',
+        0, 0, 0, 0, 0, 0, 0, 4, 'f', 'a', 'i', 'l',
+        0, 0, 0, 0, 0, 0, 0, 1, 'c'};
+    prdb_invocation_v1 invocation = {
+        sizeof(invocation), PRDB_QUERY_ABI_VERSION, NULL, 0,
+        sql_data, sizeof(sql_data)};
     prdb_host_api_v1 host = {
         sizeof(host), PRDB_QUERY_ABI_VERSION, &state, NULL, NULL,
         capture_write, capture_failure};
     runner_calls = 0;
-    if (prdb_sdk_sql_run_batch_v1(&host, schema, 3, 3, statements,
-                                  emit_statement) !=
+    if (prdb_sdk_sql_run_batch_v1(&host, &invocation, emit_statement) !=
             PRDB_SDK_SQL_BATCH_STATEMENT_FAILED ||
         runner_calls != 2 || state.failure_calls != 1) return 1;
     return 0;
@@ -114,17 +119,18 @@ static int test_statement_failure_stops_package(void) {
 
 static int test_output_failure_latches_and_stops(void) {
     capture state = {{0}, 0, 0, 2, 0};
-    const uint8_t schema[] = "app";
-    const uint8_t sql1[] = "a";
-    const uint8_t sql2[] = "b";
-    prdb_sdk_sql_batch_statement_v1 statements[] = {
-        {sql1, 1, NULL, 0}, {sql2, 1, NULL, 0}};
+    const uint8_t sql_data[] = {
+        'P', 'S', 'Q', '1', 0, 3, 0, 2, 'a', 'p', 'p',
+        0, 0, 0, 0, 0, 0, 0, 1, 'a',
+        0, 0, 0, 0, 0, 0, 0, 1, 'b'};
+    prdb_invocation_v1 invocation = {
+        sizeof(invocation), PRDB_QUERY_ABI_VERSION, NULL, 0,
+        sql_data, sizeof(sql_data)};
     prdb_host_api_v1 host = {
         sizeof(host), PRDB_QUERY_ABI_VERSION, &state, NULL, NULL,
         capture_write, capture_failure};
     runner_calls = 0;
-    if (prdb_sdk_sql_run_batch_v1(&host, schema, 3, 2, statements,
-                                  emit_statement) !=
+    if (prdb_sdk_sql_run_batch_v1(&host, &invocation, emit_statement) !=
             PRDB_SDK_SQL_BATCH_STATEMENT_FAILED ||
         runner_calls != 1 || state.failure_calls != 1) return 1;
     return 0;
@@ -132,12 +138,16 @@ static int test_output_failure_latches_and_stops(void) {
 
 static int test_rejects_over_limit_count(void) {
     capture state = {{0}, 0, 0, UINT32_MAX, 0};
-    const uint8_t schema[] = "app";
+    const uint8_t sql_data[] = {
+        'P', 'S', 'Q', '1', 0, 3, 0, PRDB_SDK_SQL_BATCH_MAX_STATEMENTS + 1,
+        'a', 'p', 'p'};
+    prdb_invocation_v1 invocation = {
+        sizeof(invocation), PRDB_QUERY_ABI_VERSION, NULL, 0,
+        sql_data, sizeof(sql_data)};
     prdb_host_api_v1 host = {
         sizeof(host), PRDB_QUERY_ABI_VERSION, &state, NULL, NULL,
         capture_write, capture_failure};
-    if (prdb_sdk_sql_run_batch_v1(&host, schema, 3,
-            PRDB_SDK_SQL_BATCH_MAX_STATEMENTS + 1, NULL, emit_statement) !=
+    if (prdb_sdk_sql_run_batch_v1(&host, &invocation, emit_statement) !=
         PRDB_SDK_SQL_BATCH_LIMIT_EXCEEDED) return 1;
     return state.failure_calls == 0 ? 0 : 1;
 }

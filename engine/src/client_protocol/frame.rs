@@ -572,7 +572,9 @@ pub(super) fn validate_header_fields(
     let maximum = match header.kind {
         1..=3 | 6..=11 | 100 | 101 | 103 => CLIENT_MAX_CONTROL_BYTES,
         13..=18 if v2 => CLIENT_MAX_CONTROL_BYTES,
-        4 | 5 | 12 | CLIENT_SDK_LIBRARY_CHUNK_KIND => CLIENT_MAX_CHUNK_BYTES + 24,
+        4 | 5 | 12 | CLIENT_SDK_LIBRARY_CHUNK_KIND | super::CLIENT_SQL_DATA_CHUNK_KIND => {
+            CLIENT_MAX_CHUNK_BYTES + 24
+        }
         102 => CLIENT_MAX_PAYLOAD_BYTES,
         kind => return Err(ClientFrameError::InvalidKind(kind)),
     };
@@ -583,10 +585,12 @@ pub(super) fn validate_header_fields(
         return Err(ClientFrameError::ZeroRequestId);
     }
     match header.kind {
-        4 | 5 | 12 | CLIENT_SDK_LIBRARY_CHUNK_KIND if header.payload_bytes <= 24 => {
+        4 | 5 | 12 | CLIENT_SDK_LIBRARY_CHUNK_KIND | super::CLIENT_SQL_DATA_CHUNK_KIND
+            if header.payload_bytes <= 24 =>
+        {
             Err(ClientFrameError::InvalidChunkLength)
         }
-        1..=19 if header.response_sequence != 0 => Err(ClientFrameError::InvalidSequence),
+        1..=20 if header.response_sequence != 0 => Err(ClientFrameError::InvalidSequence),
         100 | 101 if header.response_sequence != 0 => Err(ClientFrameError::InvalidSequence),
         102 | 103 if header.response_sequence == 0 => Err(ClientFrameError::InvalidSequence),
         _ => Ok(()),
@@ -601,7 +605,11 @@ pub struct ClientRequestIds {
 impl ClientRequestIds {
     /// Enforce strictly increasing nonzero IDs on a single client connection.
     pub fn accept(&mut self, frame: &ClientFrame) -> Result<(), ClientFrameError> {
-        if !((1..=12).contains(&frame.kind) || frame.kind == CLIENT_SDK_LIBRARY_CHUNK_KIND)
+        if !((1..=12).contains(&frame.kind)
+            || matches!(
+                frame.kind,
+                CLIENT_SDK_LIBRARY_CHUNK_KIND | super::CLIENT_SQL_DATA_CHUNK_KIND
+            ))
             || frame.request_id == 0
             || frame.request_id <= self.last_request_id
         {

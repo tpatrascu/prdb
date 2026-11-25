@@ -344,7 +344,9 @@ fn runas_package_crosses_v2_tcp_gateway_and_confined_executor()
         ClientStartActorCredentials, ClientV2PackageState, ClientV2Response,
         ClientV2TransactionState,
     };
-    use prdb_engine::client_sql::{encode_parameter_file, generate_query_batch_source};
+    use prdb_engine::client_sql::{
+        encode_parameter_file, encode_sql_batch_data, generate_query_batch_source,
+    };
     use prdb_engine::client_submit::{ClientResultEvent, SubmissionClient};
     use prdb_engine::gateway::serve_tcp_client_connection;
     use prdb_engine::metadata_discovery::VisibleRelation;
@@ -397,24 +399,30 @@ fn runas_package_crosses_v2_tcp_gateway_and_confined_executor()
     let database_dir = fixture.0.join("database");
     let package = fixture.0.join("runas-package");
     let source = fixture.0.join("runas-batch.c");
+    let sql_data = fixture.0.join("runas-batch.psq1");
     let hidden_package = fixture.0.join("hidden-runas-package");
     let hidden_source = fixture.0.join("hidden-runas.c");
+    let hidden_sql_data = fixture.0.join("hidden-runas.psq1");
     let hostile_package = fixture.0.join("hostile-runas-package");
     let hostile_source = fixture.0.join("hostile-runas.c");
     let scope_path = fixture.0.join("runas-scope.psc1");
+    fs::write(&source, generate_query_batch_source())?;
+    fs::set_permissions(&source, fs::Permissions::from_mode(0o600))?;
     fs::write(
-        &source,
-        generate_query_batch_source(
+        &sql_data,
+        encode_sql_batch_data(
             "public",
             b"INSERT INTO records VALUES ($1); SELECT id FROM records; SELECT id FROM records",
         )?,
     )?;
-    fs::set_permissions(&source, fs::Permissions::from_mode(0o600))?;
-    fs::write(
-        &hidden_source,
-        generate_query_batch_source("public", b"SELECT id FROM records")?,
-    )?;
+    fs::set_permissions(&sql_data, fs::Permissions::from_mode(0o600))?;
+    fs::write(&hidden_source, generate_query_batch_source())?;
     fs::set_permissions(&hidden_source, fs::Permissions::from_mode(0o600))?;
+    fs::write(
+        &hidden_sql_data,
+        encode_sql_batch_data("public", b"SELECT id FROM records")?,
+    )?;
+    fs::set_permissions(&hidden_sql_data, fs::Permissions::from_mode(0o600))?;
     fs::write(
         &hostile_source,
         r##"
@@ -848,6 +856,7 @@ int32_t prdb_query_main_v1(const prdb_host_api_v1 *host,
         shared_linker: find_tool("cc")?,
         patchelf: find_tool("patchelf")?,
         source,
+        sql_data: Some(sql_data),
         sdk_library: sdk_release_dir.join("libprdb_sql.so.1"),
         include_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("include"),
         requested_scope: scope_path.clone(),
@@ -863,6 +872,7 @@ int32_t prdb_query_main_v1(const prdb_host_api_v1 *host,
         shared_linker: find_tool("cc")?,
         patchelf: find_tool("patchelf")?,
         source: hidden_source,
+        sql_data: Some(hidden_sql_data),
         sdk_library: sdk_release_dir.join("libprdb_sql.so.1"),
         include_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("include"),
         requested_scope: scope_path.clone(),
@@ -878,6 +888,7 @@ int32_t prdb_query_main_v1(const prdb_host_api_v1 *host,
         shared_linker: find_tool("cc")?,
         patchelf: find_tool("patchelf")?,
         source: hostile_source,
+        sql_data: None,
         sdk_library: sdk_release_dir.join("libprdb_sql.so.1"),
         include_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("include"),
         requested_scope: scope_path.clone(),

@@ -16,12 +16,14 @@ _Static_assert(offsetof(prdb_host_api_v1, statement_failure) == 40, "prdb_host_a
 _Static_assert(offsetof(prdb_host_api_v1, optimizer_request) == 48, "prdb_host_api_v1.optimizer_request offset");
 _Static_assert(offsetof(prdb_host_api_v1, spill_request) == 56, "prdb_host_api_v1.spill_request offset");
 
-_Static_assert(sizeof(prdb_invocation_v1) == 24, "prdb_invocation_v1 size");
+_Static_assert(sizeof(prdb_invocation_v1) == 40, "prdb_invocation_v1 size");
 _Static_assert(_Alignof(prdb_invocation_v1) == 8, "prdb_invocation_v1 alignment");
 _Static_assert(offsetof(prdb_invocation_v1, struct_size) == 0, "prdb_invocation_v1.struct_size offset");
 _Static_assert(offsetof(prdb_invocation_v1, abi_version) == 4, "prdb_invocation_v1.abi_version offset");
 _Static_assert(offsetof(prdb_invocation_v1, parameters) == 8, "prdb_invocation_v1.parameters offset");
 _Static_assert(offsetof(prdb_invocation_v1, parameters_len) == 16, "prdb_invocation_v1.parameters_len offset");
+_Static_assert(offsetof(prdb_invocation_v1, sql_data) == 24, "prdb_invocation_v1.sql_data offset");
+_Static_assert(offsetof(prdb_invocation_v1, sql_data_len) == 32, "prdb_invocation_v1.sql_data_len offset");
 
 _Static_assert(sizeof(prdb_query_descriptor_v1_record) == 16, "prdb_query_descriptor_v1_record size");
 _Static_assert(_Alignof(prdb_query_descriptor_v1_record) == 4, "prdb_query_descriptor_v1_record alignment");

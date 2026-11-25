@@ -11,12 +11,14 @@ const _: [(); 40] = [(); core::mem::offset_of!(HostApiV1, statement_failure)];
 const _: [(); 48] = [(); core::mem::offset_of!(HostApiV1, optimizer_request)];
 const _: [(); 56] = [(); core::mem::offset_of!(HostApiV1, spill_request)];
 
-const _: [(); 24] = [(); core::mem::size_of::<InvocationV1>()];
+const _: [(); 40] = [(); core::mem::size_of::<InvocationV1>()];
 const _: [(); 8] = [(); core::mem::align_of::<InvocationV1>()];
 const _: [(); 0] = [(); core::mem::offset_of!(InvocationV1, struct_size)];
 const _: [(); 4] = [(); core::mem::offset_of!(InvocationV1, abi_version)];
 const _: [(); 8] = [(); core::mem::offset_of!(InvocationV1, parameters)];
 const _: [(); 16] = [(); core::mem::offset_of!(InvocationV1, parameters_len)];
+const _: [(); 24] = [(); core::mem::offset_of!(InvocationV1, sql_data)];
+const _: [(); 32] = [(); core::mem::offset_of!(InvocationV1, sql_data_len)];
 
 const _: [(); 16] = [(); core::mem::size_of::<QueryDescriptorV1>()];
 const _: [(); 4] = [(); core::mem::align_of::<QueryDescriptorV1>()];

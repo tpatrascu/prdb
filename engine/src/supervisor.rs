@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 pub const MAX_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_PARAMETER_BYTES: u64 = 1024 * 1024;
+pub const MAX_SQL_DATA_BYTES: u64 = crate::query_abi::MAX_SQL_DATA_BYTES;
 pub const MAX_MANIFEST_BYTES: usize = 16 * 1024;
 pub const MAX_SCOPE_BYTES: usize = 8 * 1024;
 pub const MAX_CHUNK_BYTES: usize = 256 * 1024;
@@ -44,6 +45,7 @@ pub struct StagingLimits {
     pub max_principal_reserved_bytes: u64,
     pub max_artifact_bytes: u64,
     pub max_parameter_bytes: u64,
+    pub max_sql_data_bytes: u64,
     pub max_deadline_ms: u64,
     pub max_live_reservations: usize,
     /// Maximum live reservations owned by one authenticated principal.
@@ -84,10 +86,12 @@ impl Default for StagingLimits {
             max_global_reserved_bytes: 256 * 1024 * 1024,
             max_principal_reserved_bytes: MAX_ARTIFACT_BYTES
                 + MAX_PARAMETER_BYTES
+                + MAX_SQL_DATA_BYTES
                 + MAX_MANIFEST_BYTES as u64
                 + MAX_SCOPE_BYTES as u64,
             max_artifact_bytes: MAX_ARTIFACT_BYTES,
             max_parameter_bytes: MAX_PARAMETER_BYTES,
+            max_sql_data_bytes: MAX_SQL_DATA_BYTES,
             max_deadline_ms: DEFAULT_MAX_DEADLINE_MS,
             max_live_reservations: 1024,
             max_live_reservations_per_principal: 128,
@@ -112,6 +116,8 @@ pub struct PrepareSubmission {
     pub requested_scope: Vec<u8>,
     pub parameter_bytes: u64,
     pub parameter_sha256: [u8; 32],
+    pub sql_data_bytes: u64,
+    pub sql_data_sha256: [u8; 32],
     pub deadline_ms: u64,
     pub workload_class: WorkloadClass,
 }
@@ -160,6 +166,7 @@ pub trait SubmissionMetadataValidator: Send + Sync {
 pub enum ChunkKind {
     Artifact,
     Parameters,
+    SqlData,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -167,6 +174,7 @@ pub struct StagingReservation {
     pub invocation_id: [u8; 16],
     pub artifact_next_offset: u64,
     pub parameter_next_offset: u64,
+    pub sql_data_next_offset: u64,
 }
 
 #[derive(Debug)]
@@ -182,6 +190,7 @@ struct SealedSubmissionData {
     interactive_package: Option<InteractivePackageBinding>,
     artifact: Arc<[u8]>,
     parameters: Arc<[u8]>,
+    sql_data: Arc<[u8]>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -229,6 +238,7 @@ impl SealedSubmission {
             self.data.metadata.requested_scope.as_slice(),
             self.data.artifact.as_ref(),
             self.data.parameters.as_ref(),
+            self.data.sql_data.as_ref(),
         ] {
             digest.update((bytes.len() as u64).to_le_bytes());
             digest.update(bytes);
@@ -242,6 +252,10 @@ impl SealedSubmission {
 
     pub fn parameters(&self) -> &[u8] {
         &self.data.parameters
+    }
+
+    pub fn sql_data(&self) -> &[u8] {
+        &self.data.sql_data
     }
 
     pub fn sdk_library_pin(&self) -> Option<&crate::sdk_registry::SdkLibraryPin> {
@@ -268,8 +282,11 @@ struct Reservation {
     artifact_sha256: [u8; 32],
     parameter_bytes: u64,
     parameter_sha256: [u8; 32],
+    sql_data_bytes: u64,
+    sql_data_sha256: [u8; 32],
     artifact: Vec<u8>,
     parameters: Vec<u8>,
+    sql_data: Vec<u8>,
     sealed: Option<Arc<SealedSubmissionData>>,
     state: ReservationState,
     created_at: Instant,
@@ -362,6 +379,7 @@ impl StagingStore {
             || limits.max_artifact_bytes == 0
             || limits.max_artifact_bytes > MAX_ARTIFACT_BYTES
             || limits.max_parameter_bytes > MAX_PARAMETER_BYTES
+            || limits.max_sql_data_bytes > MAX_SQL_DATA_BYTES
             || limits.max_deadline_ms == 0
             || limits.max_live_reservations == 0
             || limits.max_live_reservations_per_principal == 0
@@ -471,6 +489,7 @@ impl StagingStore {
             || request.artifact_bytes == 0
             || request.artifact_bytes > self.limits.max_artifact_bytes
             || request.parameter_bytes > self.limits.max_parameter_bytes
+            || request.sql_data_bytes > self.limits.max_sql_data_bytes
             || request.deadline_ms == 0
             || request.deadline_ms > self.limits.max_deadline_ms
             || request.manifest.is_empty()
@@ -483,6 +502,7 @@ impl StagingStore {
         let reservation_size = request
             .artifact_bytes
             .checked_add(request.parameter_bytes)
+            .and_then(|size| size.checked_add(request.sql_data_bytes))
             .and_then(|size| size.checked_add(request.manifest.len() as u64))
             .and_then(|size| size.checked_add(request.requested_scope.len() as u64))
             .ok_or(StagingError::InvalidRequest)?;
@@ -567,8 +587,11 @@ impl StagingStore {
                 artifact_sha256: request.artifact_sha256,
                 parameter_bytes: request.parameter_bytes,
                 parameter_sha256: request.parameter_sha256,
+                sql_data_bytes: request.sql_data_bytes,
+                sql_data_sha256: request.sql_data_sha256,
                 artifact: Vec::new(),
                 parameters: Vec::new(),
+                sql_data: Vec::new(),
                 sealed: None,
                 state: ReservationState::Uploading,
                 created_at: Instant::now(),
@@ -585,6 +608,7 @@ impl StagingStore {
             invocation_id,
             artifact_next_offset: 0,
             parameter_next_offset: 0,
+            sql_data_next_offset: 0,
         })
     }
 
@@ -614,6 +638,7 @@ impl StagingStore {
         let (buffer, declared_bytes) = match kind {
             ChunkKind::Artifact => (&mut reservation.artifact, reservation.artifact_bytes),
             ChunkKind::Parameters => (&mut reservation.parameters, reservation.parameter_bytes),
+            ChunkKind::SqlData => (&mut reservation.sql_data, reservation.sql_data_bytes),
         };
         let expected_offset =
             u64::try_from(buffer.len()).map_err(|_| StagingError::InvalidChunk)?;
@@ -707,7 +732,7 @@ impl StagingStore {
     /// Verify declared lengths and hashes, validate versioned metadata, and
     /// freeze the upload into immutable shared buffers.
     pub fn seal(&self, owner: StagingOwner, invocation_id: [u8; 16]) -> Result<(), StagingError> {
-        let (sealed_data, artifact_sha256, parameter_sha256) = {
+        let (sealed_data, artifact_sha256, parameter_sha256, sql_data_sha256) = {
             let mut state = self.state.lock().map_err(|_| StagingError::Poisoned)?;
             reap_expired(
                 &mut state,
@@ -721,25 +746,34 @@ impl StagingStore {
             }
             if reservation.artifact.len() as u64 != reservation.artifact_bytes
                 || reservation.parameters.len() as u64 != reservation.parameter_bytes
+                || reservation.sql_data.len() as u64 != reservation.sql_data_bytes
             {
                 discard_reservation(&mut state, invocation_id);
                 return Err(StagingError::InvalidContentLength);
             }
             let artifact_sha256 = reservation.artifact_sha256;
             let parameter_sha256 = reservation.parameter_sha256;
+            let sql_data_sha256 = reservation.sql_data_sha256;
             let sealed_data = Arc::new(SealedSubmissionData {
                 metadata: reservation.metadata.clone(),
                 interactive_package: reservation.interactive_package,
                 artifact: Arc::from(std::mem::take(&mut reservation.artifact)),
                 parameters: Arc::from(std::mem::take(&mut reservation.parameters)),
+                sql_data: Arc::from(std::mem::take(&mut reservation.sql_data)),
             });
             reservation.sealed = Some(Arc::clone(&sealed_data));
             reservation.state = ReservationState::Sealing;
-            (sealed_data, artifact_sha256, parameter_sha256)
+            (
+                sealed_data,
+                artifact_sha256,
+                parameter_sha256,
+                sql_data_sha256,
+            )
         };
 
         let digests_match = Sha256::digest(&sealed_data.artifact).as_slice() == artifact_sha256
-            && Sha256::digest(&sealed_data.parameters).as_slice() == parameter_sha256;
+            && Sha256::digest(&sealed_data.parameters).as_slice() == parameter_sha256
+            && Sha256::digest(&sealed_data.sql_data).as_slice() == sql_data_sha256;
         if !digests_match {
             let mut state = self.state.lock().map_err(|_| StagingError::Poisoned)?;
             discard_reservation(&mut state, invocation_id);
@@ -1246,6 +1280,7 @@ fn discard_reservation(state: &mut StagingState, invocation_id: [u8; 16]) {
     let reservation_size = reservation
         .artifact_bytes
         .saturating_add(reservation.parameter_bytes)
+        .saturating_add(reservation.sql_data_bytes)
         .saturating_add(reservation.metadata.manifest.len() as u64)
         .saturating_add(reservation.metadata.requested_scope.len() as u64);
     state.global_reserved_bytes = state.global_reserved_bytes.saturating_sub(reservation_size);
@@ -1499,6 +1534,8 @@ mod tests {
             requested_scope: requested_scope_fixture(),
             parameter_bytes: parameters.len() as u64,
             parameter_sha256: Sha256::digest(parameters).into(),
+            sql_data_bytes: 0,
+            sql_data_sha256: Sha256::digest([]).into(),
             deadline_ms: 30_000,
             workload_class,
         }

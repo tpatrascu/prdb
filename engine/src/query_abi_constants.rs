@@ -4,6 +4,7 @@ pub const QUERY_DESCRIPTOR_SYMBOL: &str = "prdb_query_descriptor_v1";
 pub const QUERY_ENTRY_SYMBOL: &str = "prdb_query_main_v1";
 pub const QUERY_STATEMENT_FAILURE_SQL: u32 = 1;
 pub const MAX_PARAMETER_BYTES: u64 = 1048576;
+pub const MAX_SQL_DATA_BYTES: u64 = 1048576;
 pub const MAX_IPC_REQUEST_BYTES: u64 = 1048576;
 pub const MAX_IPC_RESPONSE_BYTES: u64 = 1048576;
 pub const MAX_RESULT_CHUNK_BYTES: u64 = 16384;

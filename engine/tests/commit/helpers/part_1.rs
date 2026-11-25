@@ -491,6 +491,8 @@ pub fn run_sandboxed_forged_handle_client(
             requested_scope: requested_scope_fixture(),
             parameter_bytes: 0,
             parameter_sha256: Sha256::digest([]).into(),
+            sql_data_bytes: 0,
+            sql_data_sha256: Sha256::digest([]).into(),
             deadline_ms: 30_000,
             workload_class: WorkloadClass::Operational,
         },

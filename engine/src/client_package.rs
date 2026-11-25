@@ -17,6 +17,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 pub const MAX_SOURCE_BYTES: u64 = 1024 * 1024;
+pub const MAX_SQL_DATA_BYTES: u64 = crate::query_abi::MAX_SQL_DATA_BYTES;
 pub const MAX_SDK_LIBRARY_BYTES: u64 = 128 * 1024 * 1024;
 pub const COMPILER_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_COMPILER_DIAGNOSTIC_BYTES: usize = 8192;
@@ -28,6 +29,7 @@ pub struct PackageOptions {
     pub shared_linker: PathBuf,
     pub patchelf: PathBuf,
     pub source: PathBuf,
+    pub sql_data: Option<PathBuf>,
     pub sdk_library: PathBuf,
     pub include_dir: PathBuf,
     pub requested_scope: PathBuf,
@@ -44,6 +46,8 @@ pub struct PackageSummary {
     pub package_dir: PathBuf,
     pub artifact_bytes: u64,
     pub artifact_sha256: [u8; 32],
+    pub sql_data_bytes: u64,
+    pub sql_data_sha256: Option<[u8; 32]>,
 }
 
 #[derive(Debug)]
@@ -100,6 +104,13 @@ pub fn package_query_repository(options: &PackageOptions) -> Result<PackageSumma
     )?;
     let scope = read_bounded_file(&scope_path, crate::supervisor::MAX_SCOPE_BYTES as u64)?;
     decode_requested_scope_v1(&scope).map_err(|_| PackageError::InvalidScope)?;
+    let sql_data = match &options.sql_data {
+        Some(path) => {
+            let sql_data_path = canonical_regular_file(path, MAX_SQL_DATA_BYTES)?;
+            Some(read_bounded_file(&sql_data_path, MAX_SQL_DATA_BYTES)?)
+        }
+        None => None,
+    };
     let package_dir = output_path(&options.output_dir)?;
     let mut staging = StagingDirectory::create(&package_dir)?;
     let object_path = staging.path.join("query.o");
@@ -162,6 +173,18 @@ pub fn package_query_repository(options: &PackageOptions) -> Result<PackageSumma
         &staging.path.join("artifact.sha256"),
         format!("{}\n", lower_hex(&artifact_sha256)).as_bytes(),
     )?;
+    let (sql_data_bytes, sql_data_sha256) = match sql_data {
+        Some(bytes) => {
+            let digest: [u8; 32] = Sha256::digest(&bytes).into();
+            write_private_file(&staging.path.join("query.data"), &bytes)?;
+            write_private_file(
+                &staging.path.join("sql_data.sha256"),
+                format!("{}\n", lower_hex(&digest)).as_bytes(),
+            )?;
+            (bytes.len() as u64, Some(digest))
+        }
+        None => (0, None),
+    };
     File::open(&staging.path)?.sync_all()?;
     staging.publish(&package_dir)?;
 
@@ -169,6 +192,8 @@ pub fn package_query_repository(options: &PackageOptions) -> Result<PackageSumma
         package_dir,
         artifact_bytes: artifact.len() as u64,
         artifact_sha256,
+        sql_data_bytes,
+        sql_data_sha256,
     })
 }
 

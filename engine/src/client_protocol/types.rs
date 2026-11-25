@@ -161,6 +161,8 @@ pub struct ClientPrepare {
     pub repository_sdk_library: bool,
     pub parameter_bytes: u64,
     pub parameter_sha256: [u8; 32],
+    pub sql_data_bytes: u64,
+    pub sql_data_sha256: [u8; 32],
     pub scope_version: u32,
     pub requested_scope: Vec<u8>,
     pub deadline_ms: u64,

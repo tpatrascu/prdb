@@ -32,16 +32,14 @@ typedef int32_t (*prdb_sdk_sql_batch_statement_runner_v1_fn)(
     const prdb_host_api_v1 *host, const uint8_t *schema,
     uint32_t schema_len, const prdb_sdk_sql_batch_statement_v1 *statement);
 
-/* Executes an already lexed statement list sequentially in the same host
- * invocation. The caller must use a SQL lexer/parser to construct statement
- * slices; this function never splits source text on semicolons. Each output
- * callback is framed as SQLB version 1 with event, zero-based statement
- * ordinal, and payload length. Any statement or output failure latches the
- * host failure callback and stops the package immediately. */
+/* Executes a PSQ1 SQL batch encoded in invocation->sql_data sequentially in
+ * the same host invocation. The caller must use a SQL lexer/parser to
+ * construct PSQ1 statement slices; this function never splits source text on
+ * semicolons. Each output callback is framed as SQLB version 1 with event,
+ * zero-based statement ordinal, and payload length. Any statement or output
+ * failure latches the host failure callback and stops the package immediately. */
 int32_t prdb_sdk_sql_run_batch_v1(
-    const prdb_host_api_v1 *host, const uint8_t *schema,
-    uint32_t schema_len, uint32_t statement_count,
-    const prdb_sdk_sql_batch_statement_v1 *statements,
+    const prdb_host_api_v1 *host, const prdb_invocation_v1 *invocation,
     prdb_sdk_sql_batch_statement_runner_v1_fn run_statement);
 
 #endif /* PRDB_SDK_SQL_BATCH_V1_H */

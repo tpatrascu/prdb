@@ -1305,7 +1305,10 @@ fn client_request_to_ipc(
             Operation::AuthenticateSession
         }
         3 => Operation::PrepareSubmission,
-        4 | 5 | crate::client_protocol::CLIENT_SDK_LIBRARY_CHUNK_KIND => {
+        4
+        | 5
+        | crate::client_protocol::CLIENT_SDK_LIBRARY_CHUNK_KIND
+        | crate::client_protocol::CLIENT_SQL_DATA_CHUNK_KIND => {
             payload.insert(0, kind as u8);
             Operation::UploadSubmissionChunk
         }

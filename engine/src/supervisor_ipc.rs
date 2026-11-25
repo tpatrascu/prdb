@@ -1116,7 +1116,7 @@ fn dispatch_gateway_client_request_inner<'db>(
                 .payload
                 .split_first()
                 .ok_or(GatewayRequestError::InvalidPayload)?;
-            if !matches!(kind, 4 | 5 | 12 | 17 | 19) {
+            if !matches!(kind, 4 | 5 | 12 | 17 | 19 | 20) {
                 return Err(GatewayRequestError::InvalidPayload);
             }
             session
@@ -2401,6 +2401,8 @@ mod worker_result_event_tests {
                     },
                     parameter_bytes: 0,
                     parameter_sha256: Sha256::digest(parameters).into(),
+                    sql_data_bytes: 0,
+                    sql_data_sha256: Sha256::digest([]).into(),
                     deadline_ms: 1000,
                     workload_class: crate::supervisor::WorkloadClass::Operational,
                 },
@@ -2440,6 +2442,8 @@ mod worker_result_event_tests {
                     },
                     parameter_bytes: 0,
                     parameter_sha256: Sha256::digest(parameters).into(),
+                    sql_data_bytes: 0,
+                    sql_data_sha256: Sha256::digest([]).into(),
                     deadline_ms: 1000,
                     workload_class: crate::supervisor::WorkloadClass::Operational,
                 },
@@ -2641,6 +2645,8 @@ mod worker_result_event_tests {
                     requested_scope,
                     parameter_bytes: 0,
                     parameter_sha256: Sha256::digest([]).into(),
+                    sql_data_bytes: 0,
+                    sql_data_sha256: Sha256::digest([]).into(),
                     deadline_ms: 30_000,
                     workload_class: WorkloadClass::Operational,
                 },

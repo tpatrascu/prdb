@@ -143,6 +143,7 @@ pub struct PreparedExecutor {
     command: Command,
     optimizer_command: Option<Command>,
     parameters: Option<File>,
+    sql_data: Option<File>,
     cgroup: Option<WorkerCgroup>,
     artifact_directory: Option<PrivateArtifactDirectory>,
     worker_channels: Option<WorkerChannelPair>,
@@ -814,17 +815,20 @@ fn prepare_executor(
         spill_session.is_some(),
         &effective_config,
     ) {
-        Ok((command, optimizer_command, parameters, artifact_directory)) => Ok(PreparedExecutor {
-            command,
-            optimizer_command: Some(optimizer_command),
-            parameters: Some(parameters),
-            cgroup: Some(cgroup),
-            artifact_directory: Some(artifact_directory),
-            worker_channels: Some(channels),
-            spill_session,
-            cleanup_timeout: config.cleanup_timeout,
-            max_total_result_bytes: effective_config.max_total_result_bytes,
-        }),
+        Ok((command, optimizer_command, parameters, sql_data, artifact_directory)) => {
+            Ok(PreparedExecutor {
+                command,
+                optimizer_command: Some(optimizer_command),
+                parameters: Some(parameters),
+                sql_data: Some(sql_data),
+                cgroup: Some(cgroup),
+                artifact_directory: Some(artifact_directory),
+                worker_channels: Some(channels),
+                spill_session,
+                cleanup_timeout: config.cleanup_timeout,
+                max_total_result_bytes: effective_config.max_total_result_bytes,
+            })
+        }
         Err(launch_error) => Err(ExecutorLaunchError {
             launch_error,
             cleanup_error: cgroup.cleanup(config.cleanup_timeout).err(),
@@ -840,6 +844,7 @@ impl PreparedExecutor {
             .and_then(|cgroup| cgroup.cleanup(self.cleanup_timeout).err());
         self.artifact_directory.take();
         self.parameters.take();
+        self.sql_data.take();
         cleanup_error
     }
 
@@ -863,6 +868,7 @@ impl PreparedExecutor {
         match self.command.spawn() {
             Ok(child) => {
                 self.parameters.take();
+                self.sql_data.take();
                 let channels = self
                     .worker_channels
                     .take()
@@ -904,6 +910,7 @@ impl Drop for PreparedExecutor {
         }
         self.artifact_directory.take();
         self.parameters.take();
+        self.sql_data.take();
         self.worker_channels.take();
         self.spill_session.take();
     }
@@ -915,7 +922,7 @@ fn build_command(
     channels: &WorkerChannelPair,
     spill_enabled: bool,
     config: &ExecutorLaunchConfig,
-) -> io::Result<(Command, Command, File, PrivateArtifactDirectory)> {
+) -> io::Result<(Command, Command, File, File, PrivateArtifactDirectory)> {
     let executor_path = config.executor_path.canonicalize()?;
     if !executor_path.is_file() {
         return Err(io::Error::new(
@@ -929,7 +936,8 @@ fn build_command(
         submission.artifact(),
         submission.sdk_library_pin(),
     )?;
-    let parameters = create_sealed_parameters(submission.parameters())?;
+    let parameters = create_sealed_memfd(c"prdb-query-parameters", submission.parameters())?;
+    let sql_data = create_sealed_memfd(c"prdb-query-sql-data", submission.sql_data())?;
     let optimizer_path = config.optimizer_path.canonicalize()?;
     if !optimizer_path.is_file() {
         return Err(io::Error::new(
@@ -952,6 +960,8 @@ fn build_command(
         .arg(&artifact_directory.artifact_path)
         .arg("--parameters-fd")
         .arg(parameters.as_raw_fd().to_string())
+        .arg("--sql-data-fd")
+        .arg(sql_data.as_raw_fd().to_string())
         .arg("--planner-fd")
         .arg(planner_fd.to_string())
         .arg("--executor-fd")
@@ -975,6 +985,7 @@ fn build_command(
         .stderr(Stdio::null());
     let mut inherited_fds = vec![
         parameters.as_raw_fd(),
+        sql_data.as_raw_fd(),
         planner_fd,
         executor_fd,
         optimizer_fd,
@@ -1008,7 +1019,13 @@ fn build_command(
         &optimizer_ruleset,
         &[optimizer_submission_fd, optimizer_planner_fd],
     )?;
-    Ok((command, optimizer_command, parameters, artifact_directory))
+    Ok((
+        command,
+        optimizer_command,
+        parameters,
+        sql_data,
+        artifact_directory,
+    ))
 }
 
 fn allow_runtime_paths(
@@ -1107,8 +1124,7 @@ impl Drop for PrivateArtifactDirectory {
     }
 }
 
-fn create_sealed_parameters(parameters: &[u8]) -> io::Result<File> {
-    let name = c"prdb-query-parameters";
+fn create_sealed_memfd(name: &std::ffi::CStr, bytes: &[u8]) -> io::Result<File> {
     // SAFETY: the name is a static NUL-terminated string and flags are a
     // fixed memfd option mask.
     let descriptor = unsafe {
@@ -1123,7 +1139,7 @@ fn create_sealed_parameters(parameters: &[u8]) -> io::Result<File> {
     }
     // SAFETY: successful memfd_create returns a new owned descriptor.
     let mut file = unsafe { File::from_raw_fd(descriptor as i32) };
-    file.write_all(parameters)?;
+    file.write_all(bytes)?;
     let seals = libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
     // SAFETY: F_ADD_SEALS consumes the scalar seal mask and a valid memfd.
     if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, seals) } < 0 {
@@ -1131,6 +1147,11 @@ fn create_sealed_parameters(parameters: &[u8]) -> io::Result<File> {
     }
     file.seek(SeekFrom::Start(0))?;
     Ok(file)
+}
+
+#[cfg(test)]
+fn create_sealed_parameters(parameters: &[u8]) -> io::Result<File> {
+    create_sealed_memfd(c"prdb-query-parameters", parameters)
 }
 
 #[cfg(test)]

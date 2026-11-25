@@ -89,7 +89,7 @@
     {
       "c_type": "prdb_invocation_v1",
       "rust_type": "InvocationV1",
-      "size": 24,
+      "size": 40,
       "alignment": 8,
       "fields": [
         {
@@ -123,6 +123,22 @@
           "rust_type": "u64",
           "c_name": "parameters_len",
           "rust_name": "parameters_len"
+        },
+        {
+          "name": "sql_data",
+          "offset": 24,
+          "c_type": "const uint8_t *",
+          "rust_type": "*const u8",
+          "c_name": "sql_data",
+          "rust_name": "sql_data"
+        },
+        {
+          "name": "sql_data_len",
+          "offset": 32,
+          "c_type": "uint64_t",
+          "rust_type": "u64",
+          "c_name": "sql_data_len",
+          "rust_name": "sql_data_len"
         }
       ],
       "version": "1",
@@ -219,6 +235,13 @@
       "rust_type": "u64",
       "value": 1048576,
       "c_name": "PRDB_QUERY_MAX_PARAMETER_BYTES",
+      "c_type": "UINT64_C"
+    },
+    {
+      "rust_name": "MAX_SQL_DATA_BYTES",
+      "rust_type": "u64",
+      "value": 1048576,
+      "c_name": "PRDB_QUERY_MAX_SQL_DATA_BYTES",
       "c_type": "UINT64_C"
     },
     {

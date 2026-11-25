@@ -41,6 +41,7 @@ pub const CLIENT_V2_TX_ROLLBACK_KIND: u16 = 16;
 pub const CLIENT_V2_TX_STATUS_KIND: u16 = 17;
 pub const CLIENT_V2_PACKAGE_STATUS_KIND: u16 = 18;
 pub const CLIENT_SDK_LIBRARY_CHUNK_KIND: u16 = 19;
+pub const CLIENT_SQL_DATA_CHUNK_KIND: u16 = 20;
 pub(super) const CLIENT_MAGIC: [u8; 4] = *b"PDBN";
 pub(super) const CLIENT_METADATA_CURSOR_KIND: u8 = 0xd3;
 pub const CLIENT_METADATA_MAX_PAGE: usize = 128;

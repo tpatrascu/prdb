@@ -82,7 +82,7 @@ fn v1_encoder_cannot_emit_v2_only_transaction_kinds() {
 
 #[test]
 fn prepare_transaction_binding_is_v2_only_and_requires_both_ids() {
-    let base = r#"{"manifest_version":1,"manifest":"AQ==","artifact_bytes":"1","artifact_sha256":"0000000000000000000000000000000000000000000000000000000000000000","parameter_bytes":"0","parameter_sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","scope_version":1,"requested_scope":"AQ==","deadline_ms":"1","workload_class":"operational","sdk_library_mode":"repository""#;
+    let base = r#"{"manifest_version":1,"manifest":"AQ==","artifact_bytes":"1","artifact_sha256":"0000000000000000000000000000000000000000000000000000000000000000","parameter_bytes":"0","parameter_sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","sql_data_bytes":"0","sql_data_sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","scope_version":1,"requested_scope":"AQ==","deadline_ms":"1","workload_class":"operational","sdk_library_mode":"repository""#;
     let v2 = format!(
         "{base},\"transaction_id\":\"11111111111111111111111111111111\",\"package_id\":\"22222222222222222222222222222222\"}}"
     );

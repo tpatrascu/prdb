@@ -1,5 +1,5 @@
 use prdb_engine::client_submit::{CancellationResult, InvocationStatus, TerminalOutcome};
-use prdb_engine::supervisor::MAX_PARAMETER_BYTES;
+use prdb_engine::supervisor::{MAX_PARAMETER_BYTES, MAX_SQL_DATA_BYTES};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
@@ -54,6 +54,21 @@ pub(super) fn read_parameters(path: Option<&PathBuf>) -> Result<Vec<u8>, String>
         return Err("parameter file exceeds the 1 MiB limit".to_owned());
     }
     Ok(bytes)
+}
+
+pub(super) fn read_sql_data_file(path: Option<&PathBuf>) -> Result<Option<Vec<u8>>, String> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let file = File::open(path).map_err(|error| error.to_string())?;
+    let mut bytes = Vec::new();
+    file.take(MAX_SQL_DATA_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > MAX_SQL_DATA_BYTES {
+        return Err("SQL data file exceeds the 1 MiB limit".to_owned());
+    }
+    Ok(Some(bytes))
 }
 
 pub(super) fn reject_unknown(fields: &HashMap<String, std::ffi::OsString>) -> Result<(), String> {

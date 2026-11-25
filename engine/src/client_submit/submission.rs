@@ -8,7 +8,9 @@ use crate::client_protocol::{
 use crate::credentials::TOKEN_SECRET_BYTES;
 use crate::submission_manifest::decode_manifest_v1;
 use crate::submission_scope::decode_requested_scope_v1;
-use crate::supervisor::{MAX_MANIFEST_BYTES, MAX_PARAMETER_BYTES, MAX_SCOPE_BYTES, WorkloadClass};
+use crate::supervisor::{
+    MAX_MANIFEST_BYTES, MAX_PARAMETER_BYTES, MAX_SCOPE_BYTES, MAX_SQL_DATA_BYTES, WorkloadClass,
+};
 use sha2::{Digest, Sha256};
 use std::collections::{HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
@@ -322,7 +324,34 @@ impl SubmissionClient {
         deadline_ms: u64,
         workload_class: WorkloadClass,
     ) -> Result<[u8; 16], ClientSubmitError> {
-        self.upload_and_seal_bound(package_dir, parameters, deadline_ms, workload_class, None)
+        self.upload_and_seal_bound(
+            package_dir,
+            parameters,
+            None,
+            deadline_ms,
+            workload_class,
+            None,
+        )
+    }
+
+    /// Upload a private package directory with explicit SQL data and parameter
+    /// bytes, then seal it.
+    pub fn upload_and_seal_with_sql_data(
+        &mut self,
+        package_dir: &std::path::Path,
+        parameters: &[u8],
+        sql_data: &[u8],
+        deadline_ms: u64,
+        workload_class: WorkloadClass,
+    ) -> Result<[u8; 16], ClientSubmitError> {
+        self.upload_and_seal_bound(
+            package_dir,
+            parameters,
+            Some(sql_data),
+            deadline_ms,
+            workload_class,
+            None,
+        )
     }
 
     /// Upload and seal a package bound to a retained v2 transaction. The
@@ -340,6 +369,30 @@ impl SubmissionClient {
         self.upload_and_seal_bound(
             package_dir,
             parameters,
+            None,
+            deadline_ms,
+            workload_class,
+            Some((transaction_id, package_id)),
+        )
+    }
+
+    /// Upload and seal a package with explicit SQL data bound to a retained v2
+    /// transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn upload_interactive_package_and_seal_with_sql_data(
+        &mut self,
+        package_dir: &std::path::Path,
+        parameters: &[u8],
+        sql_data: &[u8],
+        deadline_ms: u64,
+        workload_class: WorkloadClass,
+        transaction_id: [u8; 16],
+        package_id: [u8; 16],
+    ) -> Result<[u8; 16], ClientSubmitError> {
+        self.upload_and_seal_bound(
+            package_dir,
+            parameters,
+            Some(sql_data),
             deadline_ms,
             workload_class,
             Some((transaction_id, package_id)),
@@ -350,6 +403,7 @@ impl SubmissionClient {
         &mut self,
         package_dir: &std::path::Path,
         parameters: &[u8],
+        sql_data_override: Option<&[u8]>,
         deadline_ms: u64,
         workload_class: WorkloadClass,
         transaction_binding: Option<([u8; 16], [u8; 16])>,
@@ -363,19 +417,26 @@ impl SubmissionClient {
             return Err(ClientSubmitError::InvalidPackage);
         }
         let package = read_package(package_dir)?;
+        let sql_data = sql_data_override.unwrap_or(&package.sql_data);
+        if sql_data.len() as u64 > MAX_SQL_DATA_BYTES {
+            return Err(ClientSubmitError::InvalidPackage);
+        }
         let artifact_hash: [u8; 32] = Sha256::digest(&package.artifact).into();
         let parameter_hash: [u8; 32] = Sha256::digest(parameters).into();
+        let sql_data_hash: [u8; 32] = Sha256::digest(sql_data).into();
         let workload = match workload_class {
             WorkloadClass::Operational => "operational",
             WorkloadClass::Analytical => "analytical",
         };
         let mut prepare = format!(
-            "{{\"manifest_version\":1,\"manifest\":\"{}\",\"artifact_bytes\":\"{}\",\"artifact_sha256\":\"{}\",\"parameter_bytes\":\"{}\",\"parameter_sha256\":\"{}\",\"scope_version\":1,\"requested_scope\":\"{}\",\"deadline_ms\":\"{deadline_ms}\",\"workload_class\":\"{workload}\",\"sdk_library_mode\":\"repository\"}}",
+            "{{\"manifest_version\":1,\"manifest\":\"{}\",\"artifact_bytes\":\"{}\",\"artifact_sha256\":\"{}\",\"parameter_bytes\":\"{}\",\"parameter_sha256\":\"{}\",\"sql_data_bytes\":\"{}\",\"sql_data_sha256\":\"{}\",\"scope_version\":1,\"requested_scope\":\"{}\",\"deadline_ms\":\"{deadline_ms}\",\"workload_class\":\"{workload}\",\"sdk_library_mode\":\"repository\"}}",
             encode_base64(&package.manifest),
             package.artifact.len(),
             lower_hex(&artifact_hash),
             parameters.len(),
             lower_hex(&parameter_hash),
+            sql_data.len(),
+            lower_hex(&sql_data_hash),
             encode_base64(&package.scope),
         );
         if let Some((transaction_id, package_id)) = transaction_binding {
@@ -404,12 +465,23 @@ impl SubmissionClient {
             .filter(|bytes| (1..=self.max_chunk_bytes as u64).contains(bytes))
             .ok_or(ClientSubmitError::InvalidResponse)?
             as usize;
-        if fields.len() != 3 {
+        let sql_data_chunk_bytes = fields
+            .get("sql_data_chunk_bytes")
+            .and_then(ResponseValue::as_number)
+            .filter(|bytes| (1..=self.max_chunk_bytes as u64).contains(bytes))
+            .ok_or(ClientSubmitError::InvalidResponse)? as usize;
+        if fields.len() != 4 {
             return Err(ClientSubmitError::InvalidResponse);
         }
 
         self.upload_chunks(4, invocation_id, &package.artifact, artifact_chunk_bytes)?;
         self.upload_chunks(5, invocation_id, parameters, parameter_chunk_bytes)?;
+        self.upload_chunks(
+            crate::client_protocol::CLIENT_SQL_DATA_CHUNK_KIND,
+            invocation_id,
+            sql_data,
+            sql_data_chunk_bytes,
+        )?;
         let seal_payload = format!("{{\"invocation_id\":\"{}\"}}", lower_hex(&invocation_id));
         let sealed = self.exchange(6, seal_payload.into_bytes())?;
         let fields = parse_flat_response(&sealed.payload)?;
@@ -634,7 +706,10 @@ impl SubmissionClient {
         };
         let request_limit = if matches!(
             kind,
-            4 | 5 | 12 | crate::client_protocol::CLIENT_SDK_LIBRARY_CHUNK_KIND
+            4 | 5
+                | 12
+                | crate::client_protocol::CLIENT_SDK_LIBRARY_CHUNK_KIND
+                | crate::client_protocol::CLIENT_SQL_DATA_CHUNK_KIND
         ) {
             self.max_chunk_bytes.saturating_add(24)
         } else {
@@ -831,10 +906,35 @@ pub fn read_package(package_dir: &std::path::Path) -> Result<PackageBytes, Clien
     {
         return Err(ClientSubmitError::InvalidPackage);
     }
+    let has_sql_data = std::fs::symlink_metadata(package_dir.join("query.data")).is_ok();
+    let has_sql_data_hash = std::fs::symlink_metadata(package_dir.join("sql_data.sha256")).is_ok();
+    if has_sql_data != has_sql_data_hash {
+        return Err(ClientSubmitError::InvalidPackage);
+    }
+    let sql_data = if has_sql_data {
+        let bytes = read_private_file(&package_dir.join("query.data"), MAX_SQL_DATA_BYTES)?;
+        let expected_sql_hash = read_private_file(&package_dir.join("sql_data.sha256"), 65)?;
+        let calculated_sql_hash: [u8; 32] = Sha256::digest(&bytes).into();
+        if expected_sql_hash.len() != 65
+            || expected_sql_hash[64] != b'\n'
+            || !decode_lower_hex(
+                std::str::from_utf8(&expected_sql_hash[..64]).unwrap_or(""),
+                32,
+            )
+            || decode_hex_array::<32>(std::str::from_utf8(&expected_sql_hash[..64]).unwrap_or(""))
+                != Some(calculated_sql_hash)
+        {
+            return Err(ClientSubmitError::InvalidPackage);
+        }
+        bytes
+    } else {
+        Vec::new()
+    };
     Ok(PackageBytes {
         artifact,
         manifest,
         scope,
+        sql_data,
     })
 }
 

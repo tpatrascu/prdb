@@ -111,6 +111,8 @@ pub fn decode_client_prepare_for_protocol(
         fields.contains_key("sql_library_bytes") || fields.contains_key("sql_library_sha256");
     let parameter_bytes = take_decimal_string(&mut fields, "parameter_bytes")?;
     let parameter_sha256 = decode_lower_hex_hash(&take_string(&mut fields, "parameter_sha256")?)?;
+    let sql_data_bytes = take_decimal_string(&mut fields, "sql_data_bytes")?;
+    let sql_data_sha256 = decode_lower_hex_hash(&take_string(&mut fields, "sql_data_sha256")?)?;
     let scope_version = take_number(&mut fields, "scope_version")?
         .try_into()
         .map_err(|_| ClientControlError::InvalidPrepare)?;
@@ -144,6 +146,7 @@ pub fn decode_client_prepare_for_protocol(
         || artifact_bytes > crate::supervisor::MAX_ARTIFACT_BYTES
         || has_sql_library
         || parameter_bytes > crate::supervisor::MAX_PARAMETER_BYTES
+        || sql_data_bytes > crate::supervisor::MAX_SQL_DATA_BYTES
         || deadline_ms == 0
         || manifest_text.len() > crate::supervisor::MAX_MANIFEST_BYTES.div_ceil(3) * 4
         || scope_text.len() > crate::supervisor::MAX_SCOPE_BYTES.div_ceil(3) * 4
@@ -164,6 +167,8 @@ pub fn decode_client_prepare_for_protocol(
         repository_sdk_library,
         parameter_bytes,
         parameter_sha256,
+        sql_data_bytes,
+        sql_data_sha256,
         scope_version,
         requested_scope,
         deadline_ms,

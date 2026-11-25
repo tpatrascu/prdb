@@ -295,6 +295,7 @@ pub(super) fn submit(
     let package = take_path(fields, "--package")?;
     let receipt = take_path(fields, "--receipt")?;
     let parameters_path = fields.remove("--parameters").map(PathBuf::from);
+    let sql_data_path = fields.remove("--sql-data").map(PathBuf::from);
     let deadline_ms = fields
         .remove("--deadline-ms")
         .map(|value| parse_number(value, "--deadline-ms"))
@@ -309,54 +310,16 @@ pub(super) fn submit(
     reject_unknown(fields)?;
 
     let mut parameters = read_parameters(parameters_path.as_ref())?;
-    submit_package_and_stream(
-        address,
-        credentials_path,
-        &package,
-        &receipt,
-        &mut parameters,
-        deadline_ms,
-        workload,
-    )
-}
-
-pub(super) fn submit_package_and_stream(
-    address: SocketAddr,
-    credentials_path: PathBuf,
-    package: &Path,
-    receipt: &Path,
-    parameters: &mut [u8],
-    deadline_ms: u64,
-    workload: WorkloadClass,
-) -> Result<(), String> {
+    let sql_data = read_sql_data_file(sql_data_path.as_ref())?;
     let credentials =
         read_client_credentials(credentials_path).map_err(|error| error.to_string())?;
-    submit_package_and_stream_with_credentials(
-        address,
-        credentials,
-        package,
-        receipt,
-        parameters,
-        deadline_ms,
-        workload,
-    )
-}
-
-pub(super) fn submit_package_and_stream_with_credentials(
-    address: SocketAddr,
-    credentials: ClientCredentials,
-    package: &Path,
-    receipt: &Path,
-    parameters: &mut [u8],
-    deadline_ms: u64,
-    workload: WorkloadClass,
-) -> Result<(), String> {
     submit_package_and_stream_with_profile(
         address,
         credentials,
-        package,
-        receipt,
-        parameters,
+        &package,
+        &receipt,
+        &mut parameters,
+        sql_data.as_deref(),
         deadline_ms,
         workload,
         false,
@@ -370,6 +333,7 @@ pub(super) fn submit_package_and_stream_with_profile(
     package: &Path,
     receipt: &Path,
     parameters: &mut [u8],
+    sql_data: Option<&[u8]>,
     deadline_ms: u64,
     workload: WorkloadClass,
     _repository_profile: bool,
@@ -382,9 +346,17 @@ pub(super) fn submit_package_and_stream_with_profile(
             Duration::from_secs(10),
         )
         .map_err(|error| error.to_string())?;
-        let invocation_id = client
-            .upload_and_seal(package, parameters, deadline_ms, workload)
-            .map_err(|error| error.to_string())?;
+        let invocation_id = match sql_data {
+            Some(sql_data) => client.upload_and_seal_with_sql_data(
+                package,
+                parameters,
+                sql_data,
+                deadline_ms,
+                workload,
+            ),
+            None => client.upload_and_seal(package, parameters, deadline_ms, workload),
+        }
+        .map_err(|error| error.to_string())?;
         eprintln!("prepared invocation {}", lower_hex(&invocation_id));
         let mut started = client
             .start(invocation_id, receipt)

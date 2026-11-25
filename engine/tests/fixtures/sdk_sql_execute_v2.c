@@ -908,7 +908,7 @@ int main(void) {
     }
     assert(sizeof(prdb_host_api_v1) == 64);
     assert(sizeof(prdb_query_descriptor_v1_record) == 16);
-    assert(sizeof(prdb_invocation_v1) == 24);
+    assert(sizeof(prdb_invocation_v1) == 40);
     spill_host = host;
     spill_host.struct_size = sizeof(spill_host);
     spill_host.abi_version = PRDB_QUERY_ABI_VERSION;

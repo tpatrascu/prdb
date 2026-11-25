@@ -19,6 +19,8 @@ typedef struct prdb_invocation_v1 {
     uint32_t abi_version;
     const uint8_t * parameters;
     uint64_t parameters_len;
+    const uint8_t * sql_data;
+    uint64_t sql_data_len;
 } prdb_invocation_v1;
 
 typedef struct prdb_query_descriptor_v1_record {

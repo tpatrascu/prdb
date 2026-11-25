@@ -153,28 +153,40 @@ fn query_abi_v1_layout_matches_the_x86_64_c_contract() {
     assert_eq!(std::mem::offset_of!(HostApiV1, spill_request), 56);
     assert_eq!(std::mem::size_of::<QueryDescriptorV1>(), 16);
     assert_eq!(std::mem::align_of::<QueryDescriptorV1>(), 4);
-    assert_eq!(std::mem::size_of::<InvocationV1>(), 24);
+    assert_eq!(std::mem::size_of::<InvocationV1>(), 40);
     assert_eq!(std::mem::align_of::<InvocationV1>(), 8);
     assert_eq!(std::mem::offset_of!(InvocationV1, parameters), 8);
     assert_eq!(std::mem::offset_of!(InvocationV1, parameters_len), 16);
+    assert_eq!(std::mem::offset_of!(InvocationV1, sql_data), 24);
+    assert_eq!(std::mem::offset_of!(InvocationV1, sql_data_len), 32);
 }
 
 #[test]
 fn query_invocation_parameters_are_borrowed_bounded_and_null_only_when_empty() {
-    let empty_owner = BorrowedInvocationV1::new(&[]).unwrap();
+    let empty_owner = BorrowedInvocationV1::new(&[], &[]).unwrap();
     let empty = empty_owner.as_record();
     assert!(empty.parameters.is_null());
     assert_eq!(empty.parameters_len, 0);
+    assert!(empty.sql_data.is_null());
+    assert_eq!(empty.sql_data_len, 0);
 
     let parameters = [7, 8, 9];
-    let invocation_owner = BorrowedInvocationV1::new(&parameters).unwrap();
+    let sql_data = [1, 2, 3, 4];
+    let invocation_owner = BorrowedInvocationV1::new(&parameters, &sql_data).unwrap();
     let invocation = invocation_owner.as_record();
     assert_eq!(invocation.parameters, parameters.as_ptr());
     assert_eq!(invocation.parameters_len, parameters.len() as u64);
+    assert_eq!(invocation.sql_data, sql_data.as_ptr());
+    assert_eq!(invocation.sql_data_len, sql_data.len() as u64);
 
     let oversized = vec![0; prdb_engine::query_abi::MAX_PARAMETER_BYTES as usize + 1];
     assert_eq!(
-        BorrowedInvocationV1::new(&oversized).unwrap_err(),
+        BorrowedInvocationV1::new(&oversized, &[]).unwrap_err(),
+        ParameterError::TooLarge
+    );
+    let oversized_sql = vec![0; prdb_engine::query_abi::MAX_SQL_DATA_BYTES as usize + 1];
+    assert_eq!(
+        BorrowedInvocationV1::new(&[], &oversized_sql).unwrap_err(),
         ParameterError::TooLarge
     );
 }

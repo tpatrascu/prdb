@@ -8,6 +8,15 @@ typedef struct batch_host_context {
     int failure_latched;
 } batch_host_context;
 
+static uint16_t read_u16_be(const uint8_t *bytes) {
+    return (uint16_t)(((uint16_t)bytes[0] << 8) | bytes[1]);
+}
+
+static uint32_t read_u32_be(const uint8_t *bytes) {
+    return ((uint32_t)bytes[0] << 24) | ((uint32_t)bytes[1] << 16) |
+           ((uint32_t)bytes[2] << 8) | bytes[3];
+}
+
 static void write_u16_be(uint8_t *bytes, uint16_t value) {
     bytes[0] = (uint8_t)(value >> 8);
     bytes[1] = (uint8_t)value;
@@ -116,57 +125,116 @@ static prdb_host_api_v1 wrap_host(batch_host_context *context) {
 }
 
 int32_t prdb_sdk_sql_run_batch_v1(
-    const prdb_host_api_v1 *host, const uint8_t *schema,
-    uint32_t schema_len, uint32_t statement_count,
-    const prdb_sdk_sql_batch_statement_v1 *statements,
+    const prdb_host_api_v1 *host, const prdb_invocation_v1 *invocation,
     prdb_sdk_sql_batch_statement_runner_v1_fn run_statement) {
     uint64_t package_bytes = 0;
+    uint32_t schema_len;
+    uint32_t statement_count;
+    const uint8_t *schema;
+    const uint8_t *sql_data;
+    uint64_t sql_data_len;
+    uint64_t offset;
+    uint64_t statements_start;
     prdb_host_api_v1 wrapped_host;
     batch_host_context context;
     if (host == NULL || host->struct_size < sizeof(*host) ||
         host->abi_version != PRDB_QUERY_ABI_VERSION ||
         host->statement_failure == NULL || host->write_result == NULL ||
-        schema == NULL || schema_len == 0 || schema_len > 128 ||
-        statement_count == 0 || run_statement == NULL) {
+        invocation == NULL || invocation->struct_size < sizeof(*invocation) ||
+        invocation->abi_version != PRDB_QUERY_ABI_VERSION ||
+        run_statement == NULL) {
+        return PRDB_SDK_SQL_BATCH_INVALID_ARGUMENT;
+    }
+    if ((invocation->parameters_len != 0 && invocation->parameters == NULL)) {
+        return PRDB_SDK_SQL_BATCH_INVALID_ARGUMENT;
+    }
+    if (invocation->parameters_len > PRDB_SDK_SQL_BATCH_MAX_PARAMETER_BYTES) {
+        return PRDB_SDK_SQL_BATCH_LIMIT_EXCEEDED;
+    }
+    sql_data = invocation->sql_data;
+    sql_data_len = invocation->sql_data_len;
+    if (sql_data == NULL || sql_data_len < 8) {
+        return PRDB_SDK_SQL_BATCH_INVALID_ARGUMENT;
+    }
+    if (sql_data_len > PRDB_QUERY_MAX_SQL_DATA_BYTES) {
+        return PRDB_SDK_SQL_BATCH_LIMIT_EXCEEDED;
+    }
+    if (memcmp(sql_data, "PSQ1", 4) != 0) {
+        return PRDB_SDK_SQL_BATCH_INVALID_ARGUMENT;
+    }
+    schema_len = read_u16_be(sql_data + 4);
+    statement_count = read_u16_be(sql_data + 6);
+    if (schema_len == 0 || schema_len > 128 || statement_count == 0) {
         return PRDB_SDK_SQL_BATCH_INVALID_ARGUMENT;
     }
     if (statement_count > PRDB_SDK_SQL_BATCH_MAX_STATEMENTS) {
         return PRDB_SDK_SQL_BATCH_LIMIT_EXCEEDED;
     }
-    if (statements == NULL) return PRDB_SDK_SQL_BATCH_INVALID_ARGUMENT;
+    if (sql_data_len - 8 < schema_len) {
+        return PRDB_SDK_SQL_BATCH_INVALID_ARGUMENT;
+    }
+    schema = sql_data + 8;
+    statements_start = 8 + (uint64_t)schema_len;
+    offset = statements_start;
     for (uint32_t index = 0; index < statement_count; ++index) {
-        const prdb_sdk_sql_batch_statement_v1 *statement = &statements[index];
-        if (statement->sql == NULL || statement->sql_len == 0 ||
-            statement->parameters_len > PRDB_SDK_SQL_BATCH_MAX_PARAMETER_BYTES ||
-            (statement->parameters_len != 0 && statement->parameters == NULL)) {
+        uint8_t has_parameters;
+        uint32_t sql_len;
+        uint64_t stmt_param_len;
+        if (sql_data_len - offset < 8) {
             return PRDB_SDK_SQL_BATCH_INVALID_ARGUMENT;
         }
-        if (statement->sql_len > PRDB_SDK_SQL_BATCH_MAX_STATEMENT_BYTES ||
-            statement->sql_len > PRDB_SDK_SQL_BATCH_MAX_PACKAGE_BYTES - package_bytes) {
+        has_parameters = sql_data[offset];
+        if ((has_parameters != 0 && has_parameters != 1) ||
+            sql_data[offset + 1] != 0 || sql_data[offset + 2] != 0 ||
+            sql_data[offset + 3] != 0) {
+            return PRDB_SDK_SQL_BATCH_INVALID_ARGUMENT;
+        }
+        sql_len = read_u32_be(sql_data + offset + 4);
+        offset += 8;
+        if (sql_len == 0 || sql_data_len - offset < sql_len) {
+            return PRDB_SDK_SQL_BATCH_INVALID_ARGUMENT;
+        }
+        if (sql_len > PRDB_SDK_SQL_BATCH_MAX_STATEMENT_BYTES ||
+            sql_len > PRDB_SDK_SQL_BATCH_MAX_PACKAGE_BYTES - package_bytes) {
             return PRDB_SDK_SQL_BATCH_LIMIT_EXCEEDED;
         }
-        package_bytes += statement->sql_len;
-        if (statement->parameters_len >
-            PRDB_SDK_SQL_BATCH_MAX_PACKAGE_BYTES - package_bytes) {
+        package_bytes += sql_len;
+        stmt_param_len = has_parameters ? invocation->parameters_len : 0;
+        if (stmt_param_len > PRDB_SDK_SQL_BATCH_MAX_PACKAGE_BYTES - package_bytes) {
             return PRDB_SDK_SQL_BATCH_LIMIT_EXCEEDED;
         }
-        package_bytes += statement->parameters_len;
+        package_bytes += stmt_param_len;
+        offset += sql_len;
+    }
+    if (offset != sql_data_len) {
+        return PRDB_SDK_SQL_BATCH_INVALID_ARGUMENT;
     }
 
     context.base = host;
     context.statement_ordinal = 0;
     context.failure_latched = 0;
     wrapped_host = wrap_host(&context);
+    offset = statements_start;
     for (uint32_t index = 0; index < statement_count; ++index) {
         uint8_t failure_status[4];
+        uint8_t has_parameters = sql_data[offset];
+        uint32_t sql_len = read_u32_be(sql_data + offset + 4);
+        prdb_sdk_sql_batch_statement_v1 statement;
         int32_t status;
+        offset += 8;
+        statement.sql = sql_data + offset;
+        statement.sql_len = sql_len;
+        statement.parameters = has_parameters ? invocation->parameters : NULL;
+        statement.parameters_len =
+            has_parameters ? invocation->parameters_len : 0;
+        offset += sql_len;
+
         context.statement_ordinal = (uint16_t)index;
         if (emit_record(&context, PRDB_SDK_SQL_BATCH_EVENT_START, NULL, 0) != 0) {
             return latch_failure(&context, PRDB_QUERY_STATEMENT_FAILURE_SQL);
         }
         context.failure_latched = 0;
-        status = run_statement(&wrapped_host, schema, schema_len,
-                               &statements[index]);
+        status = run_statement(&wrapped_host, schema, schema_len, &statement);
         if (status != 0 || context.failure_latched) {
             write_u32_be(failure_status, (uint32_t)(status == 0
                                                         ? PRDB_SDK_SQL_BATCH_STATEMENT_FAILED

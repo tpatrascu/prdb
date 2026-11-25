@@ -1,0 +1,21 @@
+{
+  "agentMode": "turbo",
+  "permissionPreset": "turbo",
+  "permissions": {
+    "defaultMode": "accept-edits",
+    "allow": [
+      "edit_file(**)",
+      "write_file(**)",
+      "create_file(**)",
+      "delete_file(**)",
+      "move_file(**)"
+    ],
+    "ask": [],
+    "deny": []
+  },
+  "review": {
+    "requireApprovalForEdits": false,
+    "requireApprovalForDotfiles": false,
+    "requireApprovalForIgnoredFiles": false
+  }
+}

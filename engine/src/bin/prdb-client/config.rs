@@ -444,6 +444,7 @@ pub(super) fn run_configured_submission(
     let package = take_path(fields, "--package")?;
     let receipt = take_path(fields, "--receipt")?;
     let parameters_path = fields.remove("--parameters").map(PathBuf::from);
+    let sql_data_path = fields.remove("--sql-data").map(PathBuf::from);
     let deadline_ms = fields
         .remove("--deadline-ms")
         .map(|value| parse_number(value, "--deadline-ms"))
@@ -453,12 +454,14 @@ pub(super) fn run_configured_submission(
     reject_unknown(fields)?;
     validate_package_selection(&package, &instance.sdk)?;
     let mut parameters = read_parameters(parameters_path.as_ref())?;
+    let sql_data = read_sql_data_file(sql_data_path.as_ref())?;
     let result = submit_package_and_stream_with_profile(
         configured_address,
         credentials,
         &package,
         &receipt,
         &mut parameters,
+        sql_data.as_deref(),
         deadline_ms,
         workload,
         true,

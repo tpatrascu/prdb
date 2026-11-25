@@ -61,20 +61,25 @@ pub type QueryMainV1 = unsafe extern "C" fn(*const HostApiV1, *const InvocationV
 
 include!("query_abi_layout_assertions.rs");
 
-/// Invocation record whose parameter pointer is tied to the borrowed slice.
-/// Keep this value alive for the complete C entry-point call.
+/// Invocation record whose parameter and SQL data pointers are tied to the
+/// borrowed slices. Keep this value alive for the complete C entry-point call.
 #[must_use = "the invocation record must remain alive while the C entry point uses it"]
 #[derive(Debug)]
 pub struct BorrowedInvocationV1<'a> {
     record: InvocationV1,
     _parameters: std::marker::PhantomData<&'a [u8]>,
+    _sql_data: std::marker::PhantomData<&'a [u8]>,
 }
 
 impl<'a> BorrowedInvocationV1<'a> {
-    pub fn new(parameters: &'a [u8]) -> Result<Self, ParameterError> {
+    pub fn new(parameters: &'a [u8], sql_data: &'a [u8]) -> Result<Self, ParameterError> {
         let parameters_len =
             u64::try_from(parameters.len()).map_err(|_| ParameterError::TooLarge)?;
         if parameters_len > MAX_PARAMETER_BYTES {
+            return Err(ParameterError::TooLarge);
+        }
+        let sql_data_len = u64::try_from(sql_data.len()).map_err(|_| ParameterError::TooLarge)?;
+        if sql_data_len > MAX_SQL_DATA_BYTES {
             return Err(ParameterError::TooLarge);
         }
         let parameters_pointer = if parameters.is_empty() {
@@ -82,14 +87,22 @@ impl<'a> BorrowedInvocationV1<'a> {
         } else {
             parameters.as_ptr()
         };
+        let sql_data_pointer = if sql_data.is_empty() {
+            std::ptr::null()
+        } else {
+            sql_data.as_ptr()
+        };
         Ok(Self {
             record: InvocationV1 {
                 struct_size: std::mem::size_of::<InvocationV1>() as u32,
                 abi_version: QUERY_ABI_VERSION,
                 parameters: parameters_pointer,
                 parameters_len,
+                sql_data: sql_data_pointer,
+                sql_data_len,
             },
             _parameters: std::marker::PhantomData,
+            _sql_data: std::marker::PhantomData,
         })
     }
 

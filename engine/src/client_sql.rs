@@ -89,10 +89,47 @@ pub fn validate_schema_name(schema: &str) -> Result<(), SqlInputError> {
     Ok(())
 }
 
-/// Generate a fixed C wrapper for a lexed sequence of ordinary query or DML
-/// statements. Transaction control, DDL, and RUNAS blocks are handled by the
-/// higher-level dispatcher and cannot enter this package helper.
-pub fn generate_query_batch_source(schema: &str, sql: &[u8]) -> Result<Vec<u8>, SqlInputError> {
+/// Return the invariant C wrapper for a SQL batch package. SQL text and schema
+/// are supplied separately at runtime via `invocation->sql_data` (`PSQ1`).
+pub fn generate_query_batch_source() -> Vec<u8> {
+    br#"#include <stddef.h>
+#include "prdb_query_abi_v1.h"
+#include "prdb_sdk_sql_dispatch_v1.h"
+#include "prdb_sdk_sql_batch_v1.h"
+
+static int32_t dispatch_batch_statement(
+    const prdb_host_api_v1 *host, const uint8_t *schema, uint32_t schema_len,
+    const prdb_sdk_sql_batch_statement_v1 *statement) {
+    int32_t status = prdb_sdk_sql_run_statement_v1(
+        host, schema, schema_len, statement->sql, statement->sql_len,
+        statement->parameters, statement->parameters_len);
+    return status == PRDB_SDK_SQL_DISPATCH_OK ? 0 : status;
+}
+
+const prdb_query_descriptor_v1_record prdb_query_descriptor_v1 = {
+    sizeof(prdb_query_descriptor_v1_record), PRDB_QUERY_ABI_VERSION,
+    sizeof(prdb_host_api_v1), sizeof(prdb_invocation_v1)};
+
+int32_t prdb_query_main_v1(const prdb_host_api_v1 *host,
+                           const prdb_invocation_v1 *invocation) {
+    if (invocation == NULL || invocation->struct_size < sizeof(*invocation) ||
+        invocation->abi_version != PRDB_QUERY_ABI_VERSION) {
+        return 1;
+    }
+    return prdb_sdk_sql_run_batch_v1(host, invocation,
+                                     dispatch_batch_statement) ==
+                   PRDB_SDK_SQL_BATCH_OK
+               ? 0
+               : 1;
+}
+"#
+    .to_vec()
+}
+
+/// Encode a lexed sequence of ordinary query or DML statements into canonical
+/// `PSQ1` binary SQL batch data. Transaction control, DDL, and RUNAS blocks
+/// are handled by the higher-level dispatcher and cannot enter `PSQ1`.
+pub fn encode_sql_batch_data(schema: &str, sql: &[u8]) -> Result<Vec<u8>, SqlInputError> {
     validate_schema_name(schema)?;
     if sql.is_empty() || sql.len() > MAX_SQL_BYTES || sql.contains(&0) {
         return Err(SqlInputError::InvalidSql);
@@ -114,51 +151,30 @@ pub fn generate_query_batch_source(schema: &str, sql: &[u8]) -> Result<Vec<u8>, 
         })
         .collect::<Result<_, _>>()?;
 
-    let mut source = String::from(
-        "#include <stddef.h>\n#include \"prdb_query_abi_v1.h\"\n#include \"prdb_sdk_sql_dispatch_v1.h\"\n#include \"prdb_sdk_sql_batch_v1.h\"\n\n",
-    );
-    source.push_str("static const uint8_t sql_schema[] = {");
-    append_c_bytes(&mut source, schema.as_bytes());
-    source.push_str("};\n");
-    for (index, (query, _)) in queries.iter().enumerate() {
-        use std::fmt::Write as _;
-        let _ = write!(source, "static const uint8_t sql_text_{index}[] = {{");
-        append_c_bytes(&mut source, query.as_bytes());
-        source.push_str("};\n");
+    let schema_len = u16::try_from(schema.len()).map_err(|_| SqlInputError::InvalidSchema)?;
+    let statement_count = u16::try_from(queries.len()).map_err(|_| SqlInputError::TooLarge)?;
+    let total_bytes = 8usize
+        + schema.len()
+        + queries
+            .iter()
+            .map(|(query, _)| 8 + query.len())
+            .sum::<usize>();
+    if total_bytes as u64 > crate::query_abi::MAX_SQL_DATA_BYTES {
+        return Err(SqlInputError::TooLarge);
     }
-    source.push_str("\nstatic int32_t dispatch_batch_statement(const prdb_host_api_v1 *host, const uint8_t *schema, uint32_t schema_len, const prdb_sdk_sql_batch_statement_v1 *statement) {\n    int32_t status = prdb_sdk_sql_run_statement_v1(host, schema, schema_len, statement->sql, statement->sql_len, statement->parameters, statement->parameters_len);\n    return status == PRDB_SDK_SQL_DISPATCH_OK ? 0 : status;\n}\n\n");
-    source.push_str("const prdb_query_descriptor_v1_record prdb_query_descriptor_v1 = { sizeof(prdb_query_descriptor_v1_record), PRDB_QUERY_ABI_VERSION, sizeof(prdb_host_api_v1), sizeof(prdb_invocation_v1) };\n\nint32_t prdb_query_main_v1(const prdb_host_api_v1 *host, const prdb_invocation_v1 *invocation) {\n    if (invocation == NULL || invocation->struct_size < sizeof(*invocation) || invocation->abi_version != PRDB_QUERY_ABI_VERSION) return 1;\n    prdb_sdk_sql_batch_statement_v1 statements[] = {\n");
-    for (index, (_, has_parameters)) in queries.iter().enumerate() {
-        use std::fmt::Write as _;
-        if *has_parameters {
-            let _ = writeln!(
-                source,
-                "        {{sql_text_{index}, sizeof(sql_text_{index}), invocation->parameters, invocation->parameters_len}},"
-            );
-        } else {
-            let _ = writeln!(
-                source,
-                "        {{sql_text_{index}, sizeof(sql_text_{index}), NULL, 0}},"
-            );
-        }
+    let mut output = Vec::with_capacity(total_bytes);
+    output.extend_from_slice(b"PSQ1");
+    output.extend_from_slice(&schema_len.to_be_bytes());
+    output.extend_from_slice(&statement_count.to_be_bytes());
+    output.extend_from_slice(schema.as_bytes());
+    for (query, has_parameters) in queries {
+        let query_len = u32::try_from(query.len()).map_err(|_| SqlInputError::TooLarge)?;
+        output.push(u8::from(has_parameters));
+        output.extend_from_slice(&[0u8; 3]);
+        output.extend_from_slice(&query_len.to_be_bytes());
+        output.extend_from_slice(query.as_bytes());
     }
-    use std::fmt::Write as _;
-    let _ = writeln!(
-        source,
-        "    }};\n    return prdb_sdk_sql_run_batch_v1(host, sql_schema, sizeof(sql_schema), {}, statements, dispatch_batch_statement) == PRDB_SDK_SQL_BATCH_OK ? 0 : 1;\n}}",
-        queries.len()
-    );
-    Ok(source.into_bytes())
-}
-
-fn append_c_bytes(output: &mut String, bytes: &[u8]) {
-    for (index, byte) in bytes.iter().enumerate() {
-        if index != 0 {
-            output.push(',');
-        }
-        use std::fmt::Write as _;
-        let _ = write!(output, "0x{byte:02x}");
-    }
+    Ok(output)
 }
 
 pub fn encode_parameter_file(input: &[u8]) -> Result<Zeroizing<Vec<u8>>, SqlInputError> {
@@ -435,8 +451,8 @@ fn lower_hex_nibble(byte: u8) -> Result<u8, SqlInputError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_SQL_BYTES, SqlInputError, encode_parameter_file, generate_query_batch_source,
-        read_sql_from, validate_schema_name,
+        MAX_SQL_BYTES, SqlInputError, encode_parameter_file, encode_sql_batch_data,
+        generate_query_batch_source, read_sql_from, validate_schema_name,
     };
     use crate::client_submit::ResponseValue;
     use std::collections::HashMap;
@@ -619,47 +635,59 @@ mod tests {
     }
 
     #[test]
-    fn generated_batch_wrapper_uses_lexer_boundaries_and_statement_ordinals() {
-        let sql = b"SELECT name FROM employees; SELECT value FROM ledger;";
-        let source = generate_query_batch_source("public", sql).unwrap();
+    fn generated_batch_wrapper_is_invariant_and_sql_data_uses_lexer_boundaries() {
+        let source = generate_query_batch_source();
         let source = std::str::from_utf8(&source).unwrap();
-        assert!(source.contains("static const uint8_t sql_text_0[] = {"));
-        assert!(source.contains("static const uint8_t sql_text_1[] = {"));
         assert!(source.contains("prdb_sdk_sql_run_batch_v1"));
         assert!(source.contains("prdb_sdk_sql_run_statement_v1"));
-        assert!(source.contains("{sql_text_0, sizeof(sql_text_0), NULL, 0}"));
-        assert!(source.contains("{sql_text_1, sizeof(sql_text_1), NULL, 0}"));
-        assert!(!source.contains("SELECT name FROM employees"));
-        assert!(!source.contains("SELECT value FROM ledger"));
+        assert!(!source.contains("sql_text_"));
+        assert!(!source.contains("sql_schema"));
+
+        let sql = b"SELECT name FROM employees; SELECT value FROM ledger;";
+        let encoded = encode_sql_batch_data("public", sql).unwrap();
+        assert_eq!(&encoded[..4], b"PSQ1");
+        assert_eq!(u16::from_be_bytes([encoded[4], encoded[5]]), 6);
+        assert_eq!(u16::from_be_bytes([encoded[6], encoded[7]]), 2);
+        assert_eq!(&encoded[8..14], b"public");
         assert_eq!(
-            generate_query_batch_source("public", b"SELECT name FROM t; BEGIN;"),
+            encode_sql_batch_data("public", b"SELECT name FROM t; BEGIN;"),
             Err(SqlInputError::UnsupportedInteractiveStatement)
         );
         assert_eq!(
-            generate_query_batch_source("public", b"RUNAS reader\nSELECT name FROM t\nENDRUNAS"),
+            encode_sql_batch_data("public", b"RUNAS reader\nSELECT name FROM t\nENDRUNAS"),
             Err(SqlInputError::UnsupportedInteractiveStatement)
         );
-        let mixed_dml = generate_query_batch_source(
+        let mixed_dml = encode_sql_batch_data(
             "public",
             b"INSERT INTO t VALUES ($1); UPDATE t SET x = $2 WHERE id = $1;",
         )
         .unwrap();
-        let mixed_dml = std::str::from_utf8(&mixed_dml).unwrap();
-        assert!(mixed_dml.contains("prdb_sdk_sql_run_statement_v1"));
+        assert_eq!(&mixed_dml[..4], b"PSQ1");
+        assert_eq!(u16::from_be_bytes([mixed_dml[6], mixed_dml[7]]), 2);
     }
 
     #[test]
-    fn generated_batch_wrapper_passes_parameters_only_to_statements_that_reference_them() {
-        let source = generate_query_batch_source(
+    fn encoded_sql_data_marks_parameters_only_for_statements_that_reference_them() {
+        let encoded = encode_sql_batch_data(
             "public",
             b"INSERT INTO t VALUES ($1); SELECT '$1' FROM t; SELECT id FROM t -- $2\n",
         )
         .unwrap();
-        let source = std::str::from_utf8(&source).unwrap();
-        assert!(source.contains(
-            "{sql_text_0, sizeof(sql_text_0), invocation->parameters, invocation->parameters_len}"
-        ));
-        assert!(source.contains("{sql_text_1, sizeof(sql_text_1), NULL, 0}"));
-        assert!(source.contains("{sql_text_2, sizeof(sql_text_2), NULL, 0}"));
+        assert_eq!(&encoded[..4], b"PSQ1");
+        assert_eq!(u16::from_be_bytes([encoded[6], encoded[7]]), 3);
+        let mut offset = 8 + "public".len();
+        let mut flags = Vec::new();
+        for _ in 0..3 {
+            flags.push(encoded[offset]);
+            let len = u32::from_be_bytes([
+                encoded[offset + 4],
+                encoded[offset + 5],
+                encoded[offset + 6],
+                encoded[offset + 7],
+            ]) as usize;
+            offset += 8 + len;
+        }
+        assert_eq!(offset, encoded.len());
+        assert_eq!(flags, vec![1, 0, 0]);
     }
 }

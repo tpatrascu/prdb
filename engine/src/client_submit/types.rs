@@ -577,4 +577,5 @@ pub struct PackageBytes {
     pub artifact: Vec<u8>,
     pub manifest: Vec<u8>,
     pub scope: Vec<u8>,
+    pub sql_data: Vec<u8>,
 }

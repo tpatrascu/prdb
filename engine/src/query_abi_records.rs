@@ -20,6 +20,8 @@ pub struct InvocationV1 {
     pub abi_version: u32,
     pub parameters: *const u8,
     pub parameters_len: u64,
+    pub sql_data: *const u8,
+    pub sql_data_len: u64,
 }
 
 #[repr(C)]

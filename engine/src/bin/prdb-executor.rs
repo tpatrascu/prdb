@@ -47,6 +47,7 @@ mod worker {
     struct WorkerArgs {
         library: PathBuf,
         parameters_fd: i32,
+        sql_data_fd: i32,
         planner_fd: i32,
         executor_fd: i32,
         optimizer_fd: i32,
@@ -87,18 +88,19 @@ mod worker {
     }
 
     fn parse_args(values: &[std::ffi::OsString]) -> Result<WorkerArgs, String> {
-        if values.len() != 18
+        if values.len() != 20
             || values[0] != "--library"
             || values[2] != "--parameters-fd"
-            || values[4] != "--planner-fd"
-            || values[6] != "--executor-fd"
-            || values[8] != "--optimizer-fd"
-            || values[10] != "--result-fd"
-            || values[12] != "--spill-fd"
-            || values[14] != "--max-total-result-bytes"
-            || values[16] != "--max-sql-index-probe-candidates"
+            || values[4] != "--sql-data-fd"
+            || values[6] != "--planner-fd"
+            || values[8] != "--executor-fd"
+            || values[10] != "--optimizer-fd"
+            || values[12] != "--result-fd"
+            || values[14] != "--spill-fd"
+            || values[16] != "--max-total-result-bytes"
+            || values[18] != "--max-sql-index-probe-candidates"
         {
-            return Err("usage: prdb-executor --library ABSOLUTE_PATH --parameters-fd FD --planner-fd FD --executor-fd FD --optimizer-fd FD --result-fd FD --spill-fd FD --max-total-result-bytes N --max-sql-index-probe-candidates N (or --self-check)".to_owned());
+            return Err("usage: prdb-executor --library ABSOLUTE_PATH --parameters-fd FD --sql-data-fd FD --planner-fd FD --executor-fd FD --optimizer-fd FD --result-fd FD --spill-fd FD --max-total-result-bytes N --max-sql-index-probe-candidates N (or --self-check)".to_owned());
         }
         let library = PathBuf::from(&values[1]);
         if !library.is_absolute() {
@@ -109,32 +111,37 @@ mod worker {
             .ok_or_else(|| "parameter descriptor is not UTF-8".to_owned())?
             .parse::<i32>()
             .map_err(|_| "invalid parameter descriptor".to_owned())?;
-        let planner_fd = values[5]
+        let sql_data_fd = values[5]
+            .to_str()
+            .ok_or_else(|| "SQL data descriptor is not UTF-8".to_owned())?
+            .parse::<i32>()
+            .map_err(|_| "invalid SQL data descriptor".to_owned())?;
+        let planner_fd = values[7]
             .to_str()
             .ok_or_else(|| "planner descriptor is not UTF-8".to_owned())?
             .parse::<i32>()
             .map_err(|_| "invalid planner descriptor".to_owned())?;
-        let executor_fd = values[7]
+        let executor_fd = values[9]
             .to_str()
             .ok_or_else(|| "executor descriptor is not UTF-8".to_owned())?
             .parse::<i32>()
             .map_err(|_| "invalid executor descriptor".to_owned())?;
-        let optimizer_fd = values[9]
+        let optimizer_fd = values[11]
             .to_str()
             .ok_or_else(|| "optimizer descriptor is not UTF-8".to_owned())?
             .parse::<i32>()
             .map_err(|_| "invalid optimizer descriptor".to_owned())?;
-        let result_fd = values[11]
+        let result_fd = values[13]
             .to_str()
             .ok_or_else(|| "result descriptor is not UTF-8".to_owned())?
             .parse::<i32>()
             .map_err(|_| "invalid result descriptor".to_owned())?;
-        let spill_fd = values[13]
+        let spill_fd = values[15]
             .to_str()
             .ok_or_else(|| "spill descriptor is not UTF-8".to_owned())?
             .parse::<i32>()
             .map_err(|_| "invalid spill descriptor".to_owned())?;
-        let max_total_result_bytes = values[15]
+        let max_total_result_bytes = values[17]
             .to_str()
             .ok_or_else(|| "result budget is not UTF-8".to_owned())?
             .parse::<u64>()
@@ -142,7 +149,7 @@ mod worker {
         if max_total_result_bytes == 0 {
             return Err("result budget must be positive".to_owned());
         }
-        let max_sql_index_probe_candidates = values[17]
+        let max_sql_index_probe_candidates = values[19]
             .to_str()
             .ok_or_else(|| "index candidate budget is not UTF-8".to_owned())?
             .parse::<u32>()
@@ -154,6 +161,7 @@ mod worker {
             return Err("index candidate budget is outside the supported envelope".to_owned());
         }
         if parameters_fd < 3
+            || sql_data_fd < 3
             || planner_fd < 3
             || executor_fd < 3
             || optimizer_fd < 3
@@ -164,6 +172,7 @@ mod worker {
         }
         let mut descriptors = vec![
             parameters_fd,
+            sql_data_fd,
             planner_fd,
             executor_fd,
             optimizer_fd,
@@ -182,6 +191,7 @@ mod worker {
         Ok(WorkerArgs {
             library,
             parameters_fd,
+            sql_data_fd,
             planner_fd,
             executor_fd,
             optimizer_fd,
@@ -303,11 +313,20 @@ mod worker {
         // this symbol as QueryMainV1. A bad function pointer terminates worker.
         let entry: QueryMainV1 = unsafe { std::mem::transmute(entry_address) };
 
-        let parameters = read_parameters(args.parameters_fd)?;
-        let invocation = BorrowedInvocationV1::new(&parameters).map_err(|error| {
+        let parameters = read_bounded_fd(
+            args.parameters_fd,
+            prdb_engine::query_abi::MAX_PARAMETER_BYTES,
+            "invocation parameters exceed the ABI limit",
+        )?;
+        let sql_data = read_bounded_fd(
+            args.sql_data_fd,
+            prdb_engine::query_abi::MAX_SQL_DATA_BYTES,
+            "invocation SQL data exceeds the ABI limit",
+        )?;
+        let invocation = BorrowedInvocationV1::new(&parameters, &sql_data).map_err(|error| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("invalid parameters: {error:?}"),
+                format!("invalid parameters or SQL data: {error:?}"),
             )
         })?;
         let context = unsafe {
@@ -833,20 +852,16 @@ mod worker {
         .unwrap_or(CALLBACK_INTERNAL_ERROR)
     }
 
-    fn read_parameters(fd: i32) -> io::Result<Vec<u8>> {
-        // SAFETY: the launcher passes an open parameter pipe/memfd and this
-        // worker takes ownership of the descriptor for the rest of its life.
+    fn read_bounded_fd(fd: i32, limit: u64, limit_message: &str) -> io::Result<Vec<u8>> {
+        // SAFETY: the launcher passes an open pipe/memfd and this worker takes
+        // ownership of the descriptor for the rest of its life.
         let file = unsafe { std::fs::File::from_raw_fd(fd) };
-        let mut parameters = Vec::new();
-        file.take(prdb_engine::query_abi::MAX_PARAMETER_BYTES + 1)
-            .read_to_end(&mut parameters)?;
-        if parameters.len() as u64 > prdb_engine::query_abi::MAX_PARAMETER_BYTES {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invocation parameters exceed the ABI limit",
-            ));
+        let mut bytes = Vec::new();
+        file.take(limit + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > limit {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, limit_message));
         }
-        Ok(parameters)
+        Ok(bytes)
     }
 
     fn c_path(path: &OsStr) -> io::Result<CString> {
@@ -925,16 +940,18 @@ mod worker {
                 "/tmp/query.so",
                 "--parameters-fd",
                 "3",
-                "--planner-fd",
+                "--sql-data-fd",
                 "4",
-                "--executor-fd",
+                "--planner-fd",
                 "5",
-                "--optimizer-fd",
+                "--executor-fd",
                 "6",
-                "--result-fd",
+                "--optimizer-fd",
                 "7",
-                "--spill-fd",
+                "--result-fd",
                 "8",
+                "--spill-fd",
+                "9",
                 "--max-total-result-bytes",
                 "67108864",
                 "--max-sql-index-probe-candidates",
@@ -942,10 +959,10 @@ mod worker {
             ];
             let values = arguments.map(std::ffi::OsString::from);
             let parsed = parse_args(&values).unwrap();
-            assert_eq!(parsed.spill_fd, 8);
+            assert_eq!(parsed.spill_fd, 9);
 
             let mut disabled = arguments.map(std::ffi::OsString::from);
-            disabled[13] = std::ffi::OsString::from("-1");
+            disabled[15] = std::ffi::OsString::from("-1");
             assert_eq!(parse_args(&disabled).unwrap().spill_fd, -1);
 
             let duplicate = [
@@ -953,16 +970,18 @@ mod worker {
                 "/tmp/query.so",
                 "--parameters-fd",
                 "3",
-                "--planner-fd",
+                "--sql-data-fd",
                 "4",
-                "--executor-fd",
+                "--planner-fd",
                 "5",
-                "--optimizer-fd",
+                "--executor-fd",
                 "6",
+                "--optimizer-fd",
+                "7",
                 "--result-fd",
-                "7",
+                "8",
                 "--spill-fd",
-                "7",
+                "8",
                 "--max-total-result-bytes",
                 "67108864",
                 "--max-sql-index-probe-candidates",

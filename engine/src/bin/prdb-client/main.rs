@@ -25,7 +25,7 @@ const USAGE: &str = "Usage:\n\
   prdb-client instance show [--instance NAME] [--config FILE]\n\
   prdb-client instance set --instance NAME --address IP --port N [SDK options] \\\n    --default-credential PROFILE --username USER --credentials FILE \\\n    [--include-dir DIR --tcc FILE --shared-linker FILE --patchelf FILE] \\\n    [--make-default true|false] [--config FILE]\n\
   prdb-client sdk-library list|select|install|remove --instance NAME [options]\n\
-  prdb-client submit --address IP:PORT --credentials FILE --package DIR --receipt FILE \\\n    [--parameters FILE] [--deadline-ms N] [--workload operational|analytical]\n\
+  prdb-client submit --address IP:PORT --credentials FILE --package DIR --receipt FILE \\\n    [--parameters FILE] [--sql-data FILE] [--deadline-ms N] [--workload operational|analytical]\n\
   prdb-client interactive-sql --address LOOPBACK:PORT --credentials FILE --default-user USER \\
     [--credential-profile USER=FILE ...] [--sql-file FILE|-] --schema NAME --scope FILE \\
     --sdk-library FILE --include-dir DIR --sdk-release N --cpu-baseline NAME \\

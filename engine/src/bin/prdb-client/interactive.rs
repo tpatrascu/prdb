@@ -445,27 +445,31 @@ pub(super) fn execute_interactive_package(
     if *abort_only {
         return Err("transaction is abort-only; issue ROLLBACK".to_owned());
     }
-    let generated_source = prdb_engine::client_sql::generate_query_batch_source(schema, sql)
+    let sql_data = prdb_engine::client_sql::encode_sql_batch_data(schema, sql)
         .map_err(|error| error.to_string())?;
-    let source_path = workspace.join(format!("interactive-{ordinal}.c"));
-    let package_dir = workspace.join(format!("interactive-package-{ordinal}"));
-    write_private_file(&source_path, &generated_source)?;
-    let package_options = PackageOptions {
-        tcc: tcc.to_path_buf(),
-        shared_linker: shared_linker.to_path_buf(),
-        patchelf: patchelf.to_path_buf(),
-        source: source_path,
-        sdk_library: sdk_library.to_path_buf(),
-        include_dir: include_dir.to_path_buf(),
-        requested_scope: requested_scope.to_path_buf(),
-        output_dir: package_dir.clone(),
-        native_abi_version: 1,
-        sdk_release,
-        cpu_baseline: cpu_baseline.to_owned(),
-        runtime_profile: runtime_profile.to_owned(),
-        compiler_identity: compiler_identity.to_owned(),
-    };
-    package_query_repository(&package_options).map_err(|error| error.to_string())?;
+    let package_dir = workspace.join("sql-batch-package");
+    if !package_dir.exists() {
+        let generated_source = prdb_engine::client_sql::generate_query_batch_source();
+        let source_path = workspace.join("sql-batch.c");
+        write_private_file(&source_path, &generated_source)?;
+        let package_options = PackageOptions {
+            tcc: tcc.to_path_buf(),
+            shared_linker: shared_linker.to_path_buf(),
+            patchelf: patchelf.to_path_buf(),
+            source: source_path,
+            sql_data: None,
+            sdk_library: sdk_library.to_path_buf(),
+            include_dir: include_dir.to_path_buf(),
+            requested_scope: requested_scope.to_path_buf(),
+            output_dir: package_dir.clone(),
+            native_abi_version: 1,
+            sdk_release,
+            cpu_baseline: cpu_baseline.to_owned(),
+            runtime_profile: runtime_profile.to_owned(),
+            compiler_identity: compiler_identity.to_owned(),
+        };
+        package_query_repository(&package_options).map_err(|error| error.to_string())?;
+    }
     let receipt = workspace.join(format!("interactive-{ordinal}.receipt"));
     let mut package_parameters = Zeroizing::new(parameters.to_vec());
     if let Some(transaction_id) = transaction_id {
@@ -491,9 +495,10 @@ pub(super) fn execute_interactive_package(
         }
         let package_id = random_nonzero_id()?;
         let invocation_id = client
-            .upload_interactive_package_and_seal(
+            .upload_interactive_package_and_seal_with_sql_data(
                 &package_dir,
                 &package_parameters,
+                &sql_data,
                 deadline_ms,
                 workload,
                 transaction_id,
@@ -565,6 +570,7 @@ pub(super) fn execute_interactive_package(
             &package_dir,
             &receipt,
             &mut package_parameters,
+            &sql_data,
             InteractiveExecutionSettings {
                 deadline_ms,
                 workload,
@@ -607,6 +613,7 @@ pub(super) fn stream_autocommit_interactive_package(
     package: &Path,
     receipt: &Path,
     parameters: &mut [u8],
+    sql_data: &[u8],
     settings: InteractiveExecutionSettings,
 ) -> Result<(), String> {
     let InteractiveExecutionSettings {
@@ -625,7 +632,7 @@ pub(super) fn stream_autocommit_interactive_package(
         )
         .map_err(|error| error.to_string())?;
         let invocation_id = client
-            .upload_and_seal(package, parameters, deadline_ms, workload)
+            .upload_and_seal_with_sql_data(package, parameters, sql_data, deadline_ms, workload)
             .map_err(|error| error.to_string())?;
         match client.start(invocation_id, receipt) {
             Ok(mut started) => {

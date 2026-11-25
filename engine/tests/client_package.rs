@@ -772,11 +772,7 @@ fn generated_query_artifact_is_independent_of_parameter_values() {
     let mut scope = b"PSC1\0\x01\x01\x01".to_vec();
     scope.extend_from_slice(&[0x35; 16]);
     fs::write(&scope_path, scope).unwrap();
-    fs::write(
-        &source_path,
-        generate_query_batch_source("public", b"SELECT $1").unwrap(),
-    )
-    .unwrap();
+    fs::write(&source_path, generate_query_batch_source()).unwrap();
 
     let build = Command::new("make")
         .current_dir(&root)
@@ -1068,7 +1064,8 @@ fn packager_compiles_and_atomically_publishes_metadata_without_loading_query() {
         assert_eq!(decoded.parameter_bytes as usize, expected_parameters.len());
         let expected_parameter_hash: [u8; 32] = Sha256::digest(&expected_parameters).into();
         assert_eq!(decoded.parameter_sha256, expected_parameter_hash);
-        write_server_response(&mut stream, &prepare, br#"{"invocation_id":"01010101010101010101010101010101","artifact_chunk_bytes":131072,"parameter_chunk_bytes":131072}"#);
+        assert_eq!(decoded.sql_data_bytes, 0);
+        write_server_response(&mut stream, &prepare, br#"{"invocation_id":"01010101010101010101010101010101","artifact_chunk_bytes":131072,"parameter_chunk_bytes":131072,"sql_data_chunk_bytes":131072}"#);
         let mut offset = 0usize;
         while offset < expected_artifact.len() {
             let frame = read_client_frame(&mut stream, &mut decoder);
@@ -1270,7 +1267,7 @@ fn packager_compiles_and_atomically_publishes_metadata_without_loading_query() {
         write_server_response(
             &mut stream,
             &prepare,
-            br#"{"invocation_id":"02020202020202020202020202020202","artifact_chunk_bytes":131072,"parameter_chunk_bytes":131072}"#,
+            br#"{"invocation_id":"02020202020202020202020202020202","artifact_chunk_bytes":131072,"parameter_chunk_bytes":131072,"sql_data_chunk_bytes":131072}"#,
         );
         for (kind, bytes) in [(4, repository_artifact), (5, repository_parameters)] {
             let mut offset = 0usize;

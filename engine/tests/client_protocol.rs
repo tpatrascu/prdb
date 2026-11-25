@@ -164,7 +164,7 @@ fn request_id_sequence_tracks_frames_independently_of_authorization() {
 fn prepare_decoder_enforces_exact_canonical_schema_and_limits() {
     let hash = "00".repeat(32);
     let payload = format!(
-        "{{\"manifest_version\":1,\"manifest\":\"bQ==\",\"artifact_bytes\":\"3\",\"artifact_sha256\":\"{hash}\",\"parameter_bytes\":\"0\",\"parameter_sha256\":\"{hash}\",\"scope_version\":1,\"requested_scope\":\"cw==\",\"deadline_ms\":\"30000\",\"workload_class\":\"analytical\",\"sdk_library_mode\":\"repository\"}}"
+        "{{\"manifest_version\":1,\"manifest\":\"bQ==\",\"artifact_bytes\":\"3\",\"artifact_sha256\":\"{hash}\",\"parameter_bytes\":\"0\",\"parameter_sha256\":\"{hash}\",\"sql_data_bytes\":\"0\",\"sql_data_sha256\":\"{hash}\",\"scope_version\":1,\"requested_scope\":\"cw==\",\"deadline_ms\":\"30000\",\"workload_class\":\"analytical\",\"sdk_library_mode\":\"repository\"}}"
     );
     let prepare = decode_client_prepare(payload.as_bytes()).unwrap();
     assert_eq!(prepare.manifest, b"m");

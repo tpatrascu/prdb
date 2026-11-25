@@ -301,7 +301,10 @@ impl ClientConnectionSession {
         request: ClientFrame,
     ) -> Result<ClientFrame, ClientSessionError> {
         if request.response_sequence != 0
-            || !matches!(request.kind, 4 | 5 | 12 | CLIENT_SDK_LIBRARY_CHUNK_KIND)
+            || !matches!(
+                request.kind,
+                4 | 5 | 12 | CLIENT_SDK_LIBRARY_CHUNK_KIND | CLIENT_SQL_DATA_CHUNK_KIND
+            )
         {
             return Err(ClientSessionError::UnsupportedRequest);
         }
@@ -346,6 +349,7 @@ impl ClientConnectionSession {
         let kind = match request.kind {
             4 => crate::supervisor::ChunkKind::Artifact,
             5 => crate::supervisor::ChunkKind::Parameters,
+            CLIENT_SQL_DATA_CHUNK_KIND => crate::supervisor::ChunkKind::SqlData,
             _ => unreachable!("chunk kind was checked"),
         };
         let next_offset = staging
@@ -406,6 +410,8 @@ impl ClientConnectionSession {
                     requested_scope: prepare.requested_scope,
                     parameter_bytes: prepare.parameter_bytes,
                     parameter_sha256: prepare.parameter_sha256,
+                    sql_data_bytes: prepare.sql_data_bytes,
+                    sql_data_sha256: prepare.sql_data_sha256,
                     deadline_ms: prepare.deadline_ms,
                     workload_class: prepare.workload_class,
                 },
@@ -425,7 +431,7 @@ impl ClientConnectionSession {
         }
         let invocation_id = encode_lower_hex_id(reservation.invocation_id);
         let payload = format!(
-            "{{\"invocation_id\":\"{invocation_id}\",\"artifact_chunk_bytes\":{CLIENT_MAX_CHUNK_BYTES},\"parameter_chunk_bytes\":{CLIENT_MAX_CHUNK_BYTES}}}"
+            "{{\"invocation_id\":\"{invocation_id}\",\"artifact_chunk_bytes\":{CLIENT_MAX_CHUNK_BYTES},\"parameter_chunk_bytes\":{CLIENT_MAX_CHUNK_BYTES},\"sql_data_chunk_bytes\":{CLIENT_MAX_CHUNK_BYTES}}}"
         );
         Ok(ClientFrame {
             kind: 100,
@@ -1073,7 +1079,9 @@ impl ClientConnectionSession {
             return kind == 2 || kind == 11;
         };
         match mode {
-            ClientMode::Query => (3..=9).contains(&kind) || kind == 11,
+            ClientMode::Query => {
+                (3..=9).contains(&kind) || matches!(kind, 11 | CLIENT_SQL_DATA_CHUNK_KIND)
+            }
             ClientMode::Control => {
                 (8..=10).contains(&kind) || matches!(kind, 11 | CLIENT_SDK_LIBRARY_CHUNK_KIND)
             }
