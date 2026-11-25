@@ -756,7 +756,7 @@ fn run_operational_read_commit_samples(
                             .map_err(|error| {
                                 format!("operational authorized point read: {error:?}")
                             })?;
-                        if point_read.is_none_or(|cells| cells.len() != 2) {
+                        if point_read.is_none_or(|cells| !(2..=3).contains(&cells.len())) {
                             return Err(
                                 "operational point read returned an unexpected row shape".into()
                             );
@@ -41299,7 +41299,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 None
             },
             max_authorized_index_range_bytes: 16 * 1024 * 1024,
-            max_analytical_authorized_index_range_bytes: None,
+            max_analytical_authorized_index_range_bytes: sql_in_elevated_budget_only
+                .then_some(32 * 1024 * 1024),
             max_analytical_invocation_scan_work: indexed_join_benchmark_only.then_some(1_048_576),
             max_planner_estimate_requests: if sql_in_elevated_budget_only { 1 } else { 16 },
             max_analytical_planner_estimate_requests: sql_in_elevated_budget_only.then_some(64),
@@ -41423,27 +41424,37 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     let composite_table_invocation = id(0xd0);
     let mut composite_table_audit = identity_audit_event(0xd1, user_id, schema.schema_id);
     composite_table_audit.correlation_id = composite_table_invocation;
+    let mut composite_table_columns = vec![
+        TableColumnDefinition {
+            name: "left_key".to_owned(),
+            scalar_type: ScalarType::Integer,
+            nullable: sql_in_null_left_only,
+            generated_uuid_identity: false,
+            default: None,
+        },
+        TableColumnDefinition {
+            name: "right_key".to_owned(),
+            scalar_type: ScalarType::Integer,
+            nullable: false,
+            generated_uuid_identity: false,
+            default: None,
+        },
+    ];
+    if sql_in_elevated_budget_only {
+        composite_table_columns.push(TableColumnDefinition {
+            name: "large_payload".to_owned(),
+            scalar_type: ScalarType::Text,
+            nullable: false,
+            generated_uuid_identity: false,
+            default: None,
+        });
+    }
     let composite_table = storage.create_table(CreateTableRequest {
         invocation_id: composite_table_invocation,
         authenticated_actor_id: user_id,
         schema_id: schema.schema_id,
         name: "grouped_records".to_owned(),
-        columns: vec![
-            TableColumnDefinition {
-                name: "left_key".to_owned(),
-                scalar_type: ScalarType::Integer,
-                nullable: sql_in_null_left_only,
-                generated_uuid_identity: false,
-                default: None,
-            },
-            TableColumnDefinition {
-                name: "right_key".to_owned(),
-                scalar_type: ScalarType::Integer,
-                nullable: false,
-                generated_uuid_identity: false,
-                default: None,
-            },
-        ],
+        columns: composite_table_columns,
         retention_deadline_us: now + 3_600_000_000,
         audit_event: composite_table_audit,
     })?;
@@ -41530,7 +41541,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         retention_deadline_us: now + 3_600_000_000,
         audit_event: pressure_table_audit,
     })?;
-    let composite_schema = [
+    let mut composite_schema = vec![
         ColumnSchema {
             scalar_type: ScalarType::Integer,
             nullable: sql_in_null_left_only,
@@ -41540,6 +41551,12 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             nullable: false,
         },
     ];
+    if sql_in_elevated_budget_only {
+        composite_schema.push(ColumnSchema {
+            scalar_type: ScalarType::Text,
+            nullable: false,
+        });
+    }
     // Keep the authorized-view population above the optimizer's small-scan
     // cutoff so the confined range acceptance exercises ScanIndexRange.
     let composite_seed_rows =
@@ -41581,17 +41598,17 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     let mut composite_rows = composite_seed_rows
         .into_iter()
         .map(|(row_id, left, right)| {
+            let mut values = vec![
+                Some(ScalarValue::Integer(left)),
+                Some(ScalarValue::Integer(right)),
+            ];
+            if sql_in_elevated_budget_only {
+                values.push(Some(ScalarValue::Text(String::new())));
+            }
             Ok(RowWrite {
                 key: table_row_key(composite_table.table_id, id(row_id)),
                 expected_version: None,
-                payload: Some(encode_tuple(
-                    &composite_schema,
-                    1,
-                    &[
-                        Some(ScalarValue::Integer(left)),
-                        Some(ScalarValue::Integer(right)),
-                    ],
-                )?),
+                payload: Some(encode_tuple(&composite_schema, 1, &values)?),
             })
         })
         .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
@@ -41601,18 +41618,27 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         } else {
             124u16
         };
+        let large_range_payload = "x".repeat(17 * 1024);
+        let mut large_range_bytes = 0usize;
         for row_id in 1..=duplicate_rows {
             let mut row_id_bytes = [0; 16];
             row_id_bytes[14..].copy_from_slice(&row_id.to_be_bytes());
+            let mut values = vec![Some(ScalarValue::Integer(1)), Some(ScalarValue::Integer(7))];
+            if sql_in_elevated_budget_only {
+                values.push(Some(ScalarValue::Text(large_range_payload.clone())));
+            }
+            let payload = encode_tuple(&composite_schema, 1, &values)?;
+            if sql_in_elevated_budget_only {
+                large_range_bytes = large_range_bytes.saturating_add(payload.len());
+            }
             composite_rows.push(RowWrite {
                 key: table_row_key(composite_table.table_id, row_id_bytes),
                 expected_version: None,
-                payload: Some(encode_tuple(
-                    &composite_schema,
-                    1,
-                    &[Some(ScalarValue::Integer(1)), Some(ScalarValue::Integer(7))],
-                )?),
+                payload: Some(payload),
             });
+        }
+        if sql_in_elevated_budget_only {
+            assert!(large_range_bytes > 16 * 1024 * 1024);
         }
     }
     commit_rows(
@@ -42192,6 +42218,9 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     ];
     if count_bigint_only {
         authority_writes.push(dependency_write(user_id, decimal_table.column_ids[3], 5));
+    }
+    if sql_in_elevated_budget_only {
+        authority_writes.push(dependency_write(user_id, composite_table.column_ids[2], 5));
     }
     if spill_join_oversize_only || spill_join_text_only || elevated_result_only {
         let payload_column_index = if count_bigint_only { 4 } else { 3 };
@@ -43462,10 +43491,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     };
     assert_eq!(
         joined_pairs,
-        if sql_in_denied_key_only {
+        if sql_in_denied_key_only || sql_in_elevated_budget_only {
             None
-        } else if sql_in_elevated_budget_only {
-            Some(1_025)
         } else if sql_in_over_budget_only {
             Some(126)
         } else {
@@ -43879,6 +43906,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
+        let ordered_query_started_at = std::time::Instant::now();
         let (ordered_accepted, mut ordered_invocation, mut ordered_executor) = ordered_client
             .handle_start_request_with_executor(
                 &storage,
@@ -44224,6 +44252,12 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         ) = ordered_reader
             .join()
             .map_err(|_| "ordered analytical gateway reader panicked")??;
+        if sql_in_elevated_budget_only {
+            eprintln!(
+                "confined indexed IN over-16-MiB range invocation latency: {:.3} ms",
+                ordered_query_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
         if let Some(started_at) = elevated_result_started_at {
             assert_eq!(
                 discarded_result_bytes,
@@ -45517,10 +45551,13 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                             .map_err(|error| {
                                 format!("operational authorized point read: {error:?}")
                             })?;
-                        if point_read.is_none_or(|cells| cells.len() != 2) {
-                            return Err(
-                                "operational point read returned an unexpected row shape".into()
-                            );
+                        if point_read.as_ref().is_none_or(|cells| {
+                            cells.len() < 2 || cells.len() > 2 + usize::from(sql_in_elevated_budget_only)
+                        }) {
+                            return Err(format!(
+                                "operational point read returned an unexpected row shape: {:?}",
+                                point_read.as_ref().map(Vec::len)
+                            ));
                         }
                         let point_read_latency = point_read_started.elapsed();
                         let expected_scan_rows = if sql_in_elevated_budget_only {
