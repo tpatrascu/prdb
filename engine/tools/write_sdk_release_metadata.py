@@ -20,7 +20,8 @@ REQUIRED_EXPORTS = (
     "prdb_sdk_manifest_encode_v1",
     "prdb_sdk_scope_encode_v1",
     "prdb_sdk_sql_parse_select_v1",
-    "prdb_sdk_optimizer_execute_update_ast_v1",
+    "prdb_sdk_optimizer_execute_update_unified_v1",
+    "prdb_sdk_optimizer_execute_select_unified_v1",
 )
 
 

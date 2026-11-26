@@ -215,24 +215,24 @@ pub(super) fn unique_constraint_uses_its_backing_index_for_invocation_writes()
     };
     let visible_row_count = index_profile_rows + 2;
     let expected_small_population = (visible_row_count
-        <= prdb_engine::optimizer_plan::SMALL_POPULATION_SCAN_ROWS)
+        <= prdb_engine::optimizer_cost::SMALL_POPULATION_SCAN_ROWS)
         .then_some(visible_row_count);
     assert_eq!(
         invocation.estimate_authorized_population_at_most(
             table_id,
             &projection,
-            prdb_engine::optimizer_plan::SMALL_POPULATION_SCAN_ROWS,
+            prdb_engine::optimizer_cost::SMALL_POPULATION_SCAN_ROWS,
         )?,
         expected_small_population
     );
     let expected_join_population = (visible_row_count
-        <= prdb_engine::optimizer_plan::JOIN_POPULATION_ESTIMATE_MAX_ROWS)
+        <= prdb_engine::optimizer_cost::JOIN_POPULATION_ESTIMATE_MAX_ROWS)
         .then_some(visible_row_count);
     assert_eq!(
         invocation.estimate_authorized_population_at_most(
             table_id,
             &projection,
-            prdb_engine::optimizer_plan::JOIN_POPULATION_ESTIMATE_MAX_ROWS,
+            prdb_engine::optimizer_cost::JOIN_POPULATION_ESTIMATE_MAX_ROWS,
         )?,
         expected_join_population
     );
@@ -299,12 +299,12 @@ pub(super) fn unique_constraint_uses_its_backing_index_for_invocation_writes()
             let small_population = invocation.estimate_authorized_population_at_most(
                 table_id,
                 &projection,
-                prdb_engine::optimizer_plan::SMALL_POPULATION_SCAN_ROWS,
+                prdb_engine::optimizer_cost::SMALL_POPULATION_SCAN_ROWS,
             )?;
             small_population_probe_times.push(started.elapsed());
             let total_rows = index_profile_rows + 2;
             let expected_population = (total_rows
-                <= prdb_engine::optimizer_plan::SMALL_POPULATION_SCAN_ROWS)
+                <= prdb_engine::optimizer_cost::SMALL_POPULATION_SCAN_ROWS)
                 .then_some(total_rows);
             assert_eq!(small_population, expected_population);
 
@@ -396,28 +396,34 @@ pub(super) fn unique_constraint_uses_its_backing_index_for_invocation_writes()
             let expected_rows = (0..index_profile_matches)
                 .map(|number| numbered_row_id(table_id, number + 1_000))
                 .collect::<Vec<_>>();
-            let key_column = prdb_engine::optimizer_binding::BoundColumn {
+            let key_column = prdb_engine::optimizer_ir::BoundColumn {
                 column_id,
                 ordinal: 0,
                 scalar_type: schema.columns[0].scalar_type,
                 nullable: schema.columns[0].nullable,
             };
-            let range_predicate = prdb_engine::optimizer_binding::BoundPredicate::And(vec![
-                prdb_engine::optimizer_binding::BoundPredicate::Compare {
-                    operator: prdb_engine::optimizer_request::Comparison::GreaterOrEqual,
-                    left: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Column(
-                        key_column.clone(),
+            let range_predicate = prdb_engine::optimizer_ir::BoundExpr::And(vec![
+                prdb_engine::optimizer_ir::BoundExpr::Compare {
+                    op: prdb_engine::optimizer_ir::Comparison::GreaterOrEqual,
+                    left: Box::new(prdb_engine::optimizer_ir::BoundExpr::Column(
+                        prdb_engine::optimizer_ir::BoundColumnRef {
+                            relation_index: 0,
+                            column: key_column.clone(),
+                        },
                     )),
-                    right: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Text(
+                    right: Box::new(prdb_engine::optimizer_ir::BoundExpr::Text(
                         lower_key.iter().copied().map(char::from).collect(),
                     )),
                 },
-                prdb_engine::optimizer_binding::BoundPredicate::Compare {
-                    operator: prdb_engine::optimizer_request::Comparison::LessOrEqual,
-                    left: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Column(
-                        key_column,
+                prdb_engine::optimizer_ir::BoundExpr::Compare {
+                    op: prdb_engine::optimizer_ir::Comparison::LessOrEqual,
+                    left: Box::new(prdb_engine::optimizer_ir::BoundExpr::Column(
+                        prdb_engine::optimizer_ir::BoundColumnRef {
+                            relation_index: 0,
+                            column: key_column,
+                        },
                     )),
-                    right: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Text(
+                    right: Box::new(prdb_engine::optimizer_ir::BoundExpr::Text(
                         upper_key.iter().copied().map(char::from).collect(),
                     )),
                 },

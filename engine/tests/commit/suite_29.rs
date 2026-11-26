@@ -11,8 +11,7 @@ pub(super) fn planner_stream_estimates_same_typed_decimal_column_predicate()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::authorization::{Effect, Expr, Operation, Subject};
     use prdb_engine::ipc::{IpcFrame, Operation as IpcOperation};
-    use prdb_engine::optimizer_binding::{BoundColumn, BoundPredicate};
-    use prdb_engine::optimizer_request::Comparison;
+    use prdb_engine::optimizer_ir::{BoundColumn, BoundColumnRef, BoundExpr, Comparison};
     use prdb_engine::planner_ipc::{
         DescribePlanRelationsRequest, DescribePlanRelationsResponse, EstimatePredicateRequest,
         EstimatePredicateResponse, EstimateScanRequest, EstimateScanResponse, EstimateScansRequest,
@@ -254,19 +253,25 @@ pub(super) fn planner_stream_estimates_same_typed_decimal_column_predicate()
 
     let invocation_id = id(0xbc);
     let mut invocation = storage.begin_invocation(invocation_id, actor, 9_999, 8, 4096)?;
-    let predicate = BoundPredicate::Compare {
-        operator: Comparison::Equal,
-        left: Box::new(BoundPredicate::Column(BoundColumn {
-            column_id: table.column_ids[0],
-            ordinal: 0,
-            scalar_type: decimal_type,
-            nullable: true,
+    let predicate = BoundExpr::Compare {
+        op: Comparison::Equal,
+        left: Box::new(BoundExpr::Column(BoundColumnRef {
+            relation_index: 0,
+            column: BoundColumn {
+                column_id: table.column_ids[0],
+                ordinal: 0,
+                scalar_type: decimal_type,
+                nullable: true,
+            },
         })),
-        right: Box::new(BoundPredicate::Column(BoundColumn {
-            column_id: table.column_ids[1],
-            ordinal: 1,
-            scalar_type: decimal_type,
-            nullable: true,
+        right: Box::new(BoundExpr::Column(BoundColumnRef {
+            relation_index: 0,
+            column: BoundColumn {
+                column_id: table.column_ids[1],
+                ordinal: 1,
+                scalar_type: decimal_type,
+                nullable: true,
+            },
         })),
     };
     let (mut client, mut server) = std::os::unix::net::UnixStream::pair()?;
@@ -278,7 +283,7 @@ pub(super) fn planner_stream_estimates_same_typed_decimal_column_predicate()
             &IpcFrame {
                 operation: IpcOperation::EstimateScan as u16,
                 request_id: 1,
-                payload: EstimatePredicateRequest::from_bound_predicate(
+                payload: EstimatePredicateRequest::from_bound_expr(
                     "planner_decimal".to_owned(),
                     "typed_observations".to_owned(),
                     &predicate,
@@ -388,22 +393,25 @@ pub(super) fn planner_stream_estimates_same_typed_decimal_column_predicate()
             EstimateScanResponse::Unknown,
             "batched summary may conservatively become UNKNOWN after concurrent mutation"
         );
-        let post_mutation_predicate = BoundPredicate::Compare {
-            operator: Comparison::Equal,
-            left: Box::new(BoundPredicate::Column(BoundColumn {
-                column_id: table.column_ids[0],
-                ordinal: 0,
-                scalar_type: decimal_type,
-                nullable: true,
+        let post_mutation_predicate = BoundExpr::Compare {
+            op: Comparison::Equal,
+            left: Box::new(BoundExpr::Column(BoundColumnRef {
+                relation_index: 0,
+                column: BoundColumn {
+                    column_id: table.column_ids[0],
+                    ordinal: 0,
+                    scalar_type: decimal_type,
+                    nullable: true,
+                },
             })),
-            right: Box::new(BoundPredicate::Decimal(440)),
+            right: Box::new(BoundExpr::Decimal(440)),
         };
         prdb_engine::ipc::write_frame(
             &mut client,
             &IpcFrame {
                 operation: IpcOperation::EstimateScan as u16,
                 request_id: 4,
-                payload: EstimatePredicateRequest::from_bound_predicate(
+                payload: EstimatePredicateRequest::from_bound_expr(
                     "planner_decimal".to_owned(),
                     "typed_observations".to_owned(),
                     &post_mutation_predicate,
@@ -477,15 +485,18 @@ pub(super) fn planner_stream_estimates_same_typed_decimal_column_predicate()
                 estimate.row_payload,
             )?;
         }
-        let predicate = BoundPredicate::Compare {
-            operator: Comparison::Equal,
-            left: Box::new(BoundPredicate::Column(BoundColumn {
-                column_id: estimate.key_column_id,
-                ordinal: 0,
-                scalar_type: estimate.decimal_type,
-                nullable: true,
+        let predicate = BoundExpr::Compare {
+            op: Comparison::Equal,
+            left: Box::new(BoundExpr::Column(BoundColumnRef {
+                relation_index: 0,
+                column: BoundColumn {
+                    column_id: estimate.key_column_id,
+                    ordinal: 0,
+                    scalar_type: estimate.decimal_type,
+                    nullable: true,
+                },
             })),
-            right: Box::new(BoundPredicate::Decimal(440)),
+            right: Box::new(BoundExpr::Decimal(440)),
         };
         let (mut client, mut server) = std::os::unix::net::UnixStream::pair()?;
         client.set_read_timeout(Some(Duration::from_secs(15)))?;
@@ -497,7 +508,7 @@ pub(super) fn planner_stream_estimates_same_typed_decimal_column_predicate()
                 &IpcFrame {
                     operation: IpcOperation::EstimateScan as u16,
                     request_id: 1,
-                    payload: EstimatePredicateRequest::from_bound_predicate(
+                    payload: EstimatePredicateRequest::from_bound_expr(
                         "planner_decimal".to_owned(),
                         "typed_observations".to_owned(),
                         &predicate,

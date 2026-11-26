@@ -917,6 +917,25 @@ static int32_t optimizer_request(void *context, uint16_t operation,
         return PRDB_QUERY_CALLBACK_PROTOCOL_ERROR;
     }
     statement_kind = request[2];
+    if (statement_kind == PRDB_OPTIMIZER_UNIFIED_REQUEST_KIND) {
+        uint8_t *p = mock->optimizer_plan;
+        uint32_t off = 0;
+        p[off++] = 0; p[off++] = 1;
+        p[off++] = PRDB_OPTIMIZER_UNIFIED_PLAN_KIND;
+        p[off++] = 0;
+        p[off++] = 3; memcpy(p + off, "app", 3); off += 3;
+        memset(p + off, 0x11, 16); off += 16;
+        memset(p + off, 0, 7); p[off + 7] = 1; off += 8;
+        p[off++] = PRDB_OPTIMIZER_PHYSICAL_OP_SEQ_SCAN;
+        p[off++] = 0; p[off++] = 0;
+        p[off++] = 7; memcpy(p + off, "widgets", 7); off += 7;
+        memset(p + off, 0x11, 16); off += 16;
+        memset(p + off, 0, 7); p[off + 7] = 1; off += 8;
+        p[off++] = 0; p[off++] = 1;
+        off = put_optimizer_column(p, off, 0x33, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0);
+        mock->optimizer_plan_len = off;
+        goto optimizer_plan_ready;
+    }
     if (offset >= request_len) return PRDB_QUERY_CALLBACK_PROTOCOL_ERROR;
     schema_len = request[offset++];
     if (schema_len > request_len - offset)
@@ -1107,6 +1126,9 @@ static int32_t executor_request(void *context, uint16_t operation,
             0, 1, 0, 3, 0, 7, 'a', 'p', 'p', 'w', 'i', 'd', 'g', 'e', 't', 's'};
         assert(request_len == sizeof(expected));
         assert(memcmp(request, expected, sizeof(expected)) == 0);
+        if (mock->optimizer_enabled != 0 && mock->optimizer_relation_resolves == 0) {
+            ++mock->optimizer_relation_resolves;
+        }
         assert(mock->executor_len <= capacity);
         memcpy(response, mock->executor, mock->executor_len);
         *response_len = mock->executor_len;

@@ -166,6 +166,151 @@ pub struct ColumnPopulation {
     pub redacted: u64,
 }
 
+/// Bounded equi-depth histogram over readable, orderable scalar values in the
+/// invocation's authorized view.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EquiDepthHistogram {
+    pub sample_rows: u64,
+    /// Sorted bucket boundary values (at most 16 buckets -> up to 17 boundaries).
+    pub boundaries: Vec<crate::tuple::ScalarValue>,
+}
+
+impl EquiDepthHistogram {
+    pub const MAX_BUCKETS: usize = 16;
+
+    /// Estimate equality selectivity in `[0.0, 1.0]` using `1 / max(ndv, 1)`
+    /// clamped by bucket presence if boundaries exist.
+    pub fn estimate_equality_selectivity(&self, ndv: Option<u64>) -> f64 {
+        if self.sample_rows == 0 {
+            return 0.0;
+        }
+        if let Some(d) = ndv
+            && d > 0
+        {
+            return (1.0 / (d as f64)).clamp(0.0, 1.0);
+        }
+        0.1
+    }
+
+    /// Estimate range selectivity in `(0.0, 1.0]` for `col >= lower` / `col <= upper`.
+    pub fn estimate_range_selectivity(
+        &self,
+        lower: Option<(&crate::tuple::ScalarValue, bool)>,
+        upper: Option<(&crate::tuple::ScalarValue, bool)>,
+    ) -> f64 {
+        if self.boundaries.len() < 2 {
+            return 0.25;
+        }
+        let buckets = (self.boundaries.len() - 1) as f64;
+        let lo_pos = match lower {
+            None => 0.0,
+            Some((val, _)) => self.fractional_position(val),
+        };
+        let hi_pos = match upper {
+            None => 1.0,
+            Some((val, _)) => self.fractional_position(val),
+        };
+        if hi_pos < lo_pos {
+            return (1.0 / (self.sample_rows.max(1) as f64)).min(0.01);
+        }
+        let span = (hi_pos - lo_pos).max(1.0 / (buckets * 2.0));
+        span.clamp(0.0, 1.0)
+    }
+
+    fn fractional_position(&self, target: &crate::tuple::ScalarValue) -> f64 {
+        let n = self.boundaries.len();
+        if n < 2 {
+            return 0.5;
+        }
+        let mut idx = 0usize;
+        while idx + 1 < n
+            && compare_scalar_values(&self.boundaries[idx + 1], target)
+                == Some(std::cmp::Ordering::Less)
+        {
+            idx += 1;
+        }
+        (idx as f64) / ((n - 1) as f64)
+    }
+}
+
+pub(crate) fn compare_scalar_values(
+    left: &crate::tuple::ScalarValue,
+    right: &crate::tuple::ScalarValue,
+) -> Option<std::cmp::Ordering> {
+    use crate::tuple::ScalarValue::*;
+    match (left, right) {
+        (Boolean(a), Boolean(b)) => Some(a.cmp(b)),
+        (SmallInt(a), SmallInt(b)) => Some(a.cmp(b)),
+        (Integer(a), Integer(b)) => Some(a.cmp(b)),
+        (BigInt(a), BigInt(b)) => Some(a.cmp(b)),
+        (Decimal(a), Decimal(b)) => Some(a.cmp(b)),
+        (Text(a), Text(b)) | (Varchar(a), Varchar(b)) => Some(a.cmp(b)),
+        (Bytea(a), Bytea(b)) => Some(a.cmp(b)),
+        (Uuid(a), Uuid(b)) => Some(a.cmp(b)),
+        (Date(a), Date(b)) => Some(a.cmp(b)),
+        (TimestampTz(a), TimestampTz(b)) => Some(a.cmp(b)),
+        _ => None,
+    }
+}
+
+/// Per-column authorized-view statistics. `ndv` and `histogram` are omitted
+/// (`None`) whenever any visible row has a redacted cell for this column.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthorizedColumnStats {
+    pub column_id: [u8; 16],
+    pub ndv: Option<u64>,
+    pub null_fraction_ppm: Option<u32>,
+    pub redacted_fraction_ppm: u32,
+    pub histogram: Option<EquiDepthHistogram>,
+}
+
+/// Authorized-view relation statistics used by the cost-based optimizer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthorizedRelationStats {
+    pub visible_rows: u64,
+    pub is_exact: bool,
+    pub avg_authorized_row_bytes: u32,
+    pub columns: Vec<AuthorizedColumnStats>,
+}
+
+/// Cache key proving identical effective authority, policy/grant dependencies,
+/// schema version, and data snapshot for safe cross-invocation reuse.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct PolicyEquivalenceKey {
+    pub snapshot_sequence: u64,
+    pub schema_version: u64,
+    pub relation_id: [u8; 16],
+    pub effective_role_hash: [u8; 32],
+    pub policy_dependency_hash: [u8; 32],
+    pub grant_dependency_hash: [u8; 32],
+}
+
+/// Bounded cache of authorized-view relation statistics keyed by
+/// `PolicyEquivalenceKey`. Only clean-overlay, literal-policy or
+/// policy-equivalent entries may be inserted.
+#[derive(Default)]
+pub struct PolicyEquivalentStatsCache {
+    entries: std::collections::HashMap<PolicyEquivalenceKey, AuthorizedRelationStats>,
+}
+
+impl PolicyEquivalentStatsCache {
+    pub const MAX_ENTRIES: usize = 256;
+
+    pub fn get(&self, key: &PolicyEquivalenceKey) -> Option<&AuthorizedRelationStats> {
+        self.entries.get(key)
+    }
+
+    pub fn insert(&mut self, key: PolicyEquivalenceKey, stats: AuthorizedRelationStats) {
+        if self.entries.len() >= Self::MAX_ENTRIES
+            && !self.entries.contains_key(&key)
+            && let Some(evict) = self.entries.keys().next().cloned()
+        {
+            self.entries.remove(&evict);
+        }
+        self.entries.insert(key, stats);
+    }
+}
+
 #[cfg(test)]
 mod committed_population_record_tests {
     use super::{
@@ -212,5 +357,59 @@ mod committed_population_record_tests {
             CommittedPopulationRecord::decode_record([7; 16], &bytes),
             Err(StatisticsRecordError::InvalidStatus)
         );
+    }
+
+    #[test]
+    fn equi_depth_histogram_selectivity_and_policy_cache_isolation() {
+        use super::{
+            AuthorizedColumnStats, AuthorizedRelationStats, EquiDepthHistogram,
+            PolicyEquivalenceKey, PolicyEquivalentStatsCache,
+        };
+        use crate::tuple::ScalarValue;
+
+        let hist = EquiDepthHistogram {
+            sample_rows: 100,
+            boundaries: vec![
+                ScalarValue::Integer(0),
+                ScalarValue::Integer(25),
+                ScalarValue::Integer(50),
+                ScalarValue::Integer(75),
+                ScalarValue::Integer(100),
+            ],
+        };
+        assert!((hist.estimate_equality_selectivity(Some(50)) - 0.02).abs() < 1e-6);
+        let range_sel = hist.estimate_range_selectivity(
+            Some((&ScalarValue::Integer(25), true)),
+            Some((&ScalarValue::Integer(75), true)),
+        );
+        assert!(range_sel > 0.25 && range_sel <= 0.75);
+
+        let key_a = PolicyEquivalenceKey {
+            snapshot_sequence: 10,
+            schema_version: 1,
+            relation_id: [1; 16],
+            effective_role_hash: [2; 32],
+            policy_dependency_hash: [3; 32],
+            grant_dependency_hash: [4; 32],
+        };
+        let mut key_b = key_a.clone();
+        key_b.effective_role_hash = [9; 32];
+
+        let mut cache = PolicyEquivalentStatsCache::default();
+        let stats = AuthorizedRelationStats {
+            visible_rows: 100,
+            is_exact: true,
+            avg_authorized_row_bytes: 32,
+            columns: vec![AuthorizedColumnStats {
+                column_id: [5; 16],
+                ndv: Some(50),
+                null_fraction_ppm: Some(0),
+                redacted_fraction_ppm: 0,
+                histogram: Some(hist),
+            }],
+        };
+        cache.insert(key_a.clone(), stats.clone());
+        assert_eq!(cache.get(&key_a), Some(&stats));
+        assert_eq!(cache.get(&key_b), None);
     }
 }

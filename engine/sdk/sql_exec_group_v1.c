@@ -1293,6 +1293,33 @@ static int32_t execute_group_internal(
 
 
 
+static int32_t plan_group_via_unified_v1(
+    const prdb_host_api_v1 *host, const prdb_sdk_select_v1 *statement,
+    const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
+    const uint8_t *schema, uint32_t schema_len,
+    uint8_t *optimizer_request, uint64_t optimizer_request_capacity,
+    uint8_t *optimizer_response, uint64_t optimizer_response_capacity,
+    uint8_t *executor_response, uint64_t executor_response_capacity,
+    prdb_sdk_sql_column_shape_v1 *executor_columns,
+    uint32_t executor_column_capacity) {
+    prdb_sdk_executor_relation_v1 rel = {0};
+    prdb_sdk_optimizer_unified_plan_v1 plan;
+    int32_t status = prdb_sdk_optimizer_plan_group_unified_v1(
+        host, statement, parameters, parameter_count, schema, schema_len,
+        optimizer_request, optimizer_request_capacity,
+        optimizer_response, optimizer_response_capacity,
+        executor_response, executor_response_capacity,
+        &rel, executor_columns, executor_column_capacity, &plan);
+    if (status == PRDB_SDK_OPTIMIZER_PLAN_IDENTITY_MISMATCH ||
+        status == PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD) {
+        return fail_statement(host, PRDB_SDK_SQL_EXEC_SHAPE_MISMATCH);
+    }
+    if (status != PRDB_SDK_OPTIMIZER_PLAN_OK) {
+        return fail_statement(host, PRDB_SDK_SQL_EXEC_PLANNER_ERROR);
+    }
+    return PRDB_SDK_SQL_EXEC_OK;
+}
+
 int32_t prdb_sdk_sql_execute_composite_count_optimizer_v1(
     const prdb_host_api_v1 *host,
     const uint8_t *schema, uint32_t schema_len,
@@ -1345,45 +1372,21 @@ int32_t prdb_sdk_sql_execute_composite_count_optimizer_v1(
                                            sizeof(statement), NULL);
     if (status != PRDB_SDK_SQL_OK)
         return fail_statement(host, PRDB_SDK_SQL_EXEC_BIND_ERROR);
-    status = prdb_sdk_planner_describe_relation_v1(
-        &host_v2, schema, schema_len,
-        statement.sql + statement.relation.offset,
-        statement.relation.length, planner_response,
-        planner_response_capacity, &planner_response_len, &planned,
-        sizeof(planned), planner_columns, planner_column_capacity);
-    if (status != PRDB_SDK_PLANNER_REQUEST_OK)
-        return fail_statement(host,
-                              PRDB_SDK_SQL_EXEC_PLANNER_ERROR);
-    status = prdb_sdk_sql_bind_select_v1(
-        &statement, planned.name, planned.name_len, planner_columns,
-        planned.column_count, &binding, sizeof(binding));
-    if (status != PRDB_SDK_SQL_BIND_OK)
-        return fail_statement(host, PRDB_SDK_SQL_EXEC_BIND_ERROR);
-    status = prdb_sdk_optimizer_encode_composite_group_count_v1(
-        &statement, schema, schema_len, optimizer_request,
-        optimizer_request_capacity, &optimizer_request_len);
-    if (status != PRDB_SDK_OPTIMIZER_ENCODE_OK)
-        return fail_statement(host, PRDB_SDK_SQL_EXEC_BIND_ERROR);
-    status = prdb_sdk_optimizer_submit_group_count_v1(
-        host, optimizer_request, optimizer_request_len, optimizer_response,
-        optimizer_response_capacity, &optimizer_response_len, &optimizer,
-        sizeof(optimizer));
-    if (status != PRDB_SDK_OPTIMIZER_RESULT_OK)
-        return fail_statement(host,
-                              PRDB_SDK_SQL_EXEC_PLANNER_ERROR);
-    status = prdb_sdk_optimizer_match_composite_group_count_plan_v1(
-        &statement, &binding, schema, schema_len, optimizer.plan,
-        optimizer.plan_len);
-    if (status != PRDB_SDK_OPTIMIZER_PLAN_OK)
-        return fail_statement(host,
-                              PRDB_SDK_SQL_EXEC_SHAPE_MISMATCH);
-    status =
-        prdb_sdk_optimizer_validate_executor_composite_group_count_relation_v1(
-            &host_v2, optimizer.plan, optimizer.plan_len, executor_response,
-            executor_response_capacity, &executor_response_len);
-    if (status != PRDB_SDK_OPTIMIZER_PLAN_OK)
-        return fail_statement(host,
-                              PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
+    status = plan_group_via_unified_v1(
+        host, &statement, NULL, 0, schema, schema_len,
+        optimizer_request, optimizer_request_capacity,
+        optimizer_response, optimizer_response_capacity,
+        executor_response, executor_response_capacity,
+        executor_columns, executor_column_capacity);
+    if (status != PRDB_SDK_SQL_EXEC_OK) return status;
+    (void)planned;
+    (void)binding;
+    (void)host_v2;
+    (void)planner_response_len;
+    (void)optimizer_request_len;
+    (void)optimizer_response_len;
+    (void)executor_response_len;
+    (void)optimizer;
     return prdb_sdk_sql_execute_group_v1(
         host, schema, schema_len, sql, sql_len, NULL, 0,
         max_candidates, max_batch_bytes, planner_response,
@@ -1445,52 +1448,16 @@ static int32_t execute_group_composite_aggregate_optimizer_internal(
                                            sizeof(statement), NULL);
     if (status != PRDB_SDK_SQL_OK)
         return fail_statement(host, PRDB_SDK_SQL_EXEC_BIND_ERROR);
-    status = prdb_sdk_planner_describe_relation_v1(
-        &host_v2, schema, schema_len,
-        statement.sql + statement.relation.offset,
-        statement.relation.length, planner_response,
-        planner_response_capacity, &planner_response_len, &planned,
-        sizeof(planned), planner_columns, planner_column_capacity);
-    if (status != PRDB_SDK_PLANNER_REQUEST_OK)
-        return fail_statement(host, PRDB_SDK_SQL_EXEC_PLANNER_ERROR);
-    status = prdb_sdk_sql_bind_select_v1(
-        &statement, planned.name, planned.name_len, planner_columns,
-        planned.column_count, &binding, sizeof(binding));
-    if (status != PRDB_SDK_SQL_BIND_OK)
-        return fail_statement(host, PRDB_SDK_SQL_EXEC_BIND_ERROR);
-    if (filtered) {
-        status = prdb_sdk_optimizer_encode_filtered_composite_group_aggregate_v1(
-            &statement, parameters, parameter_count, schema, schema_len,
-            optimizer_request, optimizer_request_capacity, &request_len);
-    } else {
-        status = prdb_sdk_optimizer_encode_composite_group_aggregate_v1(
-            &statement, schema, schema_len, optimizer_request,
-            optimizer_request_capacity, &request_len);
-    }
-    if (status != PRDB_SDK_OPTIMIZER_ENCODE_OK)
-        return fail_statement(host, PRDB_SDK_SQL_EXEC_BIND_ERROR);
-    status = prdb_sdk_optimizer_submit_group_count_v1(
-        host, optimizer_request, request_len, optimizer_response,
-        optimizer_response_capacity, &response_len, &optimizer,
-        sizeof(optimizer));
-    if (status != PRDB_SDK_OPTIMIZER_RESULT_OK)
-        return fail_statement(host, PRDB_SDK_SQL_EXEC_PLANNER_ERROR);
-    if (filtered) {
-        status = prdb_sdk_optimizer_match_filtered_composite_group_aggregate_plan_v1(
-            &statement, &binding, parameters, parameter_count, schema,
-            schema_len, optimizer.plan, optimizer.plan_len);
-    } else {
-        status = prdb_sdk_optimizer_match_composite_group_aggregate_plan_v1(
-            &statement, &binding, schema, schema_len, optimizer.plan,
-            optimizer.plan_len);
-    }
-    if (status != PRDB_SDK_OPTIMIZER_PLAN_OK)
-        return fail_statement(host, PRDB_SDK_SQL_EXEC_SHAPE_MISMATCH);
-    status = prdb_sdk_optimizer_validate_executor_relation_v1(
-        &host_v2, optimizer.plan, optimizer.plan_len, executor_response,
-        executor_response_capacity, &executor_response_len);
-    if (status != PRDB_SDK_OPTIMIZER_PLAN_OK)
-        return fail_statement(host, PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
+    (void)planned; (void)binding; (void)planner_response_len;
+    status = plan_group_via_unified_v1(
+        host, &statement, parameters, parameter_count, schema, schema_len,
+        optimizer_request, optimizer_request_capacity,
+        optimizer_response, optimizer_response_capacity,
+        executor_response, executor_response_capacity,
+        executor_columns, executor_column_capacity);
+    if (status != PRDB_SDK_SQL_EXEC_OK) return status;
+    (void)request_len; (void)response_len; (void)executor_response_len;
+    (void)optimizer; (void)filtered; (void)host_v2;
     return prdb_sdk_sql_execute_group_v1(
         host, schema, schema_len, sql, sql_len, parameters,
         parameter_count,
@@ -1592,21 +1559,15 @@ int32_t prdb_sdk_sql_execute_ordered_composite_count_optimizer_v1(
     host_v2 = (prdb_host_api_v1){sizeof(prdb_host_api_v1), PRDB_QUERY_ABI_VERSION, host->context, host->executor_request, host->planner_request, host->write_result};
     status = prdb_sdk_sql_parse_select_v1(sql, sql_len, &statement, sizeof(statement), NULL);
     if (status != PRDB_SDK_SQL_OK) return fail_statement(host, PRDB_SDK_SQL_EXEC_BIND_ERROR);
-    status = prdb_sdk_planner_describe_relation_v1(&host_v2, schema, schema_len,
-        statement.sql + statement.relation.offset,
-        statement.relation.length, planner_response, planner_response_capacity,
-        &planner_response_len, &planned, sizeof(planned), planner_columns, planner_column_capacity);
-    if (status != PRDB_SDK_PLANNER_REQUEST_OK) return fail_statement(host, PRDB_SDK_SQL_EXEC_PLANNER_ERROR);
-    status = prdb_sdk_sql_bind_select_v1(&statement, planned.name, planned.name_len, planner_columns, planned.column_count, &binding, sizeof(binding));
-    if (status != PRDB_SDK_SQL_BIND_OK) return fail_statement(host, PRDB_SDK_SQL_EXEC_BIND_ERROR);
-    status = prdb_sdk_optimizer_encode_ordered_composite_group_count_v1(&statement, schema, schema_len, optimizer_request, optimizer_request_capacity, &request_len);
-    if (status != PRDB_SDK_OPTIMIZER_ENCODE_OK) return fail_statement(host, PRDB_SDK_SQL_EXEC_BIND_ERROR);
-    status = prdb_sdk_optimizer_submit_group_count_v1(host, optimizer_request, request_len, optimizer_response, optimizer_response_capacity, &response_len, &optimizer, sizeof(optimizer));
-    if (status != PRDB_SDK_OPTIMIZER_RESULT_OK) return fail_statement(host, PRDB_SDK_SQL_EXEC_PLANNER_ERROR);
-    status = prdb_sdk_optimizer_match_ordered_composite_group_count_plan_v1(&statement, &binding, schema, schema_len, optimizer.plan, optimizer.plan_len);
-    if (status != PRDB_SDK_OPTIMIZER_PLAN_OK) return fail_statement(host, PRDB_SDK_SQL_EXEC_SHAPE_MISMATCH);
-    status = prdb_sdk_optimizer_validate_executor_relation_v1(&host_v2, optimizer.plan, optimizer.plan_len, executor_response, executor_response_capacity, &executor_response_len);
-    if (status != PRDB_SDK_OPTIMIZER_PLAN_OK) return fail_statement(host, PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
+    status = plan_group_via_unified_v1(
+        host, &statement, NULL, 0, schema, schema_len,
+        optimizer_request, optimizer_request_capacity,
+        optimizer_response, optimizer_response_capacity,
+        executor_response, executor_response_capacity,
+        executor_columns, executor_column_capacity);
+    if (status != PRDB_SDK_SQL_EXEC_OK) return status;
+    (void)planned; (void)binding; (void)host_v2; (void)planner_response_len;
+    (void)request_len; (void)response_len; (void)executor_response_len; (void)optimizer;
     return prdb_sdk_sql_execute_group_v1(host, schema, schema_len, sql, sql_len, NULL, 0, max_candidates, max_batch_bytes,
         planner_response, planner_response_capacity, executor_response, executor_response_capacity, batch_response, batch_response_capacity,
         planner_columns, planner_column_capacity, executor_columns, executor_column_capacity, cell_scratch, cell_scratch_capacity,
@@ -1659,44 +1620,16 @@ int32_t prdb_sdk_sql_execute_ordered_composite_aggregate_optimizer_v1(
         sql, sql_len, &statement, sizeof(statement), NULL);
     if (status != PRDB_SDK_SQL_OK)
         return fail_statement(host, PRDB_SDK_SQL_EXEC_BIND_ERROR);
-    const prdb_sdk_select_v1 *base = &statement;
-    status = prdb_sdk_planner_describe_relation_v1(
-        &host_v2, schema, schema_len,
-        base->sql + base->relation.offset, base->relation.length,
-        planner_response, planner_response_capacity, &planner_response_len,
-        &planned, sizeof(planned), planner_columns, planner_column_capacity);
-    if (status != PRDB_SDK_PLANNER_REQUEST_OK)
-        return fail_statement(host,
-                              PRDB_SDK_SQL_EXEC_PLANNER_ERROR);
-    status = prdb_sdk_sql_bind_select_v1(
-        &statement, planned.name, planned.name_len, planner_columns,
-        planned.column_count, &binding, sizeof(binding));
-    if (status != PRDB_SDK_SQL_BIND_OK)
-        return fail_statement(host, PRDB_SDK_SQL_EXEC_BIND_ERROR);
-    status = prdb_sdk_optimizer_encode_ordered_composite_group_aggregate_v1(
-        &statement, schema, schema_len, optimizer_request,
-        optimizer_request_capacity, &request_len);
-    if (status != PRDB_SDK_OPTIMIZER_ENCODE_OK)
-        return fail_statement(host, PRDB_SDK_SQL_EXEC_BIND_ERROR);
-    status = prdb_sdk_optimizer_submit_group_count_v1(
-        host, optimizer_request, request_len, optimizer_response,
-        optimizer_response_capacity, &response_len, &optimizer,
-        sizeof(optimizer));
-    if (status != PRDB_SDK_OPTIMIZER_RESULT_OK)
-        return fail_statement(host,
-                              PRDB_SDK_SQL_EXEC_PLANNER_ERROR);
-    status = prdb_sdk_optimizer_match_ordered_composite_group_aggregate_plan_v1(
-        &statement, &binding, schema, schema_len, optimizer.plan,
-        optimizer.plan_len);
-    if (status != PRDB_SDK_OPTIMIZER_PLAN_OK)
-        return fail_statement(host,
-                              PRDB_SDK_SQL_EXEC_SHAPE_MISMATCH);
-    status = prdb_sdk_optimizer_validate_executor_relation_v1(
-        &host_v2, optimizer.plan, optimizer.plan_len, executor_response,
-        executor_response_capacity, &executor_response_len);
-    if (status != PRDB_SDK_OPTIMIZER_PLAN_OK)
-        return fail_statement(host,
-                              PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
+    status = plan_group_via_unified_v1(
+        host, &statement, NULL, 0, schema, schema_len,
+        optimizer_request, optimizer_request_capacity,
+        optimizer_response, optimizer_response_capacity,
+        executor_response, executor_response_capacity,
+        executor_columns, executor_column_capacity);
+    if (status != PRDB_SDK_SQL_EXEC_OK) return status;
+    (void)planned; (void)binding; (void)host_v2; (void)planner_response_len;
+    (void)request_len; (void)response_len; (void)executor_response_len;
+    (void)optimizer;
     return prdb_sdk_sql_execute_group_v1(
         host, schema, schema_len, sql, sql_len, NULL, 0,
         max_candidates, max_batch_bytes, planner_response,
@@ -1737,21 +1670,15 @@ int32_t prdb_sdk_sql_execute_group_aggregate_optimizer_v1(
     host_v2 = (prdb_host_api_v1){sizeof(prdb_host_api_v1), PRDB_QUERY_ABI_VERSION, host->context, host->executor_request, host->planner_request, host->write_result};
     status = prdb_sdk_sql_parse_select_v1(sql, sql_len, &statement, sizeof(statement), NULL);
     if (status != PRDB_SDK_SQL_OK) return fail_statement(host, PRDB_SDK_SQL_EXEC_BIND_ERROR);
-    status = prdb_sdk_planner_describe_relation_v1(&host_v2, schema, schema_len,
-        statement.sql + statement.relation.offset, statement.relation.length,
-        planner_response, planner_response_capacity, &planner_response_len, &planned, sizeof(planned),
-        planner_columns, planner_column_capacity);
-    if (status != PRDB_SDK_PLANNER_REQUEST_OK) return fail_statement(host, PRDB_SDK_SQL_EXEC_PLANNER_ERROR);
-    status = prdb_sdk_sql_bind_select_v1(&statement, planned.name, planned.name_len, planner_columns, planned.column_count, &binding, sizeof(binding));
-    if (status != PRDB_SDK_SQL_BIND_OK) return fail_statement(host, PRDB_SDK_SQL_EXEC_BIND_ERROR);
-    status = prdb_sdk_optimizer_encode_group_aggregate_v1(&statement, schema, schema_len, optimizer_request, optimizer_request_capacity, &request_len);
-    if (status != PRDB_SDK_OPTIMIZER_ENCODE_OK) return fail_statement(host, PRDB_SDK_SQL_EXEC_BIND_ERROR);
-    status = prdb_sdk_optimizer_submit_group_count_v1(host, optimizer_request, request_len, optimizer_response, optimizer_response_capacity, &response_len, &optimizer, sizeof(optimizer));
-    if (status != PRDB_SDK_OPTIMIZER_RESULT_OK) return fail_statement(host, PRDB_SDK_SQL_EXEC_PLANNER_ERROR);
-    status = prdb_sdk_optimizer_match_group_aggregate_plan_v1(&statement, &binding, schema, schema_len, optimizer.plan, optimizer.plan_len);
-    if (status != PRDB_SDK_OPTIMIZER_PLAN_OK) return fail_statement(host, PRDB_SDK_SQL_EXEC_SHAPE_MISMATCH);
-    status = prdb_sdk_optimizer_validate_executor_relation_v1(&host_v2, optimizer.plan, optimizer.plan_len, executor_response, executor_response_capacity, &executor_response_len);
-    if (status != PRDB_SDK_OPTIMIZER_PLAN_OK) return fail_statement(host, PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
+    status = plan_group_via_unified_v1(
+        host, &statement, NULL, 0, schema, schema_len,
+        optimizer_request, optimizer_request_capacity,
+        optimizer_response, optimizer_response_capacity,
+        executor_response, executor_response_capacity,
+        executor_columns, executor_column_capacity);
+    if (status != PRDB_SDK_SQL_EXEC_OK) return status;
+    (void)planned; (void)binding; (void)host_v2; (void)planner_response_len;
+    (void)request_len; (void)response_len; (void)executor_response_len; (void)optimizer;
     return prdb_sdk_sql_execute_group_v1(host, schema, schema_len, sql, sql_len, NULL, 0, max_candidates, max_batch_bytes,
         planner_response, planner_response_capacity, executor_response, executor_response_capacity, batch_response, batch_response_capacity,
         planner_columns, planner_column_capacity, executor_columns, executor_column_capacity, cell_scratch, cell_scratch_capacity,
@@ -1811,46 +1738,16 @@ int32_t prdb_sdk_sql_execute_group_aggregate_ordered_optimizer_v1(
         statement.has_group_by == 0 ||
         statement.predicate_count != 0)
         return fail_statement(host, PRDB_SDK_SQL_EXEC_BIND_ERROR);
-    prdb_sdk_select_v1 *statement_v7 = &statement;
-    prdb_sdk_select_v1 *base = statement_v7;
-    status = prdb_sdk_planner_describe_relation_v1(
-        &host_v2, schema, schema_len,
-        base->sql + base->relation.offset, base->relation.length,
-        planner_response, planner_response_capacity, &planner_response_len,
-        &planned, sizeof(planned), planner_columns,
-        planner_column_capacity);
-    if (status != PRDB_SDK_PLANNER_REQUEST_OK)
-        return fail_statement(host,
-                              PRDB_SDK_SQL_EXEC_PLANNER_ERROR);
-    status = prdb_sdk_sql_bind_select_v1(
-        &statement, planned.name, planned.name_len, planner_columns,
-        planned.column_count, &binding, sizeof(binding));
-    if (status != PRDB_SDK_SQL_BIND_OK)
-        return fail_statement(host, PRDB_SDK_SQL_EXEC_BIND_ERROR);
-    status = prdb_sdk_optimizer_encode_ordered_group_aggregate_v1(
-        &statement, schema, schema_len, optimizer_request,
-        optimizer_request_capacity, &request_len);
-    if (status != PRDB_SDK_OPTIMIZER_ENCODE_OK)
-        return fail_statement(host, PRDB_SDK_SQL_EXEC_BIND_ERROR);
-    status = prdb_sdk_optimizer_submit_group_count_v1(
-        host, optimizer_request, request_len, optimizer_response,
-        optimizer_response_capacity, &response_len, &optimizer,
-        sizeof(optimizer));
-    if (status != PRDB_SDK_OPTIMIZER_RESULT_OK)
-        return fail_statement(host,
-                              PRDB_SDK_SQL_EXEC_PLANNER_ERROR);
-    status = prdb_sdk_optimizer_match_ordered_group_aggregate_plan_v1(
-        &statement, &binding, schema, schema_len, optimizer.plan,
-        optimizer.plan_len);
-    if (status != PRDB_SDK_OPTIMIZER_PLAN_OK)
-        return fail_statement(host,
-                              PRDB_SDK_SQL_EXEC_SHAPE_MISMATCH);
-    status = prdb_sdk_optimizer_validate_executor_relation_v1(
-        &host_v2, optimizer.plan, optimizer.plan_len, executor_response,
-        executor_response_capacity, &executor_response_len);
-    if (status != PRDB_SDK_OPTIMIZER_PLAN_OK)
-        return fail_statement(host,
-                              PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
+    status = plan_group_via_unified_v1(
+        host, &statement, NULL, 0, schema, schema_len,
+        optimizer_request, optimizer_request_capacity,
+        optimizer_response, optimizer_response_capacity,
+        executor_response, executor_response_capacity,
+        executor_columns, executor_column_capacity);
+    if (status != PRDB_SDK_SQL_EXEC_OK) return status;
+    (void)planned; (void)binding; (void)host_v2; (void)planner_response_len;
+    (void)request_len; (void)response_len; (void)executor_response_len;
+    (void)optimizer;
     return prdb_sdk_sql_execute_group_v1(
         host, schema, schema_len, sql, sql_len, NULL, 0,
         max_candidates, max_batch_bytes, planner_response,
@@ -2019,159 +1916,16 @@ int32_t prdb_sdk_sql_execute_group_having_optimizer_v1(
     binding_v13 = &binding;
     binding_v15 = &binding;
 
-    if (statement_v13->predicate_count != 0) {
-        if (statement_v15->order_count != 0) {
-            status = prdb_sdk_optimizer_encode_ordered_filtered_composite_group_aggregate_v1(
-                statement_v15, parameters, parameter_count, schema, schema_len,
-                optimizer_request, optimizer_request_capacity,
-                &optimizer_request_len);
-        } else {
-            status = prdb_sdk_optimizer_encode_filtered_composite_group_aggregate_v1(
-                statement_v13, parameters, parameter_count, schema, schema_len,
-                optimizer_request, optimizer_request_capacity,
-                &optimizer_request_len);
-        }
-    } else if (statement_v13->group_key_count == 1) {
-        if (statement_v15->order_count != 0) {
-            ordered_single_statement.struct_size =
-                sizeof(ordered_single_statement);
-            ordered_single_statement.abi_version =
-                PRDB_SDK_SQL_ABI_V1_VERSION;
-            ordered_single_statement.struct_size =
-                sizeof(ordered_single_statement);
-            ordered_single_statement.abi_version =
-                PRDB_SDK_SQL_ABI_V1_VERSION;
-            ordered_single_statement.struct_size =
-                sizeof(ordered_single_statement);
-            ordered_single_statement.abi_version =
-                PRDB_SDK_SQL_ABI_V1_VERSION;
-            ordered_single_statement.struct_size =
-                sizeof(ordered_single_statement);
-            ordered_single_statement.abi_version =
-                PRDB_SDK_SQL_ABI_V1_VERSION;
-            ordered_single_statement =
-                (*statement_v13);
-            ordered_single_statement.has_order_by = 1;
-            ordered_single_statement.order_count = statement_v15->order_count;
-            ordered_single_binding.struct_size =
-                sizeof(ordered_single_binding);
-            ordered_single_binding.abi_version =
-                PRDB_SDK_SQL_ABI_V1_VERSION;
-            ordered_single_binding.struct_size =
-                sizeof(ordered_single_binding);
-            ordered_single_binding.abi_version =
-                PRDB_SDK_SQL_ABI_V1_VERSION;
-            ordered_single_binding.struct_size =
-                sizeof(ordered_single_binding);
-            ordered_single_binding.abi_version =
-                PRDB_SDK_SQL_ABI_V1_VERSION;
-            ordered_single_binding.struct_size =
-                sizeof(ordered_single_binding);
-            ordered_single_binding.abi_version =
-                PRDB_SDK_SQL_ABI_V1_VERSION;
-            ordered_single_binding = (*binding_v13);
-            ordered_single_binding.order_count = binding_v15->order_count;
-            for (uint32_t index = 0; index < statement_v15->order_count;
-                 ++index) {
-                const prdb_sdk_sql_order_item_v1 *source =
-                    &statement_v15->order_items[index];
-                const prdb_sdk_sql_bound_order_item_v1 *bound =
-                    &binding_v15->order_items[index];
-                prdb_sdk_sql_order_item_v1 *item =
-                    &ordered_single_statement.order_items[index];
-                prdb_sdk_sql_bound_order_item_v1 *bound_item =
-                    &ordered_single_binding.order_items[index];
-                item->kind = source->kind;
-                item->direction = source->direction;
-                item->null_order = source->null_order;
-                bound_item->item = *item;
-                bound_item->type_code = bound->type_code;
-                bound_item->decimal_precision = bound->decimal_precision;
-                bound_item->decimal_scale = bound->decimal_scale;
-            }
-            ordered_single_statement.order_kind =
-                ordered_single_statement.order_items[0].kind;
-            ordered_single_statement.order_direction =
-                ordered_single_statement.order_items[0].direction;
-            ordered_single_statement.null_order =
-                ordered_single_statement.order_items[0].null_order;
-            ordered_single_binding.has_order_by = 1;
-            ordered_single_binding.order_kind =
-                ordered_single_binding.order_items[0].item.kind;
-            ordered_single_binding.order_direction =
-                ordered_single_binding.order_items[0].item.direction;
-            ordered_single_binding.order_type_code =
-                ordered_single_binding.order_items[0].type_code;
-            ordered_single_binding.order_decimal_precision =
-                ordered_single_binding.order_items[0].decimal_precision;
-            ordered_single_binding.order_decimal_scale =
-                ordered_single_binding.order_items[0].decimal_scale;
-            ordered_single_binding.null_order =
-                ordered_single_binding.order_items[0].item.null_order;
-            status = prdb_sdk_optimizer_encode_ordered_group_aggregate_v1(
-                &ordered_single_statement, schema, schema_len,
-                optimizer_request, optimizer_request_capacity,
-                &optimizer_request_len);
-        } else {
-            status = prdb_sdk_optimizer_encode_group_aggregate_v1(
-                statement_v13, schema, schema_len, optimizer_request,
-                optimizer_request_capacity, &optimizer_request_len);
-        }
-    } else if (statement_v15->order_count != 0) {
-        status = prdb_sdk_optimizer_encode_ordered_composite_group_aggregate_v1(
-            statement_v15, schema, schema_len, optimizer_request,
-            optimizer_request_capacity, &optimizer_request_len);
-    } else {
-        status = prdb_sdk_optimizer_encode_composite_group_aggregate_v1(
-            statement_v13, schema, schema_len, optimizer_request,
-            optimizer_request_capacity, &optimizer_request_len);
-    }
-    if (status != PRDB_SDK_OPTIMIZER_ENCODE_OK)
-        return fail_statement(host, PRDB_SDK_SQL_EXEC_BIND_ERROR);
-    status = prdb_sdk_optimizer_submit_group_count_v1(
-        host, optimizer_request, optimizer_request_len, optimizer_response,
-        optimizer_response_capacity, &optimizer_response_len, &optimizer,
-        sizeof(optimizer));
-    if (status != PRDB_SDK_OPTIMIZER_RESULT_OK)
-        return fail_statement(host, PRDB_SDK_SQL_EXEC_PLANNER_ERROR);
-    if (statement_v13->predicate_count != 0) {
-        if (statement_v15->order_count != 0) {
-            status = prdb_sdk_optimizer_match_ordered_filtered_composite_group_aggregate_plan_v1(
-                statement_v15, binding_v15, parameters, parameter_count, schema,
-                schema_len, optimizer.plan, optimizer.plan_len);
-        } else {
-            status = prdb_sdk_optimizer_match_filtered_composite_group_aggregate_plan_v1(
-                statement_v13, binding_v13, parameters, parameter_count, schema,
-                schema_len, optimizer.plan, optimizer.plan_len);
-        }
-    } else if (statement_v13->group_key_count == 1) {
-        if (statement_v15->order_count != 0) {
-            status = prdb_sdk_optimizer_match_ordered_group_aggregate_plan_v1(
-                &ordered_single_statement, &ordered_single_binding, schema,
-                schema_len, optimizer.plan, optimizer.plan_len);
-        } else {
-            status = prdb_sdk_optimizer_match_group_aggregate_plan_v1(
-                statement_v13, binding_v13, schema, schema_len,
-                optimizer.plan, optimizer.plan_len);
-        }
-    } else if (statement_v15->order_count != 0) {
-        status = prdb_sdk_optimizer_match_ordered_composite_group_aggregate_plan_v1(
-            statement_v15, binding_v15, schema, schema_len, optimizer.plan,
-            optimizer.plan_len);
-    } else {
-        status = prdb_sdk_optimizer_match_composite_group_aggregate_plan_v1(
-            statement_v13, binding_v13, schema, schema_len, optimizer.plan,
-            optimizer.plan_len);
-    }
-    if (status != PRDB_SDK_OPTIMIZER_PLAN_OK)
-        return fail_statement(host,
-                              PRDB_SDK_SQL_EXEC_SHAPE_MISMATCH);
-    status = prdb_sdk_optimizer_validate_executor_relation_v1(
-        &host_v2, optimizer.plan, optimizer.plan_len, executor_response,
-        executor_response_capacity, &executor_response_len);
-    if (status != PRDB_SDK_OPTIMIZER_PLAN_OK)
-        return fail_statement(host,
-                              PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
+    status = plan_group_via_unified_v1(
+        host, statement_v15, parameters, parameter_count, schema, schema_len,
+        optimizer_request, optimizer_request_capacity,
+        optimizer_response, optimizer_response_capacity,
+        executor_response, executor_response_capacity,
+        executor_columns, executor_column_capacity);
+    if (status != PRDB_SDK_SQL_EXEC_OK) return status;
+    (void)optimizer_request_len; (void)optimizer_response_len;
+    (void)executor_response_len; (void)optimizer; (void)host_v2;
+    (void)ordered_single_statement; (void)ordered_single_binding;
 
     return prdb_sdk_sql_execute_group_typed_v1(
         host, schema, schema_len, sql, sql_len, parameters,
@@ -2237,44 +1991,16 @@ int32_t prdb_sdk_sql_execute_group_count_optimizer_v1(
                                           sizeof(statement), NULL);
     if (status != PRDB_SDK_SQL_OK)
         return fail_statement(host, PRDB_SDK_SQL_EXEC_BIND_ERROR);
-    status = prdb_sdk_planner_describe_relation_v1(
-        &host_v2, schema, schema_len,
-        statement.sql + statement.relation.offset,
-        statement.relation.length, planner_response,
-        planner_response_capacity, &planner_response_len, &planned,
-        sizeof(planned), planner_columns, planner_column_capacity);
-    if (status != PRDB_SDK_PLANNER_REQUEST_OK)
-        return fail_statement(host,
-                              PRDB_SDK_SQL_EXEC_PLANNER_ERROR);
-    status = prdb_sdk_sql_bind_select_v1(
-        &statement, planned.name, planned.name_len, planner_columns,
-        planned.column_count, &binding, sizeof(binding));
-    if (status != PRDB_SDK_SQL_BIND_OK)
-        return fail_statement(host, PRDB_SDK_SQL_EXEC_BIND_ERROR);
-    status = prdb_sdk_optimizer_encode_group_count_v1(
-        &statement, schema, schema_len, optimizer_request,
-        optimizer_request_capacity, &optimizer_request_len);
-    if (status != PRDB_SDK_OPTIMIZER_ENCODE_OK)
-        return fail_statement(host, PRDB_SDK_SQL_EXEC_BIND_ERROR);
-    status = prdb_sdk_optimizer_submit_group_count_v1(
-        host, optimizer_request, optimizer_request_len, optimizer_response,
-        optimizer_response_capacity, &optimizer_response_len, &optimizer,
-        sizeof(optimizer));
-    if (status != PRDB_SDK_OPTIMIZER_RESULT_OK)
-        return fail_statement(host,
-                              PRDB_SDK_SQL_EXEC_PLANNER_ERROR);
-    status = prdb_sdk_optimizer_match_group_count_plan_v1(
-        &statement, &binding, schema, schema_len, optimizer.plan,
-        optimizer.plan_len);
-    if (status != PRDB_SDK_OPTIMIZER_PLAN_OK)
-        return fail_statement(host,
-                              PRDB_SDK_SQL_EXEC_SHAPE_MISMATCH);
-    status = prdb_sdk_optimizer_validate_executor_group_count_relation_v1(
-        &host_v2, optimizer.plan, optimizer.plan_len, executor_response,
-        executor_response_capacity, &executor_response_len);
-    if (status != PRDB_SDK_OPTIMIZER_PLAN_OK)
-        return fail_statement(host,
-                              PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
+    (void)planned; (void)binding; (void)planner_response_len;
+    status = plan_group_via_unified_v1(
+        host, &statement, parameters, parameter_count, schema, schema_len,
+        optimizer_request, optimizer_request_capacity,
+        optimizer_response, optimizer_response_capacity,
+        executor_response, executor_response_capacity,
+        executor_columns, executor_column_capacity);
+    if (status != PRDB_SDK_SQL_EXEC_OK) return status;
+    (void)optimizer_request_len; (void)optimizer_response_len;
+    (void)executor_response_len; (void)optimizer; (void)host_v2;
     return prdb_sdk_sql_execute_group_v1(
         host, schema, schema_len, sql, sql_len, parameters,
         parameter_count, max_candidates, max_batch_bytes, planner_response,
@@ -2346,49 +2072,17 @@ int32_t prdb_sdk_sql_execute_group_count_ordered_optimizer_v1(
         return fail_statement(host,
                               PRDB_SDK_SQL_EXEC_BIND_ERROR);
     }
-    status = prdb_sdk_planner_describe_relation_v1(
-        &host_v2, schema, schema_len,
-        statement.sql +
-            statement.relation.offset,
-        statement.relation.length,
-        planner_response, planner_response_capacity, &planner_response_len,
-        &planned, sizeof(planned), planner_columns,
-        planner_column_capacity);
-    if (status != PRDB_SDK_PLANNER_REQUEST_OK)
-        return fail_statement(host,
-                              PRDB_SDK_SQL_EXEC_PLANNER_ERROR);
-    status = prdb_sdk_sql_bind_select_v1(
-        &statement, planned.name, planned.name_len, planner_columns,
-        planned.column_count, &binding, sizeof(binding));
-    if (status != PRDB_SDK_SQL_BIND_OK)
-        return fail_statement(host,
-                              PRDB_SDK_SQL_EXEC_BIND_ERROR);
+    (void)planned; (void)binding; (void)planner_response_len;
 
-    status = prdb_sdk_optimizer_encode_ordered_group_count_v1(
-        &statement, schema, schema_len, optimizer_request,
-        optimizer_request_capacity, &optimizer_request_len);
-    if (status != PRDB_SDK_OPTIMIZER_ENCODE_OK)
-        return fail_statement(host,
-                              PRDB_SDK_SQL_EXEC_BIND_ERROR);
-    status = prdb_sdk_optimizer_submit_group_count_v1(
-        host, optimizer_request, optimizer_request_len, optimizer_response,
-        optimizer_response_capacity, &optimizer_response_len, &optimizer,
-        sizeof(optimizer));
-    if (status != PRDB_SDK_OPTIMIZER_RESULT_OK)
-        return fail_statement(host,
-                              PRDB_SDK_SQL_EXEC_PLANNER_ERROR);
-    status = prdb_sdk_optimizer_match_ordered_group_count_plan_v1(
-        &statement, &binding, schema, schema_len, optimizer.plan,
-        optimizer.plan_len);
-    if (status != PRDB_SDK_OPTIMIZER_PLAN_OK)
-        return fail_statement(host,
-                              PRDB_SDK_SQL_EXEC_SHAPE_MISMATCH);
-    status = prdb_sdk_optimizer_validate_executor_relation_v1(
-        &host_v2, optimizer.plan, optimizer.plan_len, executor_response,
-        executor_response_capacity, &executor_response_len);
-    if (status != PRDB_SDK_OPTIMIZER_PLAN_OK)
-        return fail_statement(host,
-                              PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
+    status = plan_group_via_unified_v1(
+        host, &statement, parameters, parameter_count, schema, schema_len,
+        optimizer_request, optimizer_request_capacity,
+        optimizer_response, optimizer_response_capacity,
+        executor_response, executor_response_capacity,
+        executor_columns, executor_column_capacity);
+    if (status != PRDB_SDK_SQL_EXEC_OK) return status;
+    (void)optimizer_request_len; (void)optimizer_response_len;
+    (void)executor_response_len; (void)optimizer; (void)host_v2;
     return prdb_sdk_sql_execute_group_v1(
         host, schema, schema_len, sql, sql_len, parameters,
         parameter_count, max_candidates, max_batch_bytes, planner_response,

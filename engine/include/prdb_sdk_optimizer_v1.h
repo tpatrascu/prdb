@@ -204,4 +204,97 @@ int32_t prdb_sdk_optimizer_submit_delete_v1(
     uint8_t *response, uint64_t response_capacity, uint64_t *response_len,
     prdb_sdk_optimizer_response_v1 *out, uint32_t out_capacity);
 
+/* --- Unified Composable Optimizer IR (Request) --- */
+
+#define PRDB_SDK_OPTIMIZER_MAX_LOGICAL_NODES UINT32_C(64)
+#define PRDB_SDK_OPTIMIZER_MAX_EXPR_NODES UINT32_C(256)
+#define PRDB_SDK_OPTIMIZER_MAX_EXPR_DEPTH UINT32_C(32)
+
+typedef struct prdb_sdk_optimizer_col_ref_v1 {
+    uint16_t relation_index;
+    const uint8_t *column_name;
+    uint32_t column_name_len;
+} prdb_sdk_optimizer_col_ref_v1;
+
+typedef struct prdb_sdk_optimizer_expr_node_v1 {
+    /* 0x00 Null, 0x01 Bool, 0x02 Int64, 0x03 Text, 0x04 Date, 0x05 Uuid,
+     * 0x06 TimestampTz, 0x07 Bytea, 0x08 Decimal, 0x10 Column, 0x11 Param,
+     * 0x20 Compare, 0x30 And, 0x31 Or, 0x32 Not, 0x40 IsNull, 0x41 IsNotNull,
+     * 0x42 InList */
+    uint8_t tag;
+    uint8_t op;       /* Comparison op (0..5) or negated (0/1) */
+    uint8_t child_count;
+    uint8_t reserved;
+    uint16_t relation_index;
+    uint32_t param_index;
+    int64_t int_val;
+    const uint8_t *bytes;
+    uint32_t bytes_len;
+    /* Indices into caller-supplied prdb_sdk_optimizer_expr_node_v1 array. */
+    uint16_t children[16];
+    uint16_t in_target;
+} prdb_sdk_optimizer_expr_node_v1;
+
+typedef struct prdb_sdk_optimizer_agg_item_v1 {
+    uint8_t kind;    /* 0 CountStar, 1 Count, 2 Sum, 3 Min, 4 Max, 5 Avg */
+    uint8_t has_arg;
+    prdb_sdk_optimizer_col_ref_v1 arg;
+} prdb_sdk_optimizer_agg_item_v1;
+
+typedef struct prdb_sdk_optimizer_order_item_v1 {
+    uint8_t is_agg_index;
+    uint8_t descending;
+    uint8_t nulls_first;
+    uint16_t agg_index;
+    prdb_sdk_optimizer_col_ref_v1 column;
+} prdb_sdk_optimizer_order_item_v1;
+
+typedef struct prdb_sdk_optimizer_update_assign_v1 {
+    const uint8_t *column_name;
+    uint32_t column_name_len;
+    uint8_t is_null;
+    uint32_t param_index;
+} prdb_sdk_optimizer_update_assign_v1;
+
+typedef struct prdb_sdk_optimizer_logical_node_v1 {
+    /* PRDB_OPTIMIZER_LOGICAL_OP_* */
+    uint8_t op_tag;
+    uint8_t join_type;
+    uint8_t flags;
+    uint8_t reserved;
+    uint16_t relation_index;
+    uint16_t left_child;
+    uint16_t right_child;
+    uint32_t limit_count;
+    const uint8_t *relation_name;
+    uint32_t relation_name_len;
+    const prdb_sdk_optimizer_expr_node_v1 *expr_nodes;
+    uint32_t expr_node_count;
+    uint16_t expr_root;
+    const prdb_sdk_optimizer_col_ref_v1 *columns;
+    uint32_t column_count;
+    const prdb_sdk_optimizer_col_ref_v1 *right_keys; /* For Join eq_keys */
+    const prdb_sdk_optimizer_agg_item_v1 *aggs;
+    uint32_t agg_count;
+    const prdb_sdk_optimizer_order_item_v1 *order_items;
+    uint32_t order_item_count;
+    const prdb_sdk_optimizer_update_assign_v1 *assignments;
+    uint32_t assignment_count;
+} prdb_sdk_optimizer_logical_node_v1;
+
+/* Encode a unified composable logical request tree into `request`. */
+int32_t prdb_sdk_optimizer_encode_unified_request_v1(
+    const uint8_t *schema, uint32_t schema_len,
+    const prdb_sdk_optimizer_logical_node_v1 *nodes, uint32_t node_count,
+    uint16_t root_index,
+    uint8_t *request, uint64_t request_capacity, uint64_t *request_len);
+
+/* Submit an encoded unified logical request through `host->optimizer_request`
+ * using `operation` (e.g., PRDB_IPC_OP_OPTIMIZE_SELECT) and decode `out`. */
+int32_t prdb_sdk_optimizer_submit_unified_v1(
+    const prdb_host_api_v1 *host, uint16_t operation,
+    const uint8_t *request, uint64_t request_len,
+    uint8_t *response, uint64_t response_capacity, uint64_t *response_len,
+    prdb_sdk_optimizer_response_v1 *out, uint32_t out_capacity);
+
 #endif /* PRDB_SDK_OPTIMIZER_V1_H */

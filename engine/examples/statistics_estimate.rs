@@ -3,8 +3,6 @@ use prdb_engine::authorization::{
     Policy, Subject,
 };
 use prdb_engine::bootstrap;
-use prdb_engine::optimizer_binding::{BoundColumn, BoundPredicate};
-use prdb_engine::optimizer_request::Comparison;
 use prdb_engine::overlay::RowId;
 use prdb_engine::statistics::{
     AuthorizedScanEstimate, MAX_ESTIMATE_CANDIDATES, MAX_PREDICATE_ESTIMATE_ROWS,
@@ -398,15 +396,20 @@ fn benchmark_dataset(
     let median = elapsed[elapsed.len() / 2];
     let p95 = elapsed[((elapsed.len() - 1) * 95).div_ceil(100)];
     let predicate_result = if row_count == MAX_PREDICATE_ESTIMATE_ROWS as usize {
-        let predicate = BoundPredicate::Compare {
-            operator: Comparison::Equal,
-            left: Box::new(BoundPredicate::Column(BoundColumn {
-                column_id: COLUMN_ID,
-                ordinal: 0,
-                scalar_type: ScalarType::Integer,
-                nullable: false,
-            })),
-            right: Box::new(BoundPredicate::Integer(64)),
+        let predicate = prdb_engine::optimizer_ir::BoundExpr::Compare {
+            op: prdb_engine::optimizer_ir::Comparison::Equal,
+            left: Box::new(prdb_engine::optimizer_ir::BoundExpr::Column(
+                prdb_engine::optimizer_ir::BoundColumnRef {
+                    relation_index: 0,
+                    column: prdb_engine::optimizer_ir::BoundColumn {
+                        column_id: COLUMN_ID,
+                        ordinal: 0,
+                        scalar_type: ScalarType::Integer,
+                        nullable: false,
+                    },
+                },
+            )),
+            right: Box::new(prdb_engine::optimizer_ir::BoundExpr::Integer(64)),
         };
         let mut predicate_elapsed = Vec::with_capacity(ESTIMATE_RUNS);
         for run_number in 0..ESTIMATE_RUNS {

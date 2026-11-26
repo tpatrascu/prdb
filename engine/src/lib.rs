@@ -33,11 +33,10 @@ pub mod metadata_discovery;
 pub mod migration;
 #[cfg(target_os = "linux")]
 pub mod offline_backup;
-pub mod optimizer_binding;
+pub mod optimizer_cost;
 pub mod optimizer_ipc;
-pub mod optimizer_plan;
+pub mod optimizer_ir;
 pub mod optimizer_process;
-pub mod optimizer_request;
 pub mod optimizer_service;
 pub mod outcome;
 pub mod overlay;

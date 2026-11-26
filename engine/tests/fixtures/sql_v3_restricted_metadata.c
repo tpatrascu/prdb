@@ -72,9 +72,9 @@ int32_t prdb_query_main_v1(const prdb_host_api_v1 *host,
     parameter.data = parameter_bytes;
     parameter.data_len = sizeof(parameter_bytes) - 1;
 
-    int32_t status = prdb_sdk_optimizer_execute_select_ast_with_parameters_v1(
-        host, &statement, &parameter, 1, schema, sizeof(schema) - 1, 16,
-        sizeof(batch_response), request, sizeof(request), optimizer_response,
+    int32_t status = prdb_sdk_optimizer_execute_select_unified_cb_v1(
+        host, &statement, &parameter, 1, schema, sizeof(schema) - 1,
+        request, sizeof(request), optimizer_response,
         sizeof(optimizer_response), relation_response,
         sizeof(relation_response), scan_response, sizeof(scan_response),
         batch_response, sizeof(batch_response), &relation, sizeof(relation),

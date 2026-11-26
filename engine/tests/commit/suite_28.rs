@@ -13,12 +13,13 @@ pub(super) fn planner_stream_estimate_allowance_falls_back_without_aborting_invo
     use prdb_engine::authorization::{Effect, Expr, Operation, Subject};
     use prdb_engine::executor_ipc::ResolveRelationRequest;
     use prdb_engine::ipc::{IpcFrame, Operation as IpcOperation};
-    use prdb_engine::optimizer_binding::{
-        BindError, BoundColumn, MetadataBindError, bind_select_request_via_metadata,
-    };
     use prdb_engine::optimizer_ipc::OptimizerResponse;
-    use prdb_engine::optimizer_plan::{PlanNode, decode_plan_v1};
-    use prdb_engine::optimizer_service::{OptimizerError, optimize_select_v1};
+    use prdb_engine::optimizer_ir::expr::{ColumnRef, Expr as IrExpr};
+    use prdb_engine::optimizer_ir::{
+        BindError, BoundColumn, BoundExpr, Comparison, LogicalOp, LogicalRequest, PhysicalOp,
+        decode_physical_plan, encode_logical_request,
+    };
+    use prdb_engine::optimizer_service::{OptimizerError, optimize_unified_v1_with_relations};
     use prdb_engine::planner_ipc::{
         DescribePlanRelationRequest, DescribePlanRelationResponse, DescribeRelationResponse,
         EstimateJoinRequest, EstimateJoinResponse, EstimatePredicateRequest,
@@ -200,19 +201,22 @@ pub(super) fn planner_stream_estimate_allowance_falls_back_without_aborting_invo
         let mut transaction = storage.begin_invocation(id(0xc2), actor, 9_999, 1, 64)?;
         let (mut client, mut server) = std::os::unix::net::UnixStream::pair()?;
         client.set_read_timeout(Some(Duration::from_secs(5)))?;
-        let predicate = prdb_engine::optimizer_binding::BoundPredicate::Compare {
-            operator: prdb_engine::optimizer_request::Comparison::Equal,
-            left: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Column(
-                BoundColumn {
-                    column_id: table.column_ids[0],
-                    ordinal: 0,
-                    scalar_type: ScalarType::Integer,
-                    nullable: true,
+        let predicate = prdb_engine::optimizer_ir::BoundExpr::Compare {
+            op: prdb_engine::optimizer_ir::Comparison::Equal,
+            left: Box::new(prdb_engine::optimizer_ir::BoundExpr::Column(
+                prdb_engine::optimizer_ir::BoundColumnRef {
+                    relation_index: 0,
+                    column: BoundColumn {
+                        column_id: table.column_ids[0],
+                        ordinal: 0,
+                        scalar_type: ScalarType::Integer,
+                        nullable: true,
+                    },
                 },
             )),
-            right: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Integer(7)),
+            right: Box::new(prdb_engine::optimizer_ir::BoundExpr::Integer(7)),
         };
-        let request = EstimatePredicateRequest::from_bound_predicate(
+        let request = EstimatePredicateRequest::from_bound_expr(
             "planner_stats".to_owned(),
             "observations".to_owned(),
             &predicate,
@@ -379,41 +383,51 @@ pub(super) fn planner_stream_estimate_allowance_falls_back_without_aborting_invo
             "the IPC profile needs an exact committed population record"
         );
 
-        let predicate = prdb_engine::optimizer_binding::BoundPredicate::Compare {
-            operator: prdb_engine::optimizer_request::Comparison::Equal,
-            left: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Column(
-                BoundColumn {
-                    column_id: table.column_ids[0],
-                    ordinal: 0,
-                    scalar_type: ScalarType::Integer,
-                    nullable: true,
+        let predicate = prdb_engine::optimizer_ir::BoundExpr::Compare {
+            op: prdb_engine::optimizer_ir::Comparison::Equal,
+            left: Box::new(prdb_engine::optimizer_ir::BoundExpr::Column(
+                prdb_engine::optimizer_ir::BoundColumnRef {
+                    relation_index: 0,
+                    column: BoundColumn {
+                        column_id: table.column_ids[0],
+                        ordinal: 0,
+                        scalar_type: ScalarType::Integer,
+                        nullable: true,
+                    },
                 },
             )),
-            right: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Integer(7)),
+            right: Box::new(prdb_engine::optimizer_ir::BoundExpr::Integer(7)),
         };
-        let predicate_request = EstimatePredicateRequest::from_bound_predicate(
+        let predicate_request = EstimatePredicateRequest::from_bound_expr(
             "planner_stats".to_owned(),
             "observations".to_owned(),
             &predicate,
         )?;
         let optimizer_request = || {
-            let mut bytes = vec![0, 1, 1, 0];
-            for name in ["planner_stats", "observations"] {
-                bytes.push(name.len() as u8);
-                bytes.extend_from_slice(name.as_bytes());
-            }
-            bytes.extend_from_slice(&1u16.to_be_bytes());
-            bytes.push(5);
-            bytes.extend_from_slice(b"value");
-            let mut encoded_predicate = vec![0x20, 0, 0x10, 5];
-            encoded_predicate.extend_from_slice(b"value");
-            encoded_predicate.push(0x02);
-            encoded_predicate.extend_from_slice(&7i64.to_be_bytes());
-            bytes.extend_from_slice(&(encoded_predicate.len() as u32).to_be_bytes());
-            bytes.extend_from_slice(&encoded_predicate);
-            bytes.push(1);
-            bytes.extend_from_slice(&3u32.to_be_bytes());
-            bytes
+            let req = LogicalRequest {
+                schema_name: "planner_stats".to_owned(),
+                root: LogicalOp::Project {
+                    columns: vec![ColumnRef {
+                        relation_index: 0,
+                        column_name: "value".to_owned(),
+                    }],
+                    input: Box::new(LogicalOp::Filter {
+                        predicate: IrExpr::Compare {
+                            op: Comparison::Equal,
+                            left: Box::new(IrExpr::Column(ColumnRef {
+                                relation_index: 0,
+                                column_name: "value".to_owned(),
+                            })),
+                            right: Box::new(IrExpr::Integer(7)),
+                        },
+                        input: Box::new(LogicalOp::Scan {
+                            relation_index: 0,
+                            relation_name: "observations".to_owned(),
+                        }),
+                    }),
+                },
+            };
+            encode_logical_request(&req).unwrap()
         };
         let predicate_bytes = predicate_request.predicate_bytes.clone();
         let mut describe_roundtrips = Vec::with_capacity(PROFILE_RUNS);
@@ -580,20 +594,51 @@ pub(super) fn planner_stream_estimate_allowance_falls_back_without_aborting_invo
                     prdb_engine::optimizer_ipc::OptimizerStatus::Success,
                     "isolated optimizer must return a filtered plan"
                 );
-                let plan = decode_plan_v1(
+                let plan = decode_physical_plan(
                     response
                         .plan
                         .as_deref()
                         .ok_or("successful optimizer response omitted its plan")?,
-                )?;
+                )
+                .map_err(|error| format!("decode unified plan: {error:?}"))?;
+                let mut cur = &plan.root;
+                let mut found_rel_id = None;
+                let mut found_filter = false;
+                loop {
+                    match cur {
+                        PhysicalOp::Project { input, .. } | PhysicalOp::Limit { input, .. } => {
+                            cur = input
+                        }
+                        PhysicalOp::Filter { input, predicate } => {
+                            if let BoundExpr::Compare {
+                                op: Comparison::Equal,
+                                left,
+                                right,
+                            } = predicate
+                                && matches!(left.as_ref(), BoundExpr::Column(c) if c.column.column_id == table.column_ids[0])
+                                && matches!(right.as_ref(), BoundExpr::Integer(7))
+                            {
+                                found_filter = true;
+                            }
+                            cur = input;
+                        }
+                        PhysicalOp::SeqScan { relation, .. }
+                        | PhysicalOp::IndexPointScan { relation, .. }
+                        | PhysicalOp::IndexRangeScan { relation, .. }
+                        | PhysicalOp::CoveringIndexScan { relation, .. } => {
+                            found_rel_id = Some(relation.relation_id);
+                            break;
+                        }
+                        _ => break,
+                    }
+                }
                 assert_eq!(
-                    plan.relation.relation_id, table.table_id,
+                    found_rel_id,
+                    Some(table.table_id),
                     "isolated optimizer must bind the authorized relation"
                 );
                 assert!(
-                    plan.nodes
-                        .iter()
-                        .any(|node| matches!(node, PlanNode::Filter(found) if found == &predicate)),
+                    found_filter,
                     "isolated optimizer must preserve the exact equality predicate"
                 );
                 optimizer_client.shutdown(Shutdown::Write)?;
@@ -757,19 +802,32 @@ pub(super) fn planner_stream_estimate_allowance_falls_back_without_aborting_invo
                                         response.status
                                     ));
                                 }
-                                let plan =
-                                    decode_plan_v1(response.plan.as_deref().ok_or_else(|| {
-                                        "optimizer omitted saturation plan".to_owned()
-                                    })?)
-                                    .map_err(|error| {
-                                        format!("decode saturation plan: {error:?}")
-                                    })?;
-                                if plan.relation.relation_id != table_id
-                                    || !plan
-                                        .nodes
-                                        .iter()
-                                        .any(|node| matches!(node, PlanNode::Filter(_)))
-                                {
+                                let plan = decode_physical_plan(response.plan.as_deref().ok_or_else(
+                                    || "optimizer omitted saturation plan".to_owned(),
+                                )?)
+                                .map_err(|error| format!("decode saturation plan: {error:?}"))?;
+                                let mut cur = &plan.root;
+                                let mut sat_rel_id = None;
+                                let mut sat_filter = false;
+                                loop {
+                                    match cur {
+                                        PhysicalOp::Project { input, .. }
+                                        | PhysicalOp::Limit { input, .. } => cur = input,
+                                        PhysicalOp::Filter { input, .. } => {
+                                            sat_filter = true;
+                                            cur = input;
+                                        }
+                                        PhysicalOp::SeqScan { relation, .. }
+                                        | PhysicalOp::IndexPointScan { relation, .. }
+                                        | PhysicalOp::IndexRangeScan { relation, .. }
+                                        | PhysicalOp::CoveringIndexScan { relation, .. } => {
+                                            sat_rel_id = Some(relation.relation_id);
+                                            break;
+                                        }
+                                        _ => break,
+                                    }
+                                }
+                                if sat_rel_id != Some(table_id) || !sat_filter {
                                     return Err("optimizer saturation returned an unexpected plan"
                                         .to_owned());
                                 }
@@ -957,41 +1015,54 @@ pub(super) fn planner_stream_estimate_allowance_falls_back_without_aborting_invo
     );
 
     let encode_select = |schema_name: &str, relation_name: &str, column_name: &str| {
-        let mut bytes = vec![0, 1, 1, 0];
-        for name in [schema_name, relation_name] {
-            bytes.push(name.len() as u8);
-            bytes.extend_from_slice(name.as_bytes());
-        }
-        bytes.extend_from_slice(&1u16.to_be_bytes());
-        bytes.push(column_name.len() as u8);
-        bytes.extend_from_slice(column_name.as_bytes());
-        bytes.extend_from_slice(&0u32.to_be_bytes());
-        bytes.push(0);
-        bytes
+        let req = LogicalRequest {
+            schema_name: schema_name.to_owned(),
+            root: LogicalOp::Project {
+                columns: vec![ColumnRef {
+                    relation_index: 0,
+                    column_name: column_name.to_owned(),
+                }],
+                input: Box::new(LogicalOp::Scan {
+                    relation_index: 0,
+                    relation_name: relation_name.to_owned(),
+                }),
+            },
+        };
+        encode_logical_request(&req).unwrap()
     };
     let encode_filtered_select = |schema_name: &str, relation_name: &str, column_name: &str| {
-        let mut bytes = vec![0, 1, 1, 0];
-        for name in [schema_name, relation_name] {
-            bytes.push(name.len() as u8);
-            bytes.extend_from_slice(name.as_bytes());
-        }
-        bytes.extend_from_slice(&1u16.to_be_bytes());
-        bytes.push(column_name.len() as u8);
-        bytes.extend_from_slice(column_name.as_bytes());
-        let mut predicate = vec![0x20, 0, 0x10, column_name.len() as u8];
-        predicate.extend_from_slice(column_name.as_bytes());
-        predicate.push(0x02);
-        predicate.extend_from_slice(&7i64.to_be_bytes());
-        bytes.extend_from_slice(&(predicate.len() as u32).to_be_bytes());
-        bytes.extend_from_slice(&predicate);
-        bytes.push(1);
-        bytes.extend_from_slice(&3u32.to_be_bytes());
-        bytes
+        let req = LogicalRequest {
+            schema_name: schema_name.to_owned(),
+            root: LogicalOp::Limit {
+                count: 3,
+                input: Box::new(LogicalOp::Project {
+                    columns: vec![ColumnRef {
+                        relation_index: 0,
+                        column_name: column_name.to_owned(),
+                    }],
+                    input: Box::new(LogicalOp::Filter {
+                        predicate: IrExpr::Compare {
+                            op: Comparison::Equal,
+                            left: Box::new(IrExpr::Column(ColumnRef {
+                                relation_index: 0,
+                                column_name: column_name.to_owned(),
+                            })),
+                            right: Box::new(IrExpr::Integer(7)),
+                        },
+                        input: Box::new(LogicalOp::Scan {
+                            relation_index: 0,
+                            relation_name: relation_name.to_owned(),
+                        }),
+                    }),
+                }),
+            },
+        };
+        encode_logical_request(&req).unwrap()
     };
     let mut binding_transaction = storage.begin_invocation(id(0x8a), actor, 9_999, 8, 512)?;
     {
         let mut planner_connection = binding_transaction.open_planner_metadata_connection();
-        let (population_handle, _) = planner_connection
+        let (population_handle, described_rel) = planner_connection
             .resolve_relation("planner_stats", "observations")?
             .ok_or("authorized population relation was not described")?;
         assert_eq!(
@@ -999,57 +1070,62 @@ pub(super) fn planner_stream_estimate_allowance_falls_back_without_aborting_invo
             Some(0),
             "a fresh committed count is usable when the whole table is authorized"
         );
-        let bound = bind_select_request_via_metadata(
-            &encode_select("planner_stats", "observations", "value"),
-            &mut planner_connection,
-        )?;
+        let auth_rel = prdb_engine::metadata_discovery::AuthorizedPlanRelation {
+            schema_id: schema.schema_id,
+            schema_version: 1,
+            table_epoch: 3,
+            relation: described_rel,
+            unique_access_paths: Vec::new(),
+            range_access_paths: Vec::new(),
+        };
+        let decoded_req = prdb_engine::optimizer_ir::decode_logical_request(&encode_select(
+            "planner_stats",
+            "observations",
+            "value",
+        ))
+        .map_err(|error| format!("decode logical request: {error:?}"))?;
+        let bound = prdb_engine::optimizer_ir::bind_logical_request(
+            &decoded_req,
+            &[Some(auth_rel.clone())],
+        )
+        .map_err(|error| format!("bind logical request: {error:?}"))?;
         assert_eq!(bound.schema_name, "planner_stats");
         assert_eq!(bound.schema_id, schema.schema_id);
         assert_eq!(bound.schema_version, 1);
-        assert_eq!(bound.table_epoch, 3);
-        assert_eq!(bound.relation_id, table.table_id);
-        assert_eq!(bound.relation_name, "observations");
-        assert_eq!(
-            bound.projections,
-            [BoundColumn {
-                column_id: table.column_ids[0],
-                ordinal: 0,
-                scalar_type: ScalarType::Integer,
-                nullable: true,
-            }]
-        );
-        let encoded_plan = optimize_select_v1(
+        let encoded_plan = optimize_unified_v1_with_relations(
             &encode_select("planner_stats", "observations", "value"),
-            &mut planner_connection,
+            &[Some(auth_rel)],
+            &prdb_engine::optimizer_cost::StatsCatalog::default(),
+            &prdb_engine::optimizer_cost::CostWeights::default(),
         )?;
-        let plan = decode_plan_v1(&encoded_plan)?;
-        assert_eq!(plan.relation.schema_id, schema.schema_id);
-        assert_eq!(plan.relation.schema_version, 1);
-        assert_eq!(plan.relation.relation_id, table.table_id);
-        assert_eq!(plan.relation.table_epoch, 3);
-        assert!(
-            matches!(plan.nodes.first(), Some(PlanNode::Scan { columns }) if columns == &[BoundColumn {
-                column_id: table.column_ids[0],
-                ordinal: 0,
-                scalar_type: ScalarType::Integer,
-                nullable: true,
-            }])
-        );
+        let plan = decode_physical_plan(&encoded_plan)
+            .map_err(|error| format!("decode physical plan: {error:?}"))?;
+        assert_eq!(plan.schema_id, schema.schema_id);
+        assert_eq!(plan.schema_version, 1);
         assert!(matches!(
-            optimize_select_v1(
-                &encode_select("planner_stats", "hidden_or_missing", "value"),
-                &mut planner_connection,
-            ),
-            Err(OptimizerError::Bind(MetadataBindError::Bind(
-                BindError::RelationUnavailable
-            )))
+            &plan.root,
+            PhysicalOp::Project { input, .. }
+                if matches!(
+                    input.as_ref(),
+                    PhysicalOp::SeqScan { relation, scan_columns }
+                        if relation.relation_id == table.table_id
+                            && relation.table_epoch == 3
+                            && scan_columns == &[BoundColumn {
+                                column_id: table.column_ids[0],
+                                ordinal: 0,
+                                scalar_type: ScalarType::Integer,
+                                nullable: true,
+                            }]
+                )
         ));
         assert!(matches!(
-            bind_select_request_via_metadata(
+            optimize_unified_v1_with_relations(
                 &encode_select("planner_stats", "hidden_or_missing", "value"),
-                &mut planner_connection,
+                &[None],
+                &prdb_engine::optimizer_cost::StatsCatalog::default(),
+                &prdb_engine::optimizer_cost::CostWeights::default(),
             ),
-            Err(MetadataBindError::Bind(BindError::RelationUnavailable))
+            Err(OptimizerError::Bind(BindError::RelationUnavailable))
         ));
     }
     binding_transaction.abort()?;
@@ -1374,24 +1450,27 @@ pub(super) fn planner_stream_estimate_allowance_falls_back_without_aborting_invo
             "an unchanged planner session must reuse its exact population estimate"
         );
 
-        let estimate_predicate = prdb_engine::optimizer_binding::BoundPredicate::Compare {
-            operator: prdb_engine::optimizer_request::Comparison::Equal,
-            left: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Column(
-                BoundColumn {
-                    column_id: table.column_ids[0],
-                    ordinal: 0,
-                    scalar_type: ScalarType::Integer,
-                    nullable: true,
+        let estimate_predicate = prdb_engine::optimizer_ir::BoundExpr::Compare {
+            op: prdb_engine::optimizer_ir::Comparison::Equal,
+            left: Box::new(prdb_engine::optimizer_ir::BoundExpr::Column(
+                prdb_engine::optimizer_ir::BoundColumnRef {
+                    relation_index: 0,
+                    column: BoundColumn {
+                        column_id: table.column_ids[0],
+                        ordinal: 0,
+                        scalar_type: ScalarType::Integer,
+                        nullable: true,
+                    },
                 },
             )),
-            right: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Integer(7)),
+            right: Box::new(prdb_engine::optimizer_ir::BoundExpr::Integer(7)),
         };
         prdb_engine::ipc::write_frame(
             &mut client,
             &IpcFrame {
                 operation: IpcOperation::EstimateScan as u16,
                 request_id: 5,
-                payload: EstimatePredicateRequest::from_bound_predicate(
+                payload: EstimatePredicateRequest::from_bound_expr(
                     "planner_stats".to_owned(),
                     "observations".to_owned(),
                     &estimate_predicate,
@@ -1414,7 +1493,7 @@ pub(super) fn planner_stream_estimate_allowance_falls_back_without_aborting_invo
             &IpcFrame {
                 operation: IpcOperation::EstimateScan as u16,
                 request_id: 6,
-                payload: EstimatePredicateRequest::from_bound_predicate(
+                payload: EstimatePredicateRequest::from_bound_expr(
                     "planner_stats".to_owned(),
                     "observations".to_owned(),
                     &estimate_predicate,
@@ -1438,7 +1517,7 @@ pub(super) fn planner_stream_estimate_allowance_falls_back_without_aborting_invo
             &IpcFrame {
                 operation: IpcOperation::EstimateScan as u16,
                 request_id: 7,
-                payload: EstimatePredicateRequest::from_bound_predicate(
+                payload: EstimatePredicateRequest::from_bound_expr(
                     "planner_stats".to_owned(),
                     "observations".to_owned(),
                     &estimate_predicate,
@@ -1878,15 +1957,15 @@ pub(super) fn planner_stream_estimate_allowance_falls_back_without_aborting_invo
             optimizer_response.status,
             prdb_engine::optimizer_ipc::OptimizerStatus::Success
         );
-        let plan = decode_plan_v1(
+        let plan = decode_physical_plan(
             optimizer_response
                 .plan
                 .as_deref()
                 .ok_or("successful optimizer response omitted its plan")?,
-        )?;
-        assert_eq!(plan.relation.schema_id, schema.schema_id);
-        assert_eq!(plan.relation.relation_id, table.table_id);
-        assert!(plan.empty_view_hint);
+        )
+        .map_err(|error| format!("decode empty plan: {error:?}"))?;
+        assert_eq!(plan.schema_id, schema.schema_id);
+        assert!(matches!(plan.root, PhysicalOp::EmptyResult { .. }));
         prdb_engine::ipc::write_frame(
             &mut optimizer_client,
             &IpcFrame {
@@ -1907,19 +1986,25 @@ pub(super) fn planner_stream_estimate_allowance_falls_back_without_aborting_invo
             .plan
             .as_deref()
             .ok_or("successful filtered response omitted its plan")?;
-        let filtered_plan = decode_plan_v1(filtered_plan_bytes)?;
-        assert!(matches!(
-            filtered_plan.nodes.get(1),
-            Some(PlanNode::Filter(prdb_engine::optimizer_binding::BoundPredicate::Compare {
-                operator,
-                left,
-                right,
-                ..
-            })) if *operator == prdb_engine::optimizer_request::Comparison::Equal
-                && matches!(left.as_ref(), prdb_engine::optimizer_binding::BoundPredicate::Column(column) if column.column_id == table.column_ids[0])
-                && matches!(right.as_ref(), prdb_engine::optimizer_binding::BoundPredicate::Integer(7))
-        ));
-        filtered_plan_for_resolution = Some(filtered_plan.clone());
+        let filtered_plan = decode_physical_plan(filtered_plan_bytes)
+            .map_err(|error| format!("decode filtered plan: {error:?}"))?;
+        let has_eq_filter = match &filtered_plan.root {
+            PhysicalOp::Limit { input, .. } => match input.as_ref() {
+                PhysicalOp::Filter { predicate, .. } => matches!(
+                    predicate,
+                    BoundExpr::Compare {
+                        op: Comparison::Equal,
+                        left,
+                        right,
+                    } if matches!(left.as_ref(), BoundExpr::Column(c) if c.column.column_id == table.column_ids[0])
+                        && matches!(right.as_ref(), BoundExpr::Integer(7))
+                ),
+                _ => false,
+            },
+            _ => false,
+        };
+        assert!(has_eq_filter || matches!(filtered_plan.root, PhysicalOp::EmptyResult { .. }));
+        filtered_plan_for_resolution = Some(filtered_plan);
         prdb_engine::ipc::write_frame(
             &mut optimizer_client,
             &IpcFrame {
@@ -1962,8 +2047,8 @@ pub(super) fn planner_stream_estimate_allowance_falls_back_without_aborting_invo
                 operation: IpcOperation::ResolvePlanRelation as u16,
                 request_id: 1,
                 payload: ResolveRelationRequest {
-                    schema_name: filtered_plan.relation.schema_name.clone(),
-                    relation_name: filtered_plan.relation.relation_name.clone(),
+                    schema_name: filtered_plan.schema_name.clone(),
+                    relation_name: "observations".to_owned(),
                 }
                 .encode()?,
             },
@@ -1973,40 +2058,35 @@ pub(super) fn planner_stream_estimate_allowance_falls_back_without_aborting_invo
         let resolved_relation = DescribePlanRelationResponse::decode(&resolved_frame.payload)?
             .relation
             .ok_or("executor could not independently resolve filtered plan relation")?;
-        assert_eq!(
-            resolved_relation.schema_id,
-            filtered_plan.relation.schema_id
-        );
+        assert_eq!(resolved_relation.schema_id, filtered_plan.schema_id);
         assert_eq!(
             resolved_relation.schema_version,
-            filtered_plan.relation.schema_version
+            filtered_plan.schema_version
         );
-        assert_eq!(
-            resolved_relation.table_epoch,
-            filtered_plan.relation.table_epoch
-        );
-        assert_eq!(
-            resolved_relation.relation.relation_id,
-            filtered_plan.relation.relation_id
-        );
-        let planned_scan_columns = match filtered_plan.nodes.first() {
-            Some(PlanNode::Scan { columns }) => columns,
-            _ => return Err("filtered plan did not begin with a scan".into()),
-        };
-        assert_eq!(
-            planned_scan_columns.len(),
-            resolved_relation.relation.columns.len()
-        );
-        for planned_column in planned_scan_columns {
-            let declared_column = resolved_relation
-                .relation
-                .columns
-                .iter()
-                .find(|column| column.ordinal == planned_column.ordinal)
-                .ok_or("executor metadata omitted a planned scan column")?;
-            assert_eq!(declared_column.column_id, planned_column.column_id);
-            assert_eq!(declared_column.scalar_type, planned_column.scalar_type);
-            assert_eq!(declared_column.nullable, planned_column.nullable);
+        if let PhysicalOp::Limit { input, .. } = &filtered_plan.root
+            && let PhysicalOp::Filter { input, .. } = input.as_ref()
+            && let PhysicalOp::SeqScan {
+                relation,
+                scan_columns: planned_scan_columns,
+            } = input.as_ref()
+        {
+            assert_eq!(resolved_relation.table_epoch, relation.table_epoch);
+            assert_eq!(resolved_relation.relation.relation_id, relation.relation_id);
+            assert_eq!(
+                planned_scan_columns.len(),
+                resolved_relation.relation.columns.len()
+            );
+            for planned_column in planned_scan_columns {
+                let declared_column = resolved_relation
+                    .relation
+                    .columns
+                    .iter()
+                    .find(|column| column.ordinal == planned_column.ordinal)
+                    .ok_or("executor metadata omitted a planned scan column")?;
+                assert_eq!(declared_column.column_id, planned_column.column_id);
+                assert_eq!(declared_column.scalar_type, planned_column.scalar_type);
+                assert_eq!(declared_column.nullable, planned_column.nullable);
+            }
         }
         prdb_engine::ipc::write_frame(
             &mut executor_plan_client,
@@ -2014,8 +2094,8 @@ pub(super) fn planner_stream_estimate_allowance_falls_back_without_aborting_invo
                 operation: IpcOperation::ResolveRelation as u16,
                 request_id: 2,
                 payload: ResolveRelationRequest {
-                    schema_name: filtered_plan.relation.schema_name.clone(),
-                    relation_name: filtered_plan.relation.relation_name.clone(),
+                    schema_name: filtered_plan.schema_name.clone(),
+                    relation_name: "observations".to_owned(),
                 }
                 .encode()?,
             },
@@ -2030,7 +2110,7 @@ pub(super) fn planner_stream_estimate_allowance_falls_back_without_aborting_invo
                 handle,
                 description,
             } => {
-                assert_eq!(description.relation_id, filtered_plan.relation.relation_id);
+                assert_eq!(description.relation_id, table.table_id);
                 (handle, description)
             }
             prdb_engine::executor_ipc::ResolveRelationResponse::Unavailable => {
@@ -2044,10 +2124,7 @@ pub(super) fn planner_stream_estimate_allowance_falls_back_without_aborting_invo
                 request_id: 3,
                 payload: prdb_engine::executor_ipc::OpenScanRequest {
                     relation: executor_handle,
-                    column_ids: planned_scan_columns
-                        .iter()
-                        .map(|column| column.column_id)
-                        .collect(),
+                    column_ids: vec![table.column_ids[0]],
                 }
                 .encode()?,
             },
@@ -2118,10 +2195,10 @@ pub(super) fn planner_stream_estimate_allowance_falls_back_without_aborting_invo
     let constant_invocation_id = id(0xe3);
     let mut constant_invocation =
         storage.begin_invocation(constant_invocation_id, actor, 9_999, 8, 512)?;
-    let constant_predicate = prdb_engine::optimizer_binding::BoundPredicate::Compare {
-        operator: prdb_engine::optimizer_request::Comparison::Equal,
-        left: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Integer(1)),
-        right: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Integer(2)),
+    let constant_predicate = prdb_engine::optimizer_ir::BoundExpr::Compare {
+        op: prdb_engine::optimizer_ir::Comparison::Equal,
+        left: Box::new(prdb_engine::optimizer_ir::BoundExpr::Integer(1)),
+        right: Box::new(prdb_engine::optimizer_ir::BoundExpr::Integer(2)),
     };
     let (mut constant_client, mut constant_server) = std::os::unix::net::UnixStream::pair()?;
     constant_client.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -2132,7 +2209,7 @@ pub(super) fn planner_stream_estimate_allowance_falls_back_without_aborting_invo
             &IpcFrame {
                 operation: IpcOperation::EstimateScan as u16,
                 request_id: 1,
-                payload: EstimatePredicateRequest::from_bound_predicate(
+                payload: EstimatePredicateRequest::from_bound_expr(
                     "planner_stats".to_owned(),
                     "observations".to_owned(),
                     &constant_predicate,

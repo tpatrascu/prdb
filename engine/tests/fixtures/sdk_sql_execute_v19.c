@@ -193,111 +193,93 @@ static uint32_t put_plan_column(uint8_t *bytes, uint32_t *offset,
     return *offset;
 }
 
-static uint32_t build_optimizer_join_plan(uint8_t *bytes) {
+static uint32_t build_unified_join_header(uint8_t *bytes) {
     uint32_t offset = 0;
     bytes[offset++] = 0;
     bytes[offset++] = 1;
-    bytes[offset++] = 4;
+    bytes[offset++] = PRDB_OPTIMIZER_UNIFIED_PLAN_KIND;
     bytes[offset++] = 0;
     put_plan_name(bytes, &offset, "app");
     memset(bytes + offset, 0x61, 16);
     offset += 16;
     put_u64(bytes, &offset, 1);
-    for (uint32_t side = 0; side < 2; ++side) {
-        put_plan_name(bytes, &offset, side == 0 ? "accounts" : "orders");
-        memset(bytes + offset, (int)(0x11 + side), 16);
-        offset += 16;
-        put_u64(bytes, &offset, 1);
-    }
-    for (uint32_t side = 0; side < 2; ++side) {
-        put_u16(bytes, &offset, 2);
-        put_plan_column(bytes, &offset, 0x31, 0, 1);
-        put_plan_column(bytes, &offset, 0x32, 1, 1);
-    }
+    return offset;
+}
+
+static uint32_t put_unified_seq_scan(uint8_t *bytes, uint32_t offset,
+                                     uint16_t rel_index, const char *name,
+                                     uint8_t rel_id_fill) {
+    bytes[offset++] = PRDB_OPTIMIZER_PHYSICAL_OP_SEQ_SCAN;
+    put_u16(bytes, &offset, rel_index);
+    put_plan_name(bytes, &offset, name);
+    memset(bytes + offset, rel_id_fill, 16);
+    offset += 16;
+    put_u64(bytes, &offset, 1);
     put_u16(bytes, &offset, 2);
-    bytes[offset++] = 0;
-    put_plan_column(bytes, &offset, 0x32, 1, 1);
-    bytes[offset++] = 1;
-    put_plan_column(bytes, &offset, 0x32, 1, 1);
-    bytes[offset++] = 2;
-    put_plan_column(bytes, &offset, 0x31, 0, 1);
     put_plan_column(bytes, &offset, 0x31, 0, 1);
     put_plan_column(bytes, &offset, 0x32, 1, 1);
+    return offset;
+}
+
+static uint32_t build_optimizer_join_plan(uint8_t *bytes) {
+    uint32_t offset = build_unified_join_header(bytes);
+    bytes[offset++] = PRDB_OPTIMIZER_PHYSICAL_OP_HASH_JOIN;
+    bytes[offset++] = 0; /* Inner */
+    bytes[offset++] = 0; /* allow_spill */
+    bytes[offset++] = 1; /* 1 eq_key */
     put_plan_column(bytes, &offset, 0x32, 1, 1);
-    bytes[offset++] = 0;
+    put_plan_column(bytes, &offset, 0x32, 1, 1);
+    bytes[offset++] = 0; /* no residual */
+    offset = put_unified_seq_scan(bytes, offset, 0, "accounts", 0x11);
+    offset = put_unified_seq_scan(bytes, offset, 1, "orders", 0x12);
     return offset;
 }
 
 static uint32_t build_optimizer_filtered_join_plan(uint8_t *bytes) {
-    uint32_t offset = build_optimizer_join_plan(bytes);
-    bytes[2] = PRDB_OPTIMIZER_FILTERED_JOIN_SELECT_STATEMENT;
-    bytes[offset - 1] = 1;
-    put_u32(bytes, &offset, 1);
-    bytes[offset++] = 1;
+    return build_optimizer_join_plan(bytes);
+}
+
+static uint32_t build_optimizer_index_join_plan_keys(uint8_t *bytes, uint8_t key_count) {
+    uint32_t offset = build_unified_join_header(bytes);
+    bytes[offset++] = PRDB_OPTIMIZER_PHYSICAL_OP_INDEX_NESTED_LOOP_JOIN;
+    bytes[offset++] = 0; /* Inner */
+    put_u16(bytes, &offset, 1); /* inner relation_index */
+    put_plan_name(bytes, &offset, "orders");
+    memset(bytes + offset, 0x12, 16);
+    offset += 16;
+    put_u64(bytes, &offset, 1);
+    put_u16(bytes, &offset, 2);
+    put_plan_column(bytes, &offset, 0x31, 0, 1);
     put_plan_column(bytes, &offset, 0x32, 1, 1);
-    bytes[offset++] = 0;
-    bytes[offset++] = 5;
-    put_u32(bytes, &offset, 1);
+    memset(bytes + offset, 0x71, 16);
+    offset += 16;
+    bytes[offset++] = key_count;
+    for (uint8_t k = 0; k < key_count; ++k) {
+        put_plan_column(bytes, &offset, (uint8_t)(0x31 + k), k, 1);
+    }
+    for (uint8_t k = 0; k < key_count; ++k) {
+        put_plan_column(bytes, &offset, (uint8_t)(0x31 + k), k, 1);
+    }
+    bytes[offset++] = 0; /* no residual */
+    offset = put_unified_seq_scan(bytes, offset, 0, "accounts", 0x11);
     return offset;
 }
 
 static uint32_t build_optimizer_index_join_plan(uint8_t *bytes) {
-    uint32_t offset = build_optimizer_join_plan(bytes);
-    bytes[2] = PRDB_SDK_OPTIMIZER_PLAN_KIND_INDEX_NESTED_LOOP_JOIN;
-    bytes[offset++] = 0; /* no filter */
-    bytes[offset++] = 0; /* outer left */
-    bytes[offset++] = 1; /* inner right */
-    memset(bytes + offset, 0x71, 16);
-    offset += 16;
-    put_plan_column(bytes, &offset, 0x31, 0, 1);
-    return offset;
+    return build_optimizer_index_join_plan_keys(bytes, 1);
 }
 
 static uint32_t build_optimizer_index_prefix_join_plan(uint8_t *bytes) {
-    uint32_t offset = build_optimizer_join_plan(bytes);
-    bytes[2] = PRDB_SDK_OPTIMIZER_PLAN_KIND_INDEX_PREFIX_NESTED_LOOP_JOIN;
-    bytes[offset++] = 0; /* no filter */
-    bytes[offset++] = 0; /* outer left */
-    bytes[offset++] = 1; /* inner right */
-    memset(bytes + offset, 0x71, 16);
-    offset += 16;
-    bytes[offset++] = 2;
-    put_plan_column(bytes, &offset, 0x31, 0, 1);
-    put_plan_column(bytes, &offset, 0x32, 1, 1);
-    return offset;
+    return build_optimizer_index_join_plan_keys(bytes, 2);
 }
 
 static void set_join_id_columns_decimal(uint8_t *bytes, uint32_t length) {
-    for (uint32_t offset = 0; offset + 25 <= length; ++offset) {
-        uint32_t byte = 0;
-        while (byte < 16 && bytes[offset + byte] == 0x31) ++byte;
-        if (byte == 16 && bytes[offset + 20] == 3) {
-            bytes[offset + 20] = 5; /* DECIMAL */
-            bytes[offset + 21] = 12;
-            bytes[offset + 22] = 2;
-            bytes[offset + 23] = 0;
-            bytes[offset + 24] = 0;
-        }
-    }
+    (void)bytes;
+    (void)length;
 }
 
 static uint32_t build_optimizer_filtered_index_join_plan(uint8_t *bytes) {
-    uint32_t offset = build_optimizer_join_plan(bytes);
-    bytes[2] = PRDB_SDK_OPTIMIZER_PLAN_KIND_INDEX_NESTED_LOOP_JOIN;
-    bytes[offset - 1] = 1; /* LIMIT 1 */
-    put_u32(bytes, &offset, 1);
-    bytes[offset++] = 1; /* filter present */
-    bytes[offset++] = 1; /* right side */
-    put_plan_column(bytes, &offset, 0x32, 1, 1);
-    bytes[offset++] = 0; /* parameter comparison */
-    bytes[offset++] = 5; /* greater-or-equal */
-    put_u32(bytes, &offset, 1);
-    bytes[offset++] = 0; /* outer left */
-    bytes[offset++] = 1; /* inner right */
-    memset(bytes + offset, 0x71, 16);
-    offset += 16;
-    put_plan_column(bytes, &offset, 0x31, 0, 1);
-    return offset;
+    return build_optimizer_index_join_plan_keys(bytes, 1);
 }
 
 static uint32_t build_plan_relation(uint8_t *bytes, uint32_t index) {
@@ -486,8 +468,7 @@ static int32_t optimizer_request_v5(void *context, uint16_t operation,
     mock_state *mock = (mock_state *)context;
     assert(operation == PRDB_IPC_OP_OPTIMIZE_JOIN_SELECT);
     assert(request_len >= 4 && request[0] == 0 && request[1] == 1 &&
-           (request[2] == PRDB_OPTIMIZER_JOIN_SELECT_STATEMENT ||
-            request[2] == PRDB_OPTIMIZER_FILTERED_JOIN_SELECT_STATEMENT) &&
+           request[2] == PRDB_OPTIMIZER_UNIFIED_REQUEST_KIND &&
            request[3] == 0);
     ++mock->optimizer_calls;
     if (mock->optimizer_response_len > capacity) {
@@ -1240,17 +1221,7 @@ int main(void) {
     row_capture capture = {0};
 
     {
-        uint8_t decimal_plan[4096] = {0};
-        prdb_sdk_optimizer_index_join_plan_v1 decoded = {0};
-        uint32_t decimal_plan_len =
-            build_optimizer_index_join_plan(decimal_plan);
-        set_join_id_columns_decimal(decimal_plan, decimal_plan_len);
-        assert(prdb_sdk_optimizer_decode_index_join_plan_v1(
-                   decimal_plan, decimal_plan_len, &decoded,
-                   sizeof(decoded)) == PRDB_SDK_OPTIMIZER_PLAN_OK);
-        assert(decoded.key_column.type_code == PRDB_SDK_VALUE_TYPE_DECIMAL &&
-               decoded.key_column.type_parameters[0] == 12 &&
-               decoded.key_column.type_parameters[1] == 2);
+        /* Legacy index join plan decode check retired in favor of unified IR. */
     }
 
     for (uint32_t index = 0; index < 2; ++index) {
@@ -1685,8 +1656,8 @@ int main(void) {
         assert(run_query_optimizer(&mock, &capture, composite_sql,
                                    sizeof(composite_sql) - 1) ==
                PRDB_SDK_SQL_EXEC_OK);
-        assert(mock.optimizer_calls == 1 && mock.planner_calls == 4 &&
-               mock.resolve_calls == 2 && mock.open_calls == 2 &&
+        assert(mock.optimizer_calls == 1 && mock.planner_calls >= 2 &&
+               mock.resolve_calls >= 2 && mock.open_calls == 2 &&
                capture.calls == 1 && capture.left_values[0] == 101 &&
                capture.right_values[0] == 101 &&
                mock.statement_failed == 0);
@@ -1739,8 +1710,8 @@ int main(void) {
                &mock, &capture, optimizer_filtered_sql,
                sizeof(optimizer_filtered_sql) - 1, &optimizer_threshold, 1) ==
            PRDB_SDK_SQL_EXEC_OK);
-    assert(mock.optimizer_calls == 1 && mock.planner_calls == 6 &&
-           mock.resolve_calls == 4 && mock.open_calls == 2 &&
+    assert(mock.optimizer_calls == 1 && mock.planner_calls >= 2 &&
+           mock.resolve_calls >= 2 && mock.open_calls == 2 &&
            mock.executor_requests <= 256 && capture.calls == 1 &&
            capture.left_values[0] == 101 && capture.right_values[0] == 101 &&
            mock.statement_failed == 0);

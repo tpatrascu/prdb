@@ -118,17 +118,20 @@ pub(super) fn authorized_scan_estimate_counts_sanitized_cells_and_private_writes
         dependencies: &[],
     };
 
-    let predicate = prdb_engine::optimizer_binding::BoundPredicate::Compare {
-        operator: prdb_engine::optimizer_request::Comparison::Equal,
-        left: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Column(
-            prdb_engine::optimizer_binding::BoundColumn {
-                column_id: column_ids[0],
-                ordinal: 0,
-                scalar_type: ScalarType::Text,
-                nullable: true,
+    let predicate = prdb_engine::optimizer_ir::BoundExpr::Compare {
+        op: prdb_engine::optimizer_ir::Comparison::Equal,
+        left: Box::new(prdb_engine::optimizer_ir::BoundExpr::Column(
+            prdb_engine::optimizer_ir::BoundColumnRef {
+                relation_index: 0,
+                column: prdb_engine::optimizer_ir::BoundColumn {
+                    column_id: column_ids[0],
+                    ordinal: 0,
+                    scalar_type: ScalarType::Text,
+                    nullable: true,
+                },
             },
         )),
-        right: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Text(
+        right: Box::new(prdb_engine::optimizer_ir::BoundExpr::Text(
             "first".to_owned(),
         )),
     };
@@ -152,17 +155,20 @@ pub(super) fn authorized_scan_estimate_counts_sanitized_cells_and_private_writes
         observer.estimate_authorized_predicate_at_most(table_id, &projection, &predicate, 4,)?,
         Some((2, 1))
     );
-    let hidden_predicate = prdb_engine::optimizer_binding::BoundPredicate::Compare {
-        operator: prdb_engine::optimizer_request::Comparison::Equal,
-        left: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Column(
-            prdb_engine::optimizer_binding::BoundColumn {
-                column_id: column_ids[1],
-                ordinal: 1,
-                scalar_type: ScalarType::Text,
-                nullable: false,
+    let hidden_predicate = prdb_engine::optimizer_ir::BoundExpr::Compare {
+        op: prdb_engine::optimizer_ir::Comparison::Equal,
+        left: Box::new(prdb_engine::optimizer_ir::BoundExpr::Column(
+            prdb_engine::optimizer_ir::BoundColumnRef {
+                relation_index: 0,
+                column: prdb_engine::optimizer_ir::BoundColumn {
+                    column_id: column_ids[1],
+                    ordinal: 1,
+                    scalar_type: ScalarType::Text,
+                    nullable: false,
+                },
             },
         )),
-        right: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Text(
+        right: Box::new(prdb_engine::optimizer_ir::BoundExpr::Text(
             "secret-one".to_owned(),
         )),
     };
@@ -333,17 +339,20 @@ pub(super) fn authorized_scan_estimate_counts_sanitized_cells_and_private_writes
         writer.estimate_authorized_scan(table_id, &projection)?,
         private_summary
     );
-    let changed_predicate = prdb_engine::optimizer_binding::BoundPredicate::Compare {
-        operator: prdb_engine::optimizer_request::Comparison::Equal,
-        left: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Column(
-            prdb_engine::optimizer_binding::BoundColumn {
-                column_id: column_ids[0],
-                ordinal: 0,
-                scalar_type: ScalarType::Text,
-                nullable: true,
+    let changed_predicate = prdb_engine::optimizer_ir::BoundExpr::Compare {
+        op: prdb_engine::optimizer_ir::Comparison::Equal,
+        left: Box::new(prdb_engine::optimizer_ir::BoundExpr::Column(
+            prdb_engine::optimizer_ir::BoundColumnRef {
+                relation_index: 0,
+                column: prdb_engine::optimizer_ir::BoundColumn {
+                    column_id: column_ids[0],
+                    ordinal: 0,
+                    scalar_type: ScalarType::Text,
+                    nullable: true,
+                },
             },
         )),
-        right: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Text(
+        right: Box::new(prdb_engine::optimizer_ir::BoundExpr::Text(
             "changed".to_owned(),
         )),
     };
@@ -721,7 +730,7 @@ pub(super) fn constant_predicate_reuses_fresh_population_without_reading_rows()
     let estimate = invocation.estimate_authorized_predicate_at_most(
         table_id,
         &projection,
-        &prdb_engine::optimizer_binding::BoundPredicate::Boolean(false),
+        &prdb_engine::optimizer_ir::BoundExpr::Boolean(false),
         4,
     )?;
     assert_eq!(
@@ -733,7 +742,7 @@ pub(super) fn constant_predicate_reuses_fresh_population_without_reading_rows()
         invocation.estimate_authorized_predicate_at_most(
             table_id,
             &projection,
-            &prdb_engine::optimizer_binding::BoundPredicate::Boolean(true),
+            &prdb_engine::optimizer_ir::BoundExpr::Boolean(true),
             4,
         )?,
         Some((2, 2))
@@ -742,16 +751,16 @@ pub(super) fn constant_predicate_reuses_fresh_population_without_reading_rows()
         invocation.estimate_authorized_predicate_at_most(
             table_id,
             &projection,
-            &prdb_engine::optimizer_binding::BoundPredicate::Null,
+            &prdb_engine::optimizer_ir::BoundExpr::Null,
             4,
         )?,
         Some((2, 0)),
         "SQL NULL is not a matching WHERE predicate"
     );
-    let constant_false_comparison = prdb_engine::optimizer_binding::BoundPredicate::Compare {
-        operator: prdb_engine::optimizer_request::Comparison::Equal,
-        left: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Integer(1)),
-        right: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Integer(2)),
+    let constant_false_comparison = prdb_engine::optimizer_ir::BoundExpr::Compare {
+        op: prdb_engine::optimizer_ir::Comparison::Equal,
+        left: Box::new(prdb_engine::optimizer_ir::BoundExpr::Integer(1)),
+        right: Box::new(prdb_engine::optimizer_ir::BoundExpr::Integer(2)),
     };
     assert_eq!(
         invocation.estimate_authorized_predicate_at_most(
@@ -762,9 +771,10 @@ pub(super) fn constant_predicate_reuses_fresh_population_without_reading_rows()
         )?,
         Some((2, 0))
     );
-    let null_is_null = prdb_engine::optimizer_binding::BoundPredicate::IsNull(Box::new(
-        prdb_engine::optimizer_binding::BoundPredicate::Null,
-    ));
+    let null_is_null = prdb_engine::optimizer_ir::BoundExpr::IsNull {
+        expr: Box::new(prdb_engine::optimizer_ir::BoundExpr::Null),
+        negated: false,
+    };
     assert_eq!(
         invocation.estimate_authorized_predicate_at_most(
             table_id,
@@ -774,17 +784,20 @@ pub(super) fn constant_predicate_reuses_fresh_population_without_reading_rows()
         )?,
         Some((2, 2))
     );
-    let indexed_match = prdb_engine::optimizer_binding::BoundPredicate::Compare {
-        operator: prdb_engine::optimizer_request::Comparison::Equal,
-        left: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Column(
-            prdb_engine::optimizer_binding::BoundColumn {
-                column_id,
-                ordinal: 0,
-                scalar_type: ScalarType::Bytea,
-                nullable: true,
+    let indexed_match = prdb_engine::optimizer_ir::BoundExpr::Compare {
+        op: prdb_engine::optimizer_ir::Comparison::Equal,
+        left: Box::new(prdb_engine::optimizer_ir::BoundExpr::Column(
+            prdb_engine::optimizer_ir::BoundColumnRef {
+                relation_index: 0,
+                column: prdb_engine::optimizer_ir::BoundColumn {
+                    column_id,
+                    ordinal: 0,
+                    scalar_type: ScalarType::Bytea,
+                    nullable: true,
+                },
             },
         )),
-        right: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Bytea(
+        right: Box::new(prdb_engine::optimizer_ir::BoundExpr::Bytea(
             b"seed".to_vec(),
         )),
     };
@@ -878,7 +891,7 @@ pub(super) fn constant_predicate_reuses_fresh_population_without_reading_rows()
         invocation.estimate_authorized_predicate_at_most(
             table_id,
             &projection,
-            &prdb_engine::optimizer_binding::BoundPredicate::Boolean(false),
+            &prdb_engine::optimizer_ir::BoundExpr::Boolean(false),
             4,
         )?,
         Some((3, 0)),
@@ -903,7 +916,7 @@ pub(super) fn constant_predicate_reuses_fresh_population_without_reading_rows()
         stale_statistics_invocation.estimate_authorized_predicate_at_most(
             table_id,
             &projection,
-            &prdb_engine::optimizer_binding::BoundPredicate::Boolean(false),
+            &prdb_engine::optimizer_ir::BoundExpr::Boolean(false),
             4,
         )?,
         Some((3, 0)),
@@ -915,8 +928,7 @@ pub(super) fn constant_predicate_reuses_fresh_population_without_reading_rows()
 
 pub(super) fn authorized_predicate_estimate_compares_readable_decimal_columns()
 -> Result<(), Box<dyn std::error::Error>> {
-    use prdb_engine::optimizer_binding::{BoundColumn, BoundPredicate};
-    use prdb_engine::optimizer_request::Comparison;
+    use prdb_engine::optimizer_ir::{BoundColumn, BoundExpr, Comparison};
 
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
@@ -1042,20 +1054,30 @@ pub(super) fn authorized_predicate_estimate_compares_readable_decimal_columns()
         policy_driving_columns: &[],
         dependencies: &[],
     };
-    let predicate = |operator| BoundPredicate::Compare {
-        operator,
-        left: Box::new(BoundPredicate::Column(BoundColumn {
-            column_id: column_ids[0],
-            ordinal: 0,
-            scalar_type: decimal_type,
-            nullable: true,
-        })),
-        right: Box::new(BoundPredicate::Column(BoundColumn {
-            column_id: column_ids[1],
-            ordinal: 1,
-            scalar_type: decimal_type,
-            nullable: true,
-        })),
+    let predicate = |operator| BoundExpr::Compare {
+        op: operator,
+        left: Box::new(BoundExpr::Column(
+            prdb_engine::optimizer_ir::BoundColumnRef {
+                relation_index: 0,
+                column: BoundColumn {
+                    column_id: column_ids[0],
+                    ordinal: 0,
+                    scalar_type: decimal_type,
+                    nullable: true,
+                },
+            },
+        )),
+        right: Box::new(BoundExpr::Column(
+            prdb_engine::optimizer_ir::BoundColumnRef {
+                relation_index: 0,
+                column: BoundColumn {
+                    column_id: column_ids[1],
+                    ordinal: 1,
+                    scalar_type: decimal_type,
+                    nullable: true,
+                },
+            },
+        )),
     };
     let mut observer = InvocationTransaction::begin(&database, [0x55; 16], [9; 16], 9_999, 8, 512)?;
     assert_eq!(
@@ -1090,8 +1112,7 @@ pub(super) fn authorized_predicate_estimate_compares_readable_decimal_columns()
 
 pub(super) fn authorized_predicate_estimate_compares_readable_scalar_columns()
 -> Result<(), Box<dyn std::error::Error>> {
-    use prdb_engine::optimizer_binding::{BoundColumn, BoundPredicate};
-    use prdb_engine::optimizer_request::Comparison;
+    use prdb_engine::optimizer_ir::{BoundColumn, BoundExpr, Comparison};
 
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
@@ -1260,20 +1281,30 @@ pub(super) fn authorized_predicate_estimate_compares_readable_scalar_columns()
     for (case_index, (scalar_type, _, _, _)) in cases.iter().enumerate() {
         let left_ordinal = case_index * 2;
         let right_ordinal = left_ordinal + 1;
-        let predicate = |operator| BoundPredicate::Compare {
-            operator,
-            left: Box::new(BoundPredicate::Column(BoundColumn {
-                column_id: column_ids[left_ordinal],
-                ordinal: left_ordinal as u32,
-                scalar_type: *scalar_type,
-                nullable: true,
-            })),
-            right: Box::new(BoundPredicate::Column(BoundColumn {
-                column_id: column_ids[right_ordinal],
-                ordinal: right_ordinal as u32,
-                scalar_type: *scalar_type,
-                nullable: true,
-            })),
+        let predicate = |operator| BoundExpr::Compare {
+            op: operator,
+            left: Box::new(BoundExpr::Column(
+                prdb_engine::optimizer_ir::BoundColumnRef {
+                    relation_index: 0,
+                    column: BoundColumn {
+                        column_id: column_ids[left_ordinal],
+                        ordinal: left_ordinal as u32,
+                        scalar_type: *scalar_type,
+                        nullable: true,
+                    },
+                },
+            )),
+            right: Box::new(BoundExpr::Column(
+                prdb_engine::optimizer_ir::BoundColumnRef {
+                    relation_index: 0,
+                    column: BoundColumn {
+                        column_id: column_ids[right_ordinal],
+                        ordinal: right_ordinal as u32,
+                        scalar_type: *scalar_type,
+                        nullable: true,
+                    },
+                },
+            )),
         };
         assert_eq!(
             observer.estimate_authorized_predicate_at_most(
@@ -1311,15 +1342,20 @@ pub(super) fn authorized_predicate_estimate_compares_readable_scalar_columns()
         .position(|(scalar_type, _, _, _)| *scalar_type == ScalarType::Date)
         .expect("fixture has a DATE comparison pair");
     let date_ordinal = date_case * 2 + 1;
-    let date_literal_predicate = BoundPredicate::Compare {
-        operator: Comparison::Equal,
-        left: Box::new(BoundPredicate::Column(BoundColumn {
-            column_id: column_ids[date_ordinal],
-            ordinal: date_ordinal as u32,
-            scalar_type: ScalarType::Date,
-            nullable: true,
-        })),
-        right: Box::new(BoundPredicate::Date(11)),
+    let date_literal_predicate = BoundExpr::Compare {
+        op: Comparison::Equal,
+        left: Box::new(BoundExpr::Column(
+            prdb_engine::optimizer_ir::BoundColumnRef {
+                relation_index: 0,
+                column: BoundColumn {
+                    column_id: column_ids[date_ordinal],
+                    ordinal: date_ordinal as u32,
+                    scalar_type: ScalarType::Date,
+                    nullable: true,
+                },
+            },
+        )),
+        right: Box::new(BoundExpr::Date(11)),
     };
     assert_eq!(
         observer.estimate_authorized_predicate_at_most(
@@ -1336,15 +1372,20 @@ pub(super) fn authorized_predicate_estimate_compares_readable_scalar_columns()
         .position(|(scalar_type, _, _, _)| *scalar_type == ScalarType::Uuid)
         .expect("fixture has a UUID comparison pair");
     let uuid_ordinal = uuid_case * 2 + 1;
-    let uuid_literal_predicate = BoundPredicate::Compare {
-        operator: Comparison::Equal,
-        left: Box::new(BoundPredicate::Column(BoundColumn {
-            column_id: column_ids[uuid_ordinal],
-            ordinal: uuid_ordinal as u32,
-            scalar_type: ScalarType::Uuid,
-            nullable: true,
-        })),
-        right: Box::new(BoundPredicate::Uuid([2; 16])),
+    let uuid_literal_predicate = BoundExpr::Compare {
+        op: Comparison::Equal,
+        left: Box::new(BoundExpr::Column(
+            prdb_engine::optimizer_ir::BoundColumnRef {
+                relation_index: 0,
+                column: BoundColumn {
+                    column_id: column_ids[uuid_ordinal],
+                    ordinal: uuid_ordinal as u32,
+                    scalar_type: ScalarType::Uuid,
+                    nullable: true,
+                },
+            },
+        )),
+        right: Box::new(BoundExpr::Uuid([2; 16])),
     };
     assert_eq!(
         observer.estimate_authorized_predicate_at_most(
@@ -1361,15 +1402,20 @@ pub(super) fn authorized_predicate_estimate_compares_readable_scalar_columns()
         .position(|(scalar_type, _, _, _)| *scalar_type == ScalarType::TimestampTz)
         .expect("fixture has a TIMESTAMPTZ comparison pair");
     let timestamp_ordinal = timestamp_case * 2 + 1;
-    let timestamp_literal_predicate = BoundPredicate::Compare {
-        operator: Comparison::Equal,
-        left: Box::new(BoundPredicate::Column(BoundColumn {
-            column_id: column_ids[timestamp_ordinal],
-            ordinal: timestamp_ordinal as u32,
-            scalar_type: ScalarType::TimestampTz,
-            nullable: true,
-        })),
-        right: Box::new(BoundPredicate::TimestampTz(100)),
+    let timestamp_literal_predicate = BoundExpr::Compare {
+        op: Comparison::Equal,
+        left: Box::new(BoundExpr::Column(
+            prdb_engine::optimizer_ir::BoundColumnRef {
+                relation_index: 0,
+                column: BoundColumn {
+                    column_id: column_ids[timestamp_ordinal],
+                    ordinal: timestamp_ordinal as u32,
+                    scalar_type: ScalarType::TimestampTz,
+                    nullable: true,
+                },
+            },
+        )),
+        right: Box::new(BoundExpr::TimestampTz(100)),
     };
     assert_eq!(
         observer.estimate_authorized_predicate_at_most(
@@ -1386,15 +1432,20 @@ pub(super) fn authorized_predicate_estimate_compares_readable_scalar_columns()
         .position(|(scalar_type, _, _, _)| *scalar_type == ScalarType::Bytea)
         .expect("fixture has a BYTEA comparison pair");
     let bytea_ordinal = bytea_case * 2 + 1;
-    let bytea_literal_predicate = BoundPredicate::Compare {
-        operator: Comparison::Equal,
-        left: Box::new(BoundPredicate::Column(BoundColumn {
-            column_id: column_ids[bytea_ordinal],
-            ordinal: bytea_ordinal as u32,
-            scalar_type: ScalarType::Bytea,
-            nullable: true,
-        })),
-        right: Box::new(BoundPredicate::Bytea(vec![1, 2])),
+    let bytea_literal_predicate = BoundExpr::Compare {
+        op: Comparison::Equal,
+        left: Box::new(BoundExpr::Column(
+            prdb_engine::optimizer_ir::BoundColumnRef {
+                relation_index: 0,
+                column: BoundColumn {
+                    column_id: column_ids[bytea_ordinal],
+                    ordinal: bytea_ordinal as u32,
+                    scalar_type: ScalarType::Bytea,
+                    nullable: true,
+                },
+            },
+        )),
+        right: Box::new(BoundExpr::Bytea(vec![1, 2])),
     };
     assert_eq!(
         observer.estimate_authorized_predicate_at_most(
@@ -1411,18 +1462,23 @@ pub(super) fn authorized_predicate_estimate_compares_readable_scalar_columns()
         .position(|(scalar_type, _, _, _)| matches!(scalar_type, ScalarType::Decimal { .. }))
         .expect("fixture has a DECIMAL comparison pair");
     let decimal_ordinal = decimal_case * 2 + 1;
-    let decimal_literal_predicate = BoundPredicate::Compare {
-        operator: Comparison::Equal,
-        left: Box::new(BoundPredicate::Column(BoundColumn {
-            column_id: column_ids[decimal_ordinal],
-            ordinal: decimal_ordinal as u32,
-            scalar_type: ScalarType::Decimal {
-                precision: 8,
-                scale: 2,
+    let decimal_literal_predicate = BoundExpr::Compare {
+        op: Comparison::Equal,
+        left: Box::new(BoundExpr::Column(
+            prdb_engine::optimizer_ir::BoundColumnRef {
+                relation_index: 0,
+                column: BoundColumn {
+                    column_id: column_ids[decimal_ordinal],
+                    ordinal: decimal_ordinal as u32,
+                    scalar_type: ScalarType::Decimal {
+                        precision: 8,
+                        scale: 2,
+                    },
+                    nullable: true,
+                },
             },
-            nullable: true,
-        })),
-        right: Box::new(BoundPredicate::Decimal(1_200)),
+        )),
+        right: Box::new(BoundExpr::Decimal(1_200)),
     };
     assert_eq!(
         observer.estimate_authorized_predicate_at_most(
@@ -1434,15 +1490,20 @@ pub(super) fn authorized_predicate_estimate_compares_readable_scalar_columns()
         Some((3, 1)),
         "DECIMAL literals should compare at the bound column scale"
     );
-    let invalid_date_literal = BoundPredicate::Compare {
-        operator: Comparison::Equal,
-        left: Box::new(BoundPredicate::Column(BoundColumn {
-            column_id: column_ids[date_ordinal],
-            ordinal: date_ordinal as u32,
-            scalar_type: ScalarType::Date,
-            nullable: true,
-        })),
-        right: Box::new(BoundPredicate::Date(i32::MAX)),
+    let invalid_date_literal = BoundExpr::Compare {
+        op: Comparison::Equal,
+        left: Box::new(BoundExpr::Column(
+            prdb_engine::optimizer_ir::BoundColumnRef {
+                relation_index: 0,
+                column: BoundColumn {
+                    column_id: column_ids[date_ordinal],
+                    ordinal: date_ordinal as u32,
+                    scalar_type: ScalarType::Date,
+                    nullable: true,
+                },
+            },
+        )),
+        right: Box::new(BoundExpr::Date(i32::MAX)),
     };
     assert_eq!(
         observer.estimate_authorized_predicate_at_most(
@@ -1454,20 +1515,30 @@ pub(super) fn authorized_predicate_estimate_compares_readable_scalar_columns()
         None,
         "DATE estimates must reject values outside the scalar range"
     );
-    let incompatible_column_predicate = BoundPredicate::Compare {
-        operator: Comparison::Equal,
-        left: Box::new(BoundPredicate::Column(BoundColumn {
-            column_id: column_ids[2],
-            ordinal: 2,
-            scalar_type: ScalarType::SmallInt,
-            nullable: true,
-        })),
-        right: Box::new(BoundPredicate::Column(BoundColumn {
-            column_id: column_ids[4],
-            ordinal: 4,
-            scalar_type: ScalarType::Integer,
-            nullable: true,
-        })),
+    let incompatible_column_predicate = BoundExpr::Compare {
+        op: Comparison::Equal,
+        left: Box::new(BoundExpr::Column(
+            prdb_engine::optimizer_ir::BoundColumnRef {
+                relation_index: 0,
+                column: BoundColumn {
+                    column_id: column_ids[2],
+                    ordinal: 2,
+                    scalar_type: ScalarType::SmallInt,
+                    nullable: true,
+                },
+            },
+        )),
+        right: Box::new(BoundExpr::Column(
+            prdb_engine::optimizer_ir::BoundColumnRef {
+                relation_index: 0,
+                column: BoundColumn {
+                    column_id: column_ids[4],
+                    ordinal: 4,
+                    scalar_type: ScalarType::Integer,
+                    nullable: true,
+                },
+            },
+        )),
     };
     assert_eq!(
         observer.estimate_authorized_predicate_at_most(
@@ -1491,20 +1562,30 @@ pub(super) fn authorized_predicate_estimate_compares_readable_scalar_columns()
         .collect();
     oversized_values[bytea_left_ordinal] = Some(ScalarValue::Bytea(vec![7; 4097]));
     oversized_values[bytea_right_ordinal] = Some(ScalarValue::Bytea(vec![7; 4097]));
-    let oversized_predicate = BoundPredicate::Compare {
-        operator: Comparison::Equal,
-        left: Box::new(BoundPredicate::Column(BoundColumn {
-            column_id: column_ids[bytea_left_ordinal],
-            ordinal: bytea_left_ordinal as u32,
-            scalar_type: ScalarType::Bytea,
-            nullable: true,
-        })),
-        right: Box::new(BoundPredicate::Column(BoundColumn {
-            column_id: column_ids[bytea_right_ordinal],
-            ordinal: bytea_right_ordinal as u32,
-            scalar_type: ScalarType::Bytea,
-            nullable: true,
-        })),
+    let oversized_predicate = BoundExpr::Compare {
+        op: Comparison::Equal,
+        left: Box::new(BoundExpr::Column(
+            prdb_engine::optimizer_ir::BoundColumnRef {
+                relation_index: 0,
+                column: BoundColumn {
+                    column_id: column_ids[bytea_left_ordinal],
+                    ordinal: bytea_left_ordinal as u32,
+                    scalar_type: ScalarType::Bytea,
+                    nullable: true,
+                },
+            },
+        )),
+        right: Box::new(BoundExpr::Column(
+            prdb_engine::optimizer_ir::BoundColumnRef {
+                relation_index: 0,
+                column: BoundColumn {
+                    column_id: column_ids[bytea_right_ordinal],
+                    ordinal: bytea_right_ordinal as u32,
+                    scalar_type: ScalarType::Bytea,
+                    nullable: true,
+                },
+            },
+        )),
     };
     let mut oversized =
         InvocationTransaction::begin(&database, [0x64; 16], [9; 16], 9_999, 8, 65_536)?;

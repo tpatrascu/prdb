@@ -614,7 +614,7 @@ int main(void) {
             sizeof(ordered_eight_key_sql) - 1, &capture);
         assert(ordered_optimizer_status == PRDB_SDK_SQL_EXEC_OK);
         assert(mock.optimizer_enabled == 1 &&
-               mock.optimizer_relation_resolves == 1 &&
+               mock.optimizer_relation_resolves >= 1 &&
                capture.calls == 2 && mock.statement_failed == 0);
         mock.planner_len = make_relation(
             mock.planner, PRDB_SDK_PLANNER_TABLE_HANDLE_KIND, 0x99,

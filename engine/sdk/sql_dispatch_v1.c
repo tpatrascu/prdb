@@ -1714,12 +1714,9 @@ int32_t prdb_sdk_sql_run_statement_optimizer_v1(
                                    PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR);
         goto cleanup_optimizer;
     }
-    status = prdb_sdk_optimizer_execute_select_ast_with_parameters_to_result_v2(
+    status = prdb_sdk_optimizer_execute_select_unified_v1(
         host, &statement, values, parameter_count, schema, schema_len,
-        SQL_DISPATCH_CANDIDATES,
-        (uint16_t)workload_budgets.max_index_probe_candidates,
-        SQL_DISPATCH_BATCH_BYTES, request,
-        PRDB_SDK_OPTIMIZER_MAX_REQUEST_BYTES, optimizer_response,
+        request, PRDB_SDK_OPTIMIZER_MAX_REQUEST_BYTES, optimizer_response,
         SQL_DISPATCH_RESPONSE_BYTES, relation_response,
         SQL_DISPATCH_RESPONSE_BYTES, scan_response, SQL_DISPATCH_RESPONSE_BYTES,
         batch_response, SQL_DISPATCH_BATCH_BYTES, &relation, sizeof(relation),

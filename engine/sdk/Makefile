@@ -29,8 +29,7 @@ SDK_SQL_SPILL_SORT_SOURCE := engine/sdk/sql_spill_sort_v1.c
 SDK_SQL_SPILL_GROUP_SOURCE := engine/sdk/sql_spill_group_v1.c
 SDK_SQL_SPILL_JOIN_SOURCE := engine/sdk/sql_spill_join_v1.c
 SDK_SCOPE_SOURCE := engine/sdk/scope_v1.c
-SDK_OPTIMIZER_SOURCE := engine/sdk/optimizer_v1.c
-SDK_OPTIMIZER_PLAN_SOURCE := engine/sdk/optimizer_plan_v1.c
+SDK_OPTIMIZER_UNIFIED_SOURCE := engine/sdk/optimizer_unified_v1.c
 SDK_VALUE_OBJECT := $(BUILD_DIR)/value_v1.o
 SDK_BATCH_OBJECT := $(BUILD_DIR)/batch_v1.o
 SDK_OWNED_BATCH_OBJECT := $(BUILD_DIR)/owned_batch_v1.o
@@ -53,8 +52,7 @@ SDK_SQL_SPILL_SORT_OBJECT := $(BUILD_DIR)/sql_spill_sort_v1.o
 SDK_SQL_SPILL_GROUP_OBJECT := $(BUILD_DIR)/sql_spill_group_v1.o
 SDK_SQL_SPILL_JOIN_OBJECT := $(BUILD_DIR)/sql_spill_join_v1.o
 SDK_SCOPE_OBJECT := $(BUILD_DIR)/scope_v1.o
-SDK_OPTIMIZER_OBJECT := $(BUILD_DIR)/optimizer_v1.o
-SDK_OPTIMIZER_PLAN_OBJECT := $(BUILD_DIR)/optimizer_plan_v1.o
+SDK_OPTIMIZER_UNIFIED_OBJECT := $(BUILD_DIR)/optimizer_unified_v1.o
 SDK_SQL_DML_SOURCE := engine/sdk/sql_dml_v1.c
 SDK_SQL_EVAL_SOURCE := engine/sdk/sql_eval_v1.c
 SDK_SQL_PARSER_SOURCE := engine/sdk/sql_parser_v1.c
@@ -64,11 +62,6 @@ SDK_SQL_SELECT_GROUP_SOURCE := engine/sdk/sql_select_group_v1.c
 SDK_SQL_SELECT_COMPOSITE_SOURCE := engine/sdk/sql_select_composite_v1.c
 SDK_SQL_SELECT_JOIN_SOURCE := engine/sdk/sql_select_join_v1.c
 SDK_SQL_SELECT_HAVING_SOURCE := engine/sdk/sql_select_having_v1.c
-SDK_OPTIMIZER_PLAN_CODEC_SOURCE := engine/sdk/optimizer_plan_codec_v1.c
-SDK_OPTIMIZER_PLAN_DECODE_SOURCE := engine/sdk/optimizer_plan_decode_v1.c
-SDK_OPTIMIZER_PLAN_MATCH_SOURCE := engine/sdk/optimizer_plan_match_v1.c
-SDK_OPTIMIZER_PLAN_SCAN_SOURCE := engine/sdk/optimizer_plan_scan_v1.c
-SDK_OPTIMIZER_PLAN_EXEC_SOURCE := engine/sdk/optimizer_plan_exec_v1.c
 SDK_SQL_SOURCES := $(SDK_SQL_SOURCE) $(SDK_SQL_DML_SOURCE) $(SDK_SQL_EVAL_SOURCE) $(SDK_SQL_SELECT_GROUP_SOURCE) $(SDK_SQL_SELECT_COMPOSITE_SOURCE) $(SDK_SQL_SELECT_JOIN_SOURCE) $(SDK_SQL_SELECT_HAVING_SOURCE)
 SDK_SQL_DML_OBJECT := $(BUILD_DIR)/sql_dml_v1.o
 SDK_SQL_EVAL_OBJECT := $(BUILD_DIR)/sql_eval_v1.o
@@ -79,12 +72,7 @@ SDK_SQL_SELECT_GROUP_OBJECT := $(BUILD_DIR)/sql_select_group_v1.o
 SDK_SQL_SELECT_COMPOSITE_OBJECT := $(BUILD_DIR)/sql_select_composite_v1.o
 SDK_SQL_SELECT_JOIN_OBJECT := $(BUILD_DIR)/sql_select_join_v1.o
 SDK_SQL_SELECT_HAVING_OBJECT := $(BUILD_DIR)/sql_select_having_v1.o
-SDK_OPTIMIZER_PLAN_CODEC_OBJECT := $(BUILD_DIR)/optimizer_plan_codec_v1.o
-SDK_OPTIMIZER_PLAN_DECODE_OBJECT := $(BUILD_DIR)/optimizer_plan_decode_v1.o
-SDK_OPTIMIZER_PLAN_MATCH_OBJECT := $(BUILD_DIR)/optimizer_plan_match_v1.o
-SDK_OPTIMIZER_PLAN_SCAN_OBJECT := $(BUILD_DIR)/optimizer_plan_scan_v1.o
-SDK_OPTIMIZER_PLAN_EXEC_OBJECT := $(BUILD_DIR)/optimizer_plan_exec_v1.o
-SDK_OBJECTS := $(SDK_VALUE_OBJECT) $(SDK_BATCH_OBJECT) $(SDK_OWNED_BATCH_OBJECT) $(SDK_SQL_OBJECT) $(SDK_SQL_ORDER_OBJECT) $(SDK_SQL_GROUP_OBJECT) $(SDK_SQL_JOIN_OBJECT) $(SDK_PLANNER_OBJECT) $(SDK_EXECUTOR_OBJECT) $(SDK_SQL_EXEC_OBJECT) $(SDK_SQL_DISPATCH_OBJECT) $(SDK_SQL_BATCH_OBJECT) $(SDK_SQL_EXEC_GROUP_OBJECT) $(SDK_SQL_EXEC_JOIN_OBJECT) $(SDK_SQL_EXEC_SPILL_OBJECT) $(SDK_SQL_RESULT_OBJECT) $(SDK_MANIFEST_OBJECT) $(SDK_SPILL_OBJECT) $(SDK_SQL_SPILL_SORT_OBJECT) $(SDK_SQL_SPILL_GROUP_OBJECT) $(SDK_SQL_SPILL_JOIN_OBJECT) $(SDK_SCOPE_OBJECT) $(SDK_OPTIMIZER_OBJECT) $(SDK_OPTIMIZER_PLAN_OBJECT) $(SDK_OPTIMIZER_PLAN_CODEC_OBJECT) $(SDK_OPTIMIZER_PLAN_DECODE_OBJECT) $(SDK_OPTIMIZER_PLAN_MATCH_OBJECT) $(SDK_OPTIMIZER_PLAN_SCAN_OBJECT) $(SDK_OPTIMIZER_PLAN_EXEC_OBJECT) $(SDK_SQL_DML_OBJECT) $(SDK_SQL_EVAL_OBJECT) $(SDK_SQL_PARSER_OBJECT) $(SDK_SQL_EXPR_OBJECT) $(SDK_SQL_PLAN_EXEC_OBJECT) $(SDK_SQL_SELECT_GROUP_OBJECT) $(SDK_SQL_SELECT_COMPOSITE_OBJECT) $(SDK_SQL_SELECT_JOIN_OBJECT) $(SDK_SQL_SELECT_HAVING_OBJECT)
+SDK_OBJECTS := $(SDK_VALUE_OBJECT) $(SDK_BATCH_OBJECT) $(SDK_OWNED_BATCH_OBJECT) $(SDK_SQL_OBJECT) $(SDK_SQL_ORDER_OBJECT) $(SDK_SQL_GROUP_OBJECT) $(SDK_SQL_JOIN_OBJECT) $(SDK_PLANNER_OBJECT) $(SDK_EXECUTOR_OBJECT) $(SDK_SQL_EXEC_OBJECT) $(SDK_SQL_DISPATCH_OBJECT) $(SDK_SQL_BATCH_OBJECT) $(SDK_SQL_EXEC_GROUP_OBJECT) $(SDK_SQL_EXEC_JOIN_OBJECT) $(SDK_SQL_EXEC_SPILL_OBJECT) $(SDK_SQL_RESULT_OBJECT) $(SDK_MANIFEST_OBJECT) $(SDK_SPILL_OBJECT) $(SDK_SQL_SPILL_SORT_OBJECT) $(SDK_SQL_SPILL_GROUP_OBJECT) $(SDK_SQL_SPILL_JOIN_OBJECT) $(SDK_SCOPE_OBJECT) $(SDK_OPTIMIZER_UNIFIED_OBJECT) $(SDK_SQL_DML_OBJECT) $(SDK_SQL_EVAL_OBJECT) $(SDK_SQL_PARSER_OBJECT) $(SDK_SQL_EXPR_OBJECT) $(SDK_SQL_PLAN_EXEC_OBJECT) $(SDK_SQL_SELECT_GROUP_OBJECT) $(SDK_SQL_SELECT_COMPOSITE_OBJECT) $(SDK_SQL_SELECT_JOIN_OBJECT) $(SDK_SQL_SELECT_HAVING_OBJECT)
 SDK_ARCHIVE := $(BUILD_DIR)/libprdb_sdk.a
 SDK_RELEASE ?= 1
 SDK_TARGET ?= linux-x86_64
@@ -99,7 +87,7 @@ SDK_SQL_SONAME := libprdb_sql.so.$(SDK_RELEASE)
 SDK_SQL_SHARED_LIBRARY := $(SDK_RELEASE_DIR)/$(SDK_SQL_SONAME)
 SDK_RELEASE_METADATA := $(SDK_RELEASE_DIR)/sdk-release.json
 SDK_RELEASE_CHECKSUM := $(SDK_RELEASE_DIR)/sdk-release.sha256
-SDK_SHARED_TEST_FIXTURES := sdk_value_v1 sdk_sql_select_v20 sdk_sql_select_v21 sdk_sql_select_v22 sdk_sql_select_v23 sdk_sql_select_v24 sdk_sql_select_v25 sdk_sql_select_v26 sdk_optimizer_update_v1 sdk_sql_dispatch_v1
+SDK_SHARED_TEST_FIXTURES := sdk_value_v1 sdk_sql_select_v20 sdk_sql_select_v21 sdk_sql_select_v22 sdk_sql_select_v23 sdk_sql_select_v24 sdk_sql_select_v25 sdk_sql_select_v26 sdk_optimizer_unified_v1 sdk_sql_dispatch_v1
 SDK_SHARED_TESTS := $(addprefix $(SDK_RELEASE_DIR)/shared-test-,$(SDK_SHARED_TEST_FIXTURES))
 SDK_VALUE_TEST := $(BUILD_DIR)/sdk-value-v1
 SDK_BATCH_TEST := $(BUILD_DIR)/sdk-batch-v1
@@ -186,10 +174,7 @@ QUERY_ABI_GENERATED_HEADERS := $(INCLUDE_DIR)/prdb_query_abi_layout_assertions.h
 QUERY_ABI_V4_TEST := $(BUILD_DIR)/query-abi-v4-callbacks
 QUERY_ABI_V5_TEST := $(BUILD_DIR)/query-abi-v5-callbacks
 QUERY_ABI_V6_TEST := $(BUILD_DIR)/query-abi-v6-callbacks
-SDK_OPTIMIZER_TEST := $(BUILD_DIR)/sdk-optimizer-v1
-SDK_OPTIMIZER_DELETE_TEST := $(BUILD_DIR)/sdk-optimizer-delete-v1
-SDK_OPTIMIZER_UPDATE_TEST := $(BUILD_DIR)/sdk-optimizer-update-v1
-SDK_OPTIMIZER_PLAN_TEST := $(BUILD_DIR)/sdk-optimizer-plan-v1
+SDK_OPTIMIZER_UNIFIED_TEST := $(BUILD_DIR)/sdk-optimizer-unified-v1
 QUERY_ABI_GENERATED_HEADERS +=
 QUERY_ABI_GENERATED_HEADERS +=
 QUERY_ABI_GENERATED_HEADERS +=
@@ -280,7 +265,7 @@ $(SDK_SCOPE_OBJECT): $(SDK_SCOPE_SOURCE) $(INCLUDE_DIR)/prdb_sdk_scope_v1.h | $(
 $(SDK_OPTIMIZER_OBJECT): $(SDK_OPTIMIZER_SOURCE) $(INCLUDE_DIR)/prdb_sdk_optimizer_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_dml_v1.h $(INCLUDE_DIR)/prdb_query_abi_v1.h $(QUERY_ABI_GENERATED_HEADERS) | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
 
-$(SDK_OPTIMIZER_PLAN_OBJECT): $(SDK_OPTIMIZER_PLAN_SOURCE) $(INCLUDE_DIR)/prdb_sdk_optimizer_plan_v1.h $(INCLUDE_DIR)/prdb_sdk_optimizer_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_dml_v1.h $(INCLUDE_DIR)/prdb_query_abi_v1.h $(INCLUDE_DIR)/prdb_query_abi_payload_codecs.h | $(BUILD_DIR)
+$(SDK_OPTIMIZER_UNIFIED_OBJECT): $(SDK_OPTIMIZER_UNIFIED_SOURCE) $(INCLUDE_DIR)/prdb_sdk_optimizer_plan_v1.h $(INCLUDE_DIR)/prdb_sdk_optimizer_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_v1.h $(INCLUDE_DIR)/prdb_query_abi_v1.h $(QUERY_ABI_GENERATED_HEADERS) | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
 
 $(SDK_SQL_DML_OBJECT): $(SDK_SQL_DML_SOURCE) engine/sdk/sql_internal.h | $(BUILD_DIR)
@@ -310,23 +295,7 @@ $(SDK_SQL_SELECT_JOIN_OBJECT): $(SDK_SQL_SELECT_JOIN_SOURCE) engine/sdk/sql_inte
 $(SDK_SQL_SELECT_HAVING_OBJECT): $(SDK_SQL_SELECT_HAVING_SOURCE) engine/sdk/sql_internal.h | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
 
-$(SDK_OPTIMIZER_PLAN_CODEC_OBJECT): $(SDK_OPTIMIZER_PLAN_CODEC_SOURCE) engine/sdk/optimizer_plan_codec_internal.h | $(BUILD_DIR)
-	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
-
-$(SDK_OPTIMIZER_PLAN_DECODE_OBJECT): $(SDK_OPTIMIZER_PLAN_DECODE_SOURCE) engine/sdk/optimizer_plan_codec_internal.h | $(BUILD_DIR)
-	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
-
-$(SDK_OPTIMIZER_PLAN_MATCH_OBJECT): $(SDK_OPTIMIZER_PLAN_MATCH_SOURCE) engine/sdk/optimizer_plan_codec_internal.h | $(BUILD_DIR)
-	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
-
-$(SDK_OPTIMIZER_PLAN_SCAN_OBJECT): $(SDK_OPTIMIZER_PLAN_SCAN_SOURCE) engine/sdk/optimizer_plan_codec_internal.h | $(BUILD_DIR)
-	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
-
-$(SDK_OPTIMIZER_PLAN_EXEC_OBJECT): $(SDK_OPTIMIZER_PLAN_EXEC_SOURCE) engine/sdk/optimizer_plan_codec_internal.h | $(BUILD_DIR)
-	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
-
 $(SDK_PIC_OBJECT_DIR)/sql_v1.o $(SDK_PIC_OBJECT_DIR)/sql_dml_v1.o $(SDK_PIC_OBJECT_DIR)/sql_eval_v1.o $(SDK_PIC_OBJECT_DIR)/sql_select_group_v1.o $(SDK_PIC_OBJECT_DIR)/sql_select_composite_v1.o $(SDK_PIC_OBJECT_DIR)/sql_select_join_v1.o $(SDK_PIC_OBJECT_DIR)/sql_select_having_v1.o: engine/sdk/sql_internal.h
-$(SDK_PIC_OBJECT_DIR)/optimizer_plan_v1.o $(SDK_PIC_OBJECT_DIR)/optimizer_plan_codec_v1.o $(SDK_PIC_OBJECT_DIR)/optimizer_plan_decode_v1.o $(SDK_PIC_OBJECT_DIR)/optimizer_plan_match_v1.o $(SDK_PIC_OBJECT_DIR)/optimizer_plan_scan_v1.o $(SDK_PIC_OBJECT_DIR)/optimizer_plan_exec_v1.o: engine/sdk/optimizer_plan_codec_internal.h
 
 $(SDK_ARCHIVE): $(SDK_OBJECTS)
 	$(TCC_AR) rcs "$@" $(SDK_OBJECTS)
@@ -626,16 +595,7 @@ $(QUERY_ABI_V5_TEST): engine/tests/fixtures/query_abi_v5_callbacks.c $(INCLUDE_D
 $(QUERY_ABI_V6_TEST): engine/tests/fixtures/query_abi_v6_callbacks.c $(INCLUDE_DIR)/prdb_query_abi_v1.h $(INCLUDE_DIR)/prdb_query_abi_constants.h $(QUERY_ABI_GENERATED_HEADERS) | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" "$<" -o "$@"
 
-$(SDK_OPTIMIZER_TEST): engine/tests/fixtures/sdk_optimizer_v1.c $(SDK_ARCHIVE) $(INCLUDE_DIR)/prdb_sdk_optimizer_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_v1.h | $(BUILD_DIR)
-	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" "$<" "$(SDK_ARCHIVE)" -o "$@"
-
-$(SDK_OPTIMIZER_DELETE_TEST): engine/tests/fixtures/sdk_optimizer_delete_v1.c $(SDK_ARCHIVE) $(INCLUDE_DIR)/prdb_sdk_optimizer_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_dml_v1.h | $(BUILD_DIR)
-	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" "$<" "$(SDK_ARCHIVE)" -o "$@"
-
-$(SDK_OPTIMIZER_UPDATE_TEST): engine/tests/fixtures/sdk_optimizer_update_v1.c $(SDK_ARCHIVE) $(INCLUDE_DIR)/prdb_sdk_optimizer_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_dml_v1.h | $(BUILD_DIR)
-	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" "$<" "$(SDK_ARCHIVE)" -o "$@"
-
-$(SDK_OPTIMIZER_PLAN_TEST): engine/tests/fixtures/sdk_optimizer_plan_v1.c $(SDK_ARCHIVE) $(INCLUDE_DIR)/prdb_sdk_optimizer_plan_v1.h $(INCLUDE_DIR)/prdb_sdk_optimizer_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_v1.h | $(BUILD_DIR)
+$(SDK_OPTIMIZER_UNIFIED_TEST): engine/tests/fixtures/sdk_optimizer_unified_v1.c $(SDK_ARCHIVE) $(INCLUDE_DIR)/prdb_sdk_optimizer_v1.h $(INCLUDE_DIR)/prdb_sdk_optimizer_plan_v1.h | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" "$<" "$(SDK_ARCHIVE)" -o "$@"
 
 # TinyCC 0.9.27's internal shared linker omits PT_GNU_STACK, so glibc treats
@@ -757,28 +717,22 @@ abi-constants-test:
 
 .PHONY: abi-constants abi-constants-check abi-constants-test
 
-test: $(SDK_OPTIMIZER_TEST) $(SDK_OPTIMIZER_PLAN_TEST) $(SDK_OPTIMIZER_DELETE_TEST) $(SDK_OPTIMIZER_UPDATE_TEST)
+test: $(SDK_OPTIMIZER_UNIFIED_TEST)
 test: run-query-abi-v5
-test: run-sdk-optimizer-delete
-test: run-sdk-optimizer-update
+test: run-sdk-optimizer-unified
 test: sdk-shared-tests
+
+.PHONY: run-sdk-optimizer-unified
+run-sdk-optimizer-unified: $(SDK_OPTIMIZER_UNIFIED_TEST)
+	"$(SDK_OPTIMIZER_UNIFIED_TEST)"
 
 .PHONY: run-query-abi-v5
 run-query-abi-v5: $(QUERY_ABI_V5_TEST)
 	"$(QUERY_ABI_V5_TEST)"
 	"$(QUERY_ABI_V6_TEST)"
 
-.PHONY: run-sdk-optimizer-delete
-run-sdk-optimizer-delete: $(SDK_OPTIMIZER_DELETE_TEST)
-	"$(SDK_OPTIMIZER_DELETE_TEST)"
-
-.PHONY: run-sdk-optimizer-update
-run-sdk-optimizer-update: $(SDK_OPTIMIZER_UPDATE_TEST)
-	"$(SDK_OPTIMIZER_UPDATE_TEST)"
-
 test: abi-constants-check abi-constants-test $(QUERY_ABI_V4_TEST) $(QUERY_ABI_V5_TEST) $(QUERY_ABI_V6_TEST) $(SDK_SPILL_TEST) $(SDK_VALUE_TEST) $(SDK_BATCH_TEST) $(SDK_SQL_TEST) $(SDK_SQL_EXPRESSION_TEST) $(SDK_SQL_V2_TEST) $(SDK_SQL_ORDER_TEST) $(SDK_SQL_GROUP_TEST) $(SDK_SQL_JOIN_TEST) $(SDK_SQL_JOIN_V2_TEST) $(SDK_SQL_V3_TEST) $(SDK_SQL_V4_TEST) $(SDK_SQL_V5_TEST) $(SDK_SQL_V6_TEST) $(SDK_SQL_V7_TEST) $(SDK_SQL_V8_TEST) $(SDK_SQL_V9_TEST) $(SDK_SQL_V10_TEST) $(SDK_SQL_V11_TEST) $(SDK_SQL_V12_TEST) $(SDK_SQL_V13_TEST) $(SDK_SQL_V14_TEST) $(SDK_SQL_V15_TEST) $(SDK_SQL_V16_TEST) $(SDK_SQL_V17_TEST) $(SDK_SQL_V18_TEST) $(SDK_SQL_V19_TEST) $(SDK_SQL_V20_TEST) $(SDK_SQL_V21_TEST) $(SDK_SQL_V22_TEST) $(SDK_SQL_V23_TEST) $(SDK_SQL_V24_TEST) $(SDK_SQL_V25_TEST) $(SDK_SQL_V26_TEST) $(SDK_PLANNER_TEST) $(SDK_EXECUTOR_TEST) $(SDK_SQL_EXEC_TEST) $(SDK_SQL_DISPATCH_TEST) $(SDK_TPCC_TPCH_TEST) $(SDK_SQL_BATCH_TEST) $(SDK_SQL_EXEC_V5_TEST) $(SDK_SQL_EXEC_V6_TEST) $(SDK_SQL_EXEC_V7_TEST) $(SDK_SQL_EXEC_V8_TEST) $(SDK_SQL_EXEC_V9_TEST) $(SDK_SQL_EXEC_V10_TEST) $(SDK_SQL_EXEC_V19_TEST) $(SDK_SQL_INFORMATION_SCHEMA_TEST) $(SDK_SQL_RESULT_TEST) $(SDK_SQL_RESULT_V13_TEST) $(SDK_SQL_DML_TEST) $(SDK_MANIFEST_TEST) $(SDK_SQL_SPILL_SORT_TEST) $(SDK_SQL_SPILL_JOIN_TEST) $(SDK_SCOPE_TEST) $(SDK_IPC_FRAME_TEST) $(SDK_IPC_PAYLOAD_CODEC_TEST)
-	"$(SDK_OPTIMIZER_TEST)"
-	"$(SDK_OPTIMIZER_PLAN_TEST)"
+	"$(SDK_OPTIMIZER_UNIFIED_TEST)"
 	"$(QUERY_ABI_V4_TEST)"
 	"$(QUERY_ABI_V5_TEST)"
 	"$(QUERY_ABI_V6_TEST)"

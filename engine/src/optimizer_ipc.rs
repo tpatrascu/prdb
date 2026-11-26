@@ -1,15 +1,7 @@
 //! Versioned request/response payloads for executor-to-optimizer submission.
 
-use crate::optimizer_binding::{BindError, MetadataBindError};
-use crate::optimizer_plan::{
-    MAX_PLAN_BYTES, decode_composite_group_aggregate_plan_v1, decode_composite_group_count_plan_v1,
-    decode_delete_plan_v1, decode_filtered_composite_group_aggregate_plan_v1,
-    decode_group_aggregate_plan_v1, decode_group_count_plan_v1, decode_join_select_plan_v1,
-    decode_ordered_composite_group_aggregate_plan_v1, decode_ordered_composite_group_count_plan_v1,
-    decode_ordered_group_aggregate_plan_v1, decode_ordered_group_count_plan_v1,
-    decode_ordered_select_plan_v1, decode_plan_v1, decode_update_plan_v1,
-};
-use crate::optimizer_request::{RequestError, SelectRequest, decode_select_request};
+use crate::optimizer_ir::physical::MAX_UNIFIED_PLAN_BYTES;
+use crate::optimizer_ir::{BindError, LogicalRequest, RequestError, decode_logical_request};
 use crate::optimizer_service::OptimizerError;
 pub use crate::query_abi::{
     OPTIMIZER_RESPONSE_FAILURE_HEADER_BYTES, OPTIMIZER_RESPONSE_FAILURE_STATUS_OFFSET,
@@ -37,7 +29,7 @@ pub struct OptimizerResponse {
     pub plan: Option<Vec<u8>>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OptimizerPayloadError {
     InvalidRequest(RequestError),
     InvalidResponse,
@@ -54,35 +46,19 @@ impl std::fmt::Display for OptimizerPayloadError {
 impl std::error::Error for OptimizerPayloadError {}
 
 /// Validate and own a submitted request before it reaches planning code.
-pub fn decode_optimizer_request(bytes: &[u8]) -> Result<SelectRequest, OptimizerPayloadError> {
-    decode_select_request(bytes).map_err(OptimizerPayloadError::InvalidRequest)
+pub fn decode_optimizer_request(bytes: &[u8]) -> Result<LogicalRequest, OptimizerPayloadError> {
+    decode_logical_request(bytes).map_err(OptimizerPayloadError::InvalidRequest)
 }
 
 fn validate_optimizer_plan(bytes: &[u8]) -> Result<(), OptimizerPayloadError> {
-    if decode_plan_v1(bytes).is_ok()
-        || decode_delete_plan_v1(bytes).is_ok()
-        || decode_join_select_plan_v1(bytes).is_ok()
-        || decode_group_count_plan_v1(bytes).is_ok()
-        || decode_group_aggregate_plan_v1(bytes).is_ok()
-        || decode_ordered_group_aggregate_plan_v1(bytes).is_ok()
-        || decode_composite_group_count_plan_v1(bytes).is_ok()
-        || decode_composite_group_aggregate_plan_v1(bytes).is_ok()
-        || decode_filtered_composite_group_aggregate_plan_v1(bytes).is_ok()
-        || decode_ordered_select_plan_v1(bytes).is_ok()
-        || decode_ordered_group_count_plan_v1(bytes).is_ok()
-        || decode_ordered_composite_group_count_plan_v1(bytes).is_ok()
-        || decode_ordered_composite_group_aggregate_plan_v1(bytes).is_ok()
-        || decode_update_plan_v1(bytes).is_ok()
-    {
-        Ok(())
-    } else {
-        Err(OptimizerPayloadError::InvalidPlan)
-    }
+    crate::optimizer_ir::decode_physical_plan(bytes)
+        .map(|_| ())
+        .map_err(|_| OptimizerPayloadError::InvalidPlan)
 }
 
 impl OptimizerResponse {
     pub fn success(plan: Vec<u8>) -> Result<Self, OptimizerPayloadError> {
-        if plan.is_empty() || plan.len() > MAX_PLAN_BYTES {
+        if plan.is_empty() || plan.len() > MAX_UNIFIED_PLAN_BYTES {
             return Err(OptimizerPayloadError::PlanTooLarge);
         }
         validate_optimizer_plan(&plan)?;
@@ -102,7 +78,7 @@ impl OptimizerResponse {
     pub fn encode(&self) -> Result<Vec<u8>, OptimizerPayloadError> {
         match (&self.status, &self.plan) {
             (OptimizerStatus::Success, Some(plan)) => {
-                if plan.is_empty() || plan.len() > MAX_PLAN_BYTES {
+                if plan.is_empty() || plan.len() > MAX_UNIFIED_PLAN_BYTES {
                     return Err(OptimizerPayloadError::PlanTooLarge);
                 }
                 validate_optimizer_plan(plan)?;
@@ -162,7 +138,7 @@ impl OptimizerResponse {
         let len = usize::try_from(encoded_plan_length)
             .map_err(|_| OptimizerPayloadError::InvalidResponse)?;
         let header_bytes = OPTIMIZER_RESPONSE_SUCCESS_HEADER_BYTES as usize;
-        if len == 0 || len > MAX_PLAN_BYTES || bytes.len() != header_bytes + len {
+        if len == 0 || len > MAX_UNIFIED_PLAN_BYTES || bytes.len() != header_bytes + len {
             return Err(OptimizerPayloadError::InvalidResponse);
         }
         let plan = crate::query_abi::decode_optimizer_response_success_plan(
@@ -182,87 +158,101 @@ impl OptimizerResponse {
 /// Collapse planner failures to a small non-disclosing wire status set.
 pub fn status_for_error(error: &OptimizerError) -> OptimizerStatus {
     match error {
-        OptimizerError::Bind(MetadataBindError::Bind(BindError::Request(_))) => {
+        OptimizerError::Request(_) | OptimizerError::Bind(BindError::Request(_)) => {
             OptimizerStatus::InvalidRequest
         }
-        OptimizerError::Bind(MetadataBindError::Bind(BindError::RelationUnavailable)) => {
-            OptimizerStatus::Unavailable
+        OptimizerError::Bind(BindError::RelationUnavailable) => OptimizerStatus::Unavailable,
+        OptimizerError::Bind(BindError::InvalidQuery) | OptimizerError::Plan(_) => {
+            OptimizerStatus::Rejected
         }
-        OptimizerError::Bind(MetadataBindError::Bind(BindError::InvalidQuery))
-        | OptimizerError::Plan(_) => OptimizerStatus::Rejected,
-        OptimizerError::Bind(MetadataBindError::Bind(BindError::InvalidMetadata))
-        | OptimizerError::Bind(MetadataBindError::Transaction(_)) => OptimizerStatus::Internal,
+        OptimizerError::Bind(BindError::InvalidMetadata) => OptimizerStatus::Internal,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::optimizer_binding::{BoundColumn, BoundSelect};
-    use crate::optimizer_plan::{encode_plan_v1, plan_select_v1};
+    use crate::optimizer_ir::physical::PhysicalUpdateAssignment;
+    use crate::optimizer_ir::{
+        BoundColumn, BoundExpr, BoundUpdateValue, PhysicalOp, PhysicalPlan, RelationReference,
+        encode_physical_plan,
+    };
     use crate::tuple::ScalarType;
 
+    fn test_relation() -> RelationReference {
+        RelationReference {
+            relation_index: 0,
+            relation_name: "items".to_owned(),
+            relation_id: [2; 16],
+            table_epoch: 1,
+        }
+    }
+
+    fn test_column() -> BoundColumn {
+        BoundColumn {
+            column_id: [3; 16],
+            ordinal: 0,
+            scalar_type: ScalarType::Integer,
+            nullable: false,
+        }
+    }
+
     fn plan_bytes() -> Vec<u8> {
-        let bound = BoundSelect {
+        let plan = PhysicalPlan {
             schema_name: "public".to_owned(),
             schema_id: [1; 16],
             schema_version: 1,
-            table_epoch: 1,
-            relation_id: [2; 16],
-            relation_name: "items".to_owned(),
-            projections: vec![BoundColumn {
-                column_id: [3; 16],
-                ordinal: 0,
-                scalar_type: ScalarType::Integer,
-                nullable: true,
-            }],
-            predicate: None,
-            unique_access_paths: Vec::new(),
-            range_access_paths: Vec::new(),
-            limit: None,
+            root: PhysicalOp::Project {
+                columns: vec![test_column()],
+                input: Box::new(PhysicalOp::SeqScan {
+                    relation: test_relation(),
+                    scan_columns: vec![test_column()],
+                }),
+            },
         };
-        encode_plan_v1(&plan_select_v1(bound).unwrap()).unwrap()
+        encode_physical_plan(&plan).unwrap()
     }
 
     fn delete_plan_bytes() -> Vec<u8> {
-        let plan = crate::optimizer_plan::plan_delete_v1(
-            crate::optimizer_plan::RelationReference {
-                schema_name: "public".to_owned(),
-                schema_id: [1; 16],
-                schema_version: 1,
-                relation_name: "items".to_owned(),
-                relation_id: [2; 16],
-                table_epoch: 1,
+        let plan = PhysicalPlan {
+            schema_name: "public".to_owned(),
+            schema_id: [1; 16],
+            schema_version: 1,
+            root: PhysicalOp::Delete {
+                relation: test_relation(),
+                input: Box::new(PhysicalOp::Filter {
+                    predicate: BoundExpr::Boolean(true),
+                    input: Box::new(PhysicalOp::SeqScan {
+                        relation: test_relation(),
+                        scan_columns: vec![test_column()],
+                    }),
+                }),
             },
-            crate::optimizer_binding::BoundPredicate::Boolean(true),
-        )
-        .unwrap();
-        crate::optimizer_plan::encode_delete_plan_v1(&plan).unwrap()
+        };
+        encode_physical_plan(&plan).unwrap()
     }
 
     fn update_plan_bytes() -> Vec<u8> {
-        let plan = crate::optimizer_plan::plan_update_v1(
-            crate::optimizer_plan::RelationReference {
-                schema_name: "public".to_owned(),
-                schema_id: [1; 16],
-                schema_version: 1,
-                relation_name: "items".to_owned(),
-                relation_id: [2; 16],
-                table_epoch: 1,
+        let plan = PhysicalPlan {
+            schema_name: "public".to_owned(),
+            schema_id: [1; 16],
+            schema_version: 1,
+            root: PhysicalOp::Update {
+                relation: test_relation(),
+                assignments: vec![PhysicalUpdateAssignment {
+                    column: test_column(),
+                    value: BoundUpdateValue::Parameter(1),
+                }],
+                input: Box::new(PhysicalOp::Filter {
+                    predicate: BoundExpr::Boolean(true),
+                    input: Box::new(PhysicalOp::SeqScan {
+                        relation: test_relation(),
+                        scan_columns: vec![test_column()],
+                    }),
+                }),
             },
-            crate::optimizer_binding::BoundPredicate::Boolean(true),
-            vec![crate::optimizer_binding::BoundUpdateAssignment {
-                column: BoundColumn {
-                    column_id: [3; 16],
-                    ordinal: 0,
-                    scalar_type: ScalarType::Integer,
-                    nullable: false,
-                },
-                value: crate::optimizer_binding::BoundUpdateValue::Parameter(1),
-            }],
-        )
-        .unwrap();
-        crate::optimizer_plan::encode_update_plan_v1(&plan).unwrap()
+        };
+        encode_physical_plan(&plan).unwrap()
     }
 
     #[test]

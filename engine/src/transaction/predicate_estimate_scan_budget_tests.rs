@@ -113,14 +113,20 @@ fn bounded_row_estimate_does_not_consume_query_scan_work() {
         policy_driving_columns: &[],
         dependencies: &[],
     };
-    let predicate = crate::optimizer_binding::BoundPredicate::IsNull(Box::new(
-        crate::optimizer_binding::BoundPredicate::Column(crate::optimizer_binding::BoundColumn {
-            column_id,
-            ordinal: 0,
-            scalar_type: ScalarType::Text,
-            nullable: true,
-        }),
-    ));
+    let predicate = crate::optimizer_ir::BoundExpr::IsNull {
+        expr: Box::new(crate::optimizer_ir::BoundExpr::Column(
+            crate::optimizer_ir::BoundColumnRef {
+                relation_index: 0,
+                column: crate::optimizer_ir::BoundColumn {
+                    column_id,
+                    ordinal: 0,
+                    scalar_type: ScalarType::Text,
+                    nullable: true,
+                },
+            },
+        )),
+        negated: false,
+    };
     let mut coordination = InvocationCoordination::uncoordinated();
     coordination.max_scan_work = 1;
     let mut invocation = InvocationTransaction::begin_inner(

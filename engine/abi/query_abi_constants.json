@@ -875,13 +875,6 @@
       "c_type": "UINT16_C"
     },
     {
-      "rust_name": "OPTIMIZER_SELECT_STATEMENT",
-      "rust_type": "u8",
-      "value": 1,
-      "c_name": "PRDB_OPTIMIZER_SELECT_STATEMENT",
-      "c_type": "UINT8_C"
-    },
-    {
       "rust_name": "OPTIMIZER_DELETE_STATEMENT",
       "rust_type": "u8",
       "value": 2,
@@ -893,97 +886,6 @@
       "rust_type": "u8",
       "value": 3,
       "c_name": "PRDB_OPTIMIZER_UPDATE_STATEMENT",
-      "c_type": "UINT8_C"
-    },
-    {
-      "rust_name": "OPTIMIZER_JOIN_SELECT_STATEMENT",
-      "rust_type": "u8",
-      "value": 4,
-      "c_name": "PRDB_OPTIMIZER_JOIN_SELECT_STATEMENT",
-      "c_type": "UINT8_C"
-    },
-    {
-      "rust_name": "OPTIMIZER_GROUP_COUNT_STATEMENT",
-      "rust_type": "u8",
-      "value": 5,
-      "c_name": "PRDB_OPTIMIZER_GROUP_COUNT_STATEMENT",
-      "c_type": "UINT8_C"
-    },
-    {
-      "rust_name": "OPTIMIZER_COMPOSITE_GROUP_COUNT_STATEMENT",
-      "rust_type": "u8",
-      "value": 6,
-      "c_name": "PRDB_OPTIMIZER_COMPOSITE_GROUP_COUNT_STATEMENT",
-      "c_type": "UINT8_C"
-    },
-    {
-      "rust_name": "OPTIMIZER_ORDERED_SELECT_STATEMENT",
-      "rust_type": "u8",
-      "value": 7,
-      "c_name": "PRDB_OPTIMIZER_ORDERED_SELECT_STATEMENT",
-      "c_type": "UINT8_C"
-    },
-    {
-      "rust_name": "OPTIMIZER_GROUP_COUNT_ORDERED_STATEMENT",
-      "rust_type": "u8",
-      "value": 8,
-      "c_name": "PRDB_OPTIMIZER_GROUP_COUNT_ORDERED_STATEMENT",
-      "c_type": "UINT8_C"
-    },
-    {
-      "rust_name": "OPTIMIZER_COMPOSITE_GROUP_COUNT_ORDERED_STATEMENT",
-      "rust_type": "u8",
-      "value": 9,
-      "c_name": "PRDB_OPTIMIZER_COMPOSITE_GROUP_COUNT_ORDERED_STATEMENT",
-      "c_type": "UINT8_C"
-    },
-    {
-      "rust_name": "OPTIMIZER_GROUP_AGGREGATE_STATEMENT",
-      "rust_type": "u8",
-      "value": 10,
-      "c_name": "PRDB_OPTIMIZER_GROUP_AGGREGATE_STATEMENT",
-      "c_type": "UINT8_C"
-    },
-    {
-      "rust_name": "OPTIMIZER_ORDERED_GROUP_AGGREGATE_STATEMENT",
-      "rust_type": "u8",
-      "value": 11,
-      "c_name": "PRDB_OPTIMIZER_ORDERED_GROUP_AGGREGATE_STATEMENT",
-      "c_type": "UINT8_C"
-    },
-    {
-      "rust_name": "OPTIMIZER_FILTERED_JOIN_SELECT_STATEMENT",
-      "rust_type": "u8",
-      "value": 12,
-      "c_name": "PRDB_OPTIMIZER_FILTERED_JOIN_SELECT_STATEMENT",
-      "c_type": "UINT8_C"
-    },
-    {
-      "rust_name": "OPTIMIZER_COMPOSITE_GROUP_AGGREGATE_STATEMENT",
-      "rust_type": "u8",
-      "value": 13,
-      "c_name": "PRDB_OPTIMIZER_COMPOSITE_GROUP_AGGREGATE_STATEMENT",
-      "c_type": "UINT8_C"
-    },
-    {
-      "rust_name": "OPTIMIZER_ORDERED_COMPOSITE_GROUP_AGGREGATE_STATEMENT",
-      "rust_type": "u8",
-      "value": 14,
-      "c_name": "PRDB_OPTIMIZER_ORDERED_COMPOSITE_GROUP_AGGREGATE_STATEMENT",
-      "c_type": "UINT8_C"
-    },
-    {
-      "rust_name": "OPTIMIZER_FILTERED_COMPOSITE_GROUP_AGGREGATE_STATEMENT",
-      "rust_type": "u8",
-      "value": 15,
-      "c_name": "PRDB_OPTIMIZER_FILTERED_COMPOSITE_GROUP_AGGREGATE_STATEMENT",
-      "c_type": "UINT8_C"
-    },
-    {
-      "rust_name": "OPTIMIZER_ORDERED_FILTERED_COMPOSITE_GROUP_AGGREGATE_STATEMENT",
-      "rust_type": "u8",
-      "value": 16,
-      "c_name": "PRDB_OPTIMIZER_ORDERED_FILTERED_COMPOSITE_GROUP_AGGREGATE_STATEMENT",
       "c_type": "UINT8_C"
     },
     {
@@ -1001,10 +903,213 @@
       "c_type": "UINT8_C"
     },
     {
-      "rust_name": "OPTIMIZER_UPDATE_NULL_VALUE",
+      "rust_name": "OPTIMIZER_UNIFIED_REQUEST_KIND",
+      "rust_type": "u8",
+      "value": 128,
+      "c_name": "PRDB_OPTIMIZER_UNIFIED_REQUEST_KIND",
+      "c_type": "UINT8_C"
+    },
+    {
+      "rust_name": "OPTIMIZER_UNIFIED_PLAN_KIND",
+      "rust_type": "u8",
+      "value": 128,
+      "c_name": "PRDB_OPTIMIZER_UNIFIED_PLAN_KIND",
+      "c_type": "UINT8_C"
+    },
+    {
+      "rust_name": "OPTIMIZER_LOGICAL_OP_SCAN",
       "rust_type": "u8",
       "value": 1,
-      "c_name": "PRDB_OPTIMIZER_UPDATE_NULL_VALUE",
+      "c_name": "PRDB_OPTIMIZER_LOGICAL_OP_SCAN",
+      "c_type": "UINT8_C"
+    },
+    {
+      "rust_name": "OPTIMIZER_LOGICAL_OP_FILTER",
+      "rust_type": "u8",
+      "value": 2,
+      "c_name": "PRDB_OPTIMIZER_LOGICAL_OP_FILTER",
+      "c_type": "UINT8_C"
+    },
+    {
+      "rust_name": "OPTIMIZER_LOGICAL_OP_PROJECT",
+      "rust_type": "u8",
+      "value": 3,
+      "c_name": "PRDB_OPTIMIZER_LOGICAL_OP_PROJECT",
+      "c_type": "UINT8_C"
+    },
+    {
+      "rust_name": "OPTIMIZER_LOGICAL_OP_JOIN",
+      "rust_type": "u8",
+      "value": 4,
+      "c_name": "PRDB_OPTIMIZER_LOGICAL_OP_JOIN",
+      "c_type": "UINT8_C"
+    },
+    {
+      "rust_name": "OPTIMIZER_LOGICAL_OP_AGGREGATE",
+      "rust_type": "u8",
+      "value": 5,
+      "c_name": "PRDB_OPTIMIZER_LOGICAL_OP_AGGREGATE",
+      "c_type": "UINT8_C"
+    },
+    {
+      "rust_name": "OPTIMIZER_LOGICAL_OP_SORT",
+      "rust_type": "u8",
+      "value": 6,
+      "c_name": "PRDB_OPTIMIZER_LOGICAL_OP_SORT",
+      "c_type": "UINT8_C"
+    },
+    {
+      "rust_name": "OPTIMIZER_LOGICAL_OP_LIMIT",
+      "rust_type": "u8",
+      "value": 7,
+      "c_name": "PRDB_OPTIMIZER_LOGICAL_OP_LIMIT",
+      "c_type": "UINT8_C"
+    },
+    {
+      "rust_name": "OPTIMIZER_LOGICAL_OP_DELETE",
+      "rust_type": "u8",
+      "value": 8,
+      "c_name": "PRDB_OPTIMIZER_LOGICAL_OP_DELETE",
+      "c_type": "UINT8_C"
+    },
+    {
+      "rust_name": "OPTIMIZER_LOGICAL_OP_UPDATE",
+      "rust_type": "u8",
+      "value": 9,
+      "c_name": "PRDB_OPTIMIZER_LOGICAL_OP_UPDATE",
+      "c_type": "UINT8_C"
+    },
+    {
+      "rust_name": "OPTIMIZER_PHYSICAL_OP_SEQ_SCAN",
+      "rust_type": "u8",
+      "value": 1,
+      "c_name": "PRDB_OPTIMIZER_PHYSICAL_OP_SEQ_SCAN",
+      "c_type": "UINT8_C"
+    },
+    {
+      "rust_name": "OPTIMIZER_PHYSICAL_OP_INDEX_POINT_SCAN",
+      "rust_type": "u8",
+      "value": 2,
+      "c_name": "PRDB_OPTIMIZER_PHYSICAL_OP_INDEX_POINT_SCAN",
+      "c_type": "UINT8_C"
+    },
+    {
+      "rust_name": "OPTIMIZER_PHYSICAL_OP_INDEX_MULTI_POINT_SCAN",
+      "rust_type": "u8",
+      "value": 3,
+      "c_name": "PRDB_OPTIMIZER_PHYSICAL_OP_INDEX_MULTI_POINT_SCAN",
+      "c_type": "UINT8_C"
+    },
+    {
+      "rust_name": "OPTIMIZER_PHYSICAL_OP_INDEX_RANGE_SCAN",
+      "rust_type": "u8",
+      "value": 4,
+      "c_name": "PRDB_OPTIMIZER_PHYSICAL_OP_INDEX_RANGE_SCAN",
+      "c_type": "UINT8_C"
+    },
+    {
+      "rust_name": "OPTIMIZER_PHYSICAL_OP_INDEX_ORDERED_SCAN",
+      "rust_type": "u8",
+      "value": 5,
+      "c_name": "PRDB_OPTIMIZER_PHYSICAL_OP_INDEX_ORDERED_SCAN",
+      "c_type": "UINT8_C"
+    },
+    {
+      "rust_name": "OPTIMIZER_PHYSICAL_OP_COVERING_INDEX_SCAN",
+      "rust_type": "u8",
+      "value": 6,
+      "c_name": "PRDB_OPTIMIZER_PHYSICAL_OP_COVERING_INDEX_SCAN",
+      "c_type": "UINT8_C"
+    },
+    {
+      "rust_name": "OPTIMIZER_PHYSICAL_OP_EMPTY_RESULT",
+      "rust_type": "u8",
+      "value": 7,
+      "c_name": "PRDB_OPTIMIZER_PHYSICAL_OP_EMPTY_RESULT",
+      "c_type": "UINT8_C"
+    },
+    {
+      "rust_name": "OPTIMIZER_PHYSICAL_OP_FILTER",
+      "rust_type": "u8",
+      "value": 16,
+      "c_name": "PRDB_OPTIMIZER_PHYSICAL_OP_FILTER",
+      "c_type": "UINT8_C"
+    },
+    {
+      "rust_name": "OPTIMIZER_PHYSICAL_OP_PROJECT",
+      "rust_type": "u8",
+      "value": 17,
+      "c_name": "PRDB_OPTIMIZER_PHYSICAL_OP_PROJECT",
+      "c_type": "UINT8_C"
+    },
+    {
+      "rust_name": "OPTIMIZER_PHYSICAL_OP_LIMIT",
+      "rust_type": "u8",
+      "value": 18,
+      "c_name": "PRDB_OPTIMIZER_PHYSICAL_OP_LIMIT",
+      "c_type": "UINT8_C"
+    },
+    {
+      "rust_name": "OPTIMIZER_PHYSICAL_OP_HASH_JOIN",
+      "rust_type": "u8",
+      "value": 32,
+      "c_name": "PRDB_OPTIMIZER_PHYSICAL_OP_HASH_JOIN",
+      "c_type": "UINT8_C"
+    },
+    {
+      "rust_name": "OPTIMIZER_PHYSICAL_OP_INDEX_NESTED_LOOP_JOIN",
+      "rust_type": "u8",
+      "value": 33,
+      "c_name": "PRDB_OPTIMIZER_PHYSICAL_OP_INDEX_NESTED_LOOP_JOIN",
+      "c_type": "UINT8_C"
+    },
+    {
+      "rust_name": "OPTIMIZER_PHYSICAL_OP_MERGE_JOIN",
+      "rust_type": "u8",
+      "value": 34,
+      "c_name": "PRDB_OPTIMIZER_PHYSICAL_OP_MERGE_JOIN",
+      "c_type": "UINT8_C"
+    },
+    {
+      "rust_name": "OPTIMIZER_PHYSICAL_OP_HASH_AGGREGATE",
+      "rust_type": "u8",
+      "value": 48,
+      "c_name": "PRDB_OPTIMIZER_PHYSICAL_OP_HASH_AGGREGATE",
+      "c_type": "UINT8_C"
+    },
+    {
+      "rust_name": "OPTIMIZER_PHYSICAL_OP_STREAM_AGGREGATE",
+      "rust_type": "u8",
+      "value": 49,
+      "c_name": "PRDB_OPTIMIZER_PHYSICAL_OP_STREAM_AGGREGATE",
+      "c_type": "UINT8_C"
+    },
+    {
+      "rust_name": "OPTIMIZER_PHYSICAL_OP_SORT",
+      "rust_type": "u8",
+      "value": 64,
+      "c_name": "PRDB_OPTIMIZER_PHYSICAL_OP_SORT",
+      "c_type": "UINT8_C"
+    },
+    {
+      "rust_name": "OPTIMIZER_PHYSICAL_OP_TOPN_HEAP",
+      "rust_type": "u8",
+      "value": 65,
+      "c_name": "PRDB_OPTIMIZER_PHYSICAL_OP_TOPN_HEAP",
+      "c_type": "UINT8_C"
+    },
+    {
+      "rust_name": "OPTIMIZER_PHYSICAL_OP_DELETE",
+      "rust_type": "u8",
+      "value": 80,
+      "c_name": "PRDB_OPTIMIZER_PHYSICAL_OP_DELETE",
+      "c_type": "UINT8_C"
+    },
+    {
+      "rust_name": "OPTIMIZER_PHYSICAL_OP_UPDATE",
+      "rust_type": "u8",
+      "value": 81,
+      "c_name": "PRDB_OPTIMIZER_PHYSICAL_OP_UPDATE",
       "c_type": "UINT8_C"
     },
     {

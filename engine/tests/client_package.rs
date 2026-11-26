@@ -1770,7 +1770,7 @@ fn packager_validates_abi_v4_exports_on_the_maintained_optimizer_fixture() {
     assert!(dynamic_symbols.status.success());
     let dynamic_symbols = String::from_utf8_lossy(&dynamic_symbols.stdout);
     assert!(dynamic_symbols.lines().any(|line| {
-        line.contains(" UND ") && line.contains("prdb_sdk_optimizer_execute_update_ast_v1")
+        line.contains(" UND ") && line.contains("prdb_sdk_optimizer_execute_update_unified_v1")
     }));
     assert_eq!(
         fs::read(package.join("requested_scope.psc1")).unwrap(),

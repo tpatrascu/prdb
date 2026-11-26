@@ -145,8 +145,8 @@ impl DescribePlanRelationRequest {
             payload.extend_from_slice(&SCAN_ESTIMATE_REQUEST_MARKER);
             payload.push(1);
         } else if let Some(maximum_rows) = self.population_estimate_max_rows {
-            if maximum_rows <= crate::optimizer_plan::SMALL_POPULATION_SCAN_ROWS
-                || maximum_rows > crate::optimizer_plan::JOIN_POPULATION_ESTIMATE_MAX_ROWS
+            if maximum_rows <= crate::optimizer_cost::SMALL_POPULATION_SCAN_ROWS
+                || maximum_rows > crate::optimizer_cost::JOIN_POPULATION_ESTIMATE_MAX_ROWS
             {
                 return Err(PlannerRequestError::InvalidPayload);
             }
@@ -170,8 +170,8 @@ impl DescribePlanRelationRequest {
                     .try_into()
                     .map_err(|_| PlannerRequestError::InvalidPayload)?,
             ));
-            if maximum_rows <= crate::optimizer_plan::SMALL_POPULATION_SCAN_ROWS
-                || maximum_rows > crate::optimizer_plan::JOIN_POPULATION_ESTIMATE_MAX_ROWS
+            if maximum_rows <= crate::optimizer_cost::SMALL_POPULATION_SCAN_ROWS
+                || maximum_rows > crate::optimizer_cost::JOIN_POPULATION_ESTIMATE_MAX_ROWS
             {
                 return Err(PlannerRequestError::InvalidPayload);
             }
@@ -890,12 +890,12 @@ impl EstimateJoinRequest {
 }
 
 impl EstimatePredicateRequest {
-    pub fn from_bound_predicate(
+    pub fn from_bound_expr(
         schema_name: String,
         relation_name: String,
-        predicate: &crate::optimizer_binding::BoundPredicate,
+        predicate: &crate::optimizer_ir::BoundExpr,
     ) -> Result<Self, PlannerRequestError> {
-        let predicate_bytes = crate::optimizer_plan::encode_bound_predicate_v1(predicate)
+        let predicate_bytes = crate::optimizer_ir::encode_bound_expr(predicate)
             .map_err(|_| PlannerRequestError::InvalidPayload)?;
         Ok(Self {
             schema_name,
@@ -906,7 +906,7 @@ impl EstimatePredicateRequest {
 
     pub fn encode(&self) -> Result<Vec<u8>, PlannerRequestError> {
         if self.predicate_bytes.is_empty()
-            || self.predicate_bytes.len() > crate::optimizer_request::MAX_PREDICATE_BYTES
+            || self.predicate_bytes.len() > crate::optimizer_ir::MAX_EXPR_BYTES
         {
             return Err(PlannerRequestError::InvalidPayload);
         }
@@ -936,7 +936,7 @@ impl EstimatePredicateRequest {
             .map_err(|_| PlannerRequestError::InvalidPayload)?;
         let predicate_len = usize::try_from(u32::from_be_bytes(length_bytes))
             .map_err(|_| PlannerRequestError::InvalidPayload)?;
-        if predicate_len == 0 || predicate_len > crate::optimizer_request::MAX_PREDICATE_BYTES {
+        if predicate_len == 0 || predicate_len > crate::optimizer_ir::MAX_EXPR_BYTES {
             return Err(PlannerRequestError::InvalidPayload);
         }
         let predicate_start = body
@@ -1629,7 +1629,7 @@ pub fn dispatch_planner_request(
             let estimate_max_rows = decoded.population_estimate_max_rows.or_else(|| {
                 decoded
                     .include_scan_estimate
-                    .then_some(crate::optimizer_plan::SMALL_POPULATION_SCAN_ROWS)
+                    .then_some(crate::optimizer_cost::SMALL_POPULATION_SCAN_ROWS)
             });
             let (relation, visible_rows_estimate) = if let Some(estimate_max_rows) =
                 estimate_max_rows
@@ -1971,7 +1971,13 @@ mod scan_estimate_request_tests {
             DescribePlanRelationsResponse::decode(&encoded).unwrap(),
             described
         );
-        let mut malformed = encoded;
+        let mut malformed = EstimatePredicateRequest {
+            schema_name: "public".to_owned(),
+            relation_name: "items".to_owned(),
+            predicate_bytes: vec![0x01, 0x01],
+        }
+        .encode()
+        .unwrap();
         malformed[4..8].copy_from_slice(&u32::MAX.to_be_bytes());
         assert!(DescribePlanRelationsResponse::decode(&malformed).is_err());
 
@@ -2031,14 +2037,20 @@ mod scan_estimate_request_tests {
             DescribePlanRelationRequest::decode(&encoded).unwrap(),
             opted_in
         );
-        let mut malformed = encoded;
+        let mut malformed = EstimatePredicateRequest {
+            schema_name: "public".to_owned(),
+            relation_name: "items".to_owned(),
+            predicate_bytes: vec![0x01, 0x01],
+        }
+        .encode()
+        .unwrap();
         *malformed.last_mut().unwrap() = 0;
         assert!(DescribePlanRelationRequest::decode(&malformed).is_err());
 
         let join_estimate = DescribePlanRelationRequest {
             include_scan_estimate: false,
             population_estimate_max_rows: Some(
-                crate::optimizer_plan::JOIN_POPULATION_ESTIMATE_MAX_ROWS,
+                crate::optimizer_cost::JOIN_POPULATION_ESTIMATE_MAX_ROWS,
             ),
             ..opted_in
         };
@@ -2073,188 +2085,99 @@ mod scan_estimate_request_tests {
 
     #[test]
     fn predicate_estimate_request_and_response_are_bounded_and_canonical() {
-        let column = crate::optimizer_binding::BoundColumn {
-            column_id: [7; 16],
-            ordinal: 0,
-            scalar_type: crate::tuple::ScalarType::Integer,
-            nullable: true,
+        use crate::optimizer_ir::{
+            BoundColumn, BoundColumnRef, BoundExpr, Comparison, decode_bound_expr_for_columns,
         };
-        let predicate = crate::optimizer_binding::BoundPredicate::Compare {
-            operator: crate::optimizer_request::Comparison::Equal,
-            left: Box::new(crate::optimizer_binding::BoundPredicate::Column(
-                column.clone(),
-            )),
-            right: Box::new(crate::optimizer_binding::BoundPredicate::Integer(7)),
-        };
-        let request = EstimatePredicateRequest::from_bound_predicate(
-            "public".to_owned(),
-            "items".to_owned(),
-            &predicate,
-        )
-        .unwrap();
-        let encoded = request.encode().unwrap();
-        let decoded = EstimatePredicateRequest::decode(&encoded).unwrap();
-        assert_eq!(decoded, request);
-        assert_eq!(
-            crate::optimizer_plan::decode_bound_predicate_v1(&decoded.predicate_bytes, &[column],)
-                .unwrap(),
-            predicate
-        );
-        let date_column = crate::optimizer_binding::BoundColumn {
-            column_id: [8; 16],
-            ordinal: 1,
-            scalar_type: crate::tuple::ScalarType::Date,
-            nullable: false,
-        };
-        let date_predicate = crate::optimizer_binding::BoundPredicate::Compare {
-            operator: crate::optimizer_request::Comparison::GreaterOrEqual,
-            left: Box::new(crate::optimizer_binding::BoundPredicate::Column(
-                date_column.clone(),
-            )),
-            right: Box::new(crate::optimizer_binding::BoundPredicate::Date(-42)),
-        };
-        let date_request = EstimatePredicateRequest::from_bound_predicate(
-            "public".to_owned(),
-            "items".to_owned(),
-            &date_predicate,
-        )
-        .unwrap();
-        let date_decoded =
-            EstimatePredicateRequest::decode(&date_request.encode().unwrap()).unwrap();
-        assert_eq!(date_decoded, date_request);
-        assert_eq!(
-            crate::optimizer_plan::decode_bound_predicate_v1(
-                &date_decoded.predicate_bytes,
-                &[date_column],
+        use crate::tuple::ScalarType;
+
+        let cases = [
+            (
+                BoundColumn {
+                    column_id: [7; 16],
+                    ordinal: 0,
+                    scalar_type: ScalarType::Integer,
+                    nullable: true,
+                },
+                Comparison::Equal,
+                BoundExpr::Integer(7),
+            ),
+            (
+                BoundColumn {
+                    column_id: [8; 16],
+                    ordinal: 1,
+                    scalar_type: ScalarType::Date,
+                    nullable: false,
+                },
+                Comparison::GreaterOrEqual,
+                BoundExpr::Date(-42),
+            ),
+            (
+                BoundColumn {
+                    column_id: [9; 16],
+                    ordinal: 2,
+                    scalar_type: ScalarType::Uuid,
+                    nullable: false,
+                },
+                Comparison::Equal,
+                BoundExpr::Uuid([0x12; 16]),
+            ),
+            (
+                BoundColumn {
+                    column_id: [10; 16],
+                    ordinal: 3,
+                    scalar_type: ScalarType::TimestampTz,
+                    nullable: false,
+                },
+                Comparison::Equal,
+                BoundExpr::TimestampTz(-42),
+            ),
+            (
+                BoundColumn {
+                    column_id: [11; 16],
+                    ordinal: 4,
+                    scalar_type: ScalarType::Bytea,
+                    nullable: false,
+                },
+                Comparison::Equal,
+                BoundExpr::Bytea(vec![0, 0x80, 0xff]),
+            ),
+            (
+                BoundColumn {
+                    column_id: [12; 16],
+                    ordinal: 5,
+                    scalar_type: ScalarType::Decimal {
+                        precision: 8,
+                        scale: 2,
+                    },
+                    nullable: false,
+                },
+                Comparison::Greater,
+                BoundExpr::Decimal(12_345),
+            ),
+        ];
+
+        for (column, op, rhs) in cases {
+            let predicate = BoundExpr::Compare {
+                op,
+                left: Box::new(BoundExpr::Column(BoundColumnRef {
+                    relation_index: 0,
+                    column: column.clone(),
+                })),
+                right: Box::new(rhs),
+            };
+            let request = EstimatePredicateRequest::from_bound_expr(
+                "public".to_owned(),
+                "items".to_owned(),
+                &predicate,
             )
-            .unwrap(),
-            date_predicate
-        );
-        let uuid_column = crate::optimizer_binding::BoundColumn {
-            column_id: [9; 16],
-            ordinal: 2,
-            scalar_type: crate::tuple::ScalarType::Uuid,
-            nullable: false,
-        };
-        let uuid_predicate = crate::optimizer_binding::BoundPredicate::Compare {
-            operator: crate::optimizer_request::Comparison::Equal,
-            left: Box::new(crate::optimizer_binding::BoundPredicate::Column(
-                uuid_column.clone(),
-            )),
-            right: Box::new(crate::optimizer_binding::BoundPredicate::Uuid([0x12; 16])),
-        };
-        let uuid_request = EstimatePredicateRequest::from_bound_predicate(
-            "public".to_owned(),
-            "items".to_owned(),
-            &uuid_predicate,
-        )
-        .unwrap();
-        let uuid_decoded =
-            EstimatePredicateRequest::decode(&uuid_request.encode().unwrap()).unwrap();
-        assert_eq!(uuid_decoded, uuid_request);
-        assert_eq!(
-            crate::optimizer_plan::decode_bound_predicate_v1(
-                &uuid_decoded.predicate_bytes,
-                &[uuid_column],
-            )
-            .unwrap(),
-            uuid_predicate
-        );
-        let timestamp_column = crate::optimizer_binding::BoundColumn {
-            column_id: [10; 16],
-            ordinal: 3,
-            scalar_type: crate::tuple::ScalarType::TimestampTz,
-            nullable: false,
-        };
-        let timestamp_predicate = crate::optimizer_binding::BoundPredicate::Compare {
-            operator: crate::optimizer_request::Comparison::Equal,
-            left: Box::new(crate::optimizer_binding::BoundPredicate::Column(
-                timestamp_column.clone(),
-            )),
-            right: Box::new(crate::optimizer_binding::BoundPredicate::TimestampTz(-42)),
-        };
-        let timestamp_request = EstimatePredicateRequest::from_bound_predicate(
-            "public".to_owned(),
-            "items".to_owned(),
-            &timestamp_predicate,
-        )
-        .unwrap();
-        let timestamp_decoded =
-            EstimatePredicateRequest::decode(&timestamp_request.encode().unwrap()).unwrap();
-        assert_eq!(timestamp_decoded, timestamp_request);
-        assert_eq!(
-            crate::optimizer_plan::decode_bound_predicate_v1(
-                &timestamp_decoded.predicate_bytes,
-                &[timestamp_column],
-            )
-            .unwrap(),
-            timestamp_predicate
-        );
-        let bytea_column = crate::optimizer_binding::BoundColumn {
-            column_id: [11; 16],
-            ordinal: 4,
-            scalar_type: crate::tuple::ScalarType::Bytea,
-            nullable: false,
-        };
-        let bytea_predicate = crate::optimizer_binding::BoundPredicate::Compare {
-            operator: crate::optimizer_request::Comparison::Equal,
-            left: Box::new(crate::optimizer_binding::BoundPredicate::Column(
-                bytea_column.clone(),
-            )),
-            right: Box::new(crate::optimizer_binding::BoundPredicate::Bytea(vec![
-                0, 0x80, 0xff,
-            ])),
-        };
-        let bytea_request = EstimatePredicateRequest::from_bound_predicate(
-            "public".to_owned(),
-            "items".to_owned(),
-            &bytea_predicate,
-        )
-        .unwrap();
-        let bytea_decoded =
-            EstimatePredicateRequest::decode(&bytea_request.encode().unwrap()).unwrap();
-        assert_eq!(bytea_decoded, bytea_request);
-        assert_eq!(
-            crate::optimizer_plan::decode_bound_predicate_v1(
-                &bytea_decoded.predicate_bytes,
-                &[bytea_column],
-            )
-            .unwrap(),
-            bytea_predicate
-        );
-        let decimal_column = crate::optimizer_binding::BoundColumn {
-            column_id: [12; 16],
-            ordinal: 5,
-            scalar_type: crate::tuple::ScalarType::Decimal {
-                precision: 8,
-                scale: 2,
-            },
-            nullable: false,
-        };
-        let decimal_predicate = crate::optimizer_binding::BoundPredicate::Compare {
-            operator: crate::optimizer_request::Comparison::Greater,
-            left: Box::new(crate::optimizer_binding::BoundPredicate::Column(
-                decimal_column.clone(),
-            )),
-            right: Box::new(crate::optimizer_binding::BoundPredicate::Decimal(12_345)),
-        };
-        let decimal_request = EstimatePredicateRequest::from_bound_predicate(
-            "public".to_owned(),
-            "items".to_owned(),
-            &decimal_predicate,
-        )
-        .unwrap();
-        let decimal_decoded =
-            EstimatePredicateRequest::decode(&decimal_request.encode().unwrap()).unwrap();
-        assert_eq!(decimal_decoded, decimal_request);
-        assert_eq!(
-            crate::optimizer_plan::decode_bound_predicate_v1(
-                &decimal_decoded.predicate_bytes,
-                &[decimal_column],
-            )
-            .unwrap(),
-            decimal_predicate
-        );
+            .unwrap();
+            let decoded = EstimatePredicateRequest::decode(&request.encode().unwrap()).unwrap();
+            assert_eq!(decoded, request);
+            assert_eq!(
+                decode_bound_expr_for_columns(&decoded.predicate_bytes, &[column]).unwrap(),
+                predicate
+            );
+        }
         for response in [
             EstimatePredicateResponse::Exact {
                 visible_rows: 4,
@@ -2279,7 +2202,13 @@ mod scan_estimate_request_tests {
             .encode()
             .is_err()
         );
-        let mut malformed = encoded;
+        let mut malformed = EstimatePredicateRequest {
+            schema_name: "public".to_owned(),
+            relation_name: "items".to_owned(),
+            predicate_bytes: vec![0x01, 0x01],
+        }
+        .encode()
+        .unwrap();
         *malformed.last_mut().unwrap() ^= 1;
         assert!(EstimatePredicateRequest::decode(&malformed).is_err());
     }

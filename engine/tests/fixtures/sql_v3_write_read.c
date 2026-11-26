@@ -703,6 +703,7 @@ static int32_t run_write_read_fixture(
             const uint64_t optimizer_response_len =
                 (uint64_t)PRDB_OPTIMIZER_RESPONSE_SUCCESS_HEADER_BYTES + plan_len;
             prdb_sdk_optimizer_response_v1 benchmark_plan = {0};
+            prdb_sdk_optimizer_unified_plan_v1 decoded_benchmark = {0};
             const int32_t benchmark_plan_status =
                 optimizer_response_len <= sizeof(composite_join_optimizer_response)
                     ? prdb_sdk_optimizer_decode_response_v1(
@@ -710,17 +711,31 @@ static int32_t run_write_read_fixture(
                           optimizer_response_len, &benchmark_plan,
                           sizeof(benchmark_plan))
                     : PRDB_SDK_OPTIMIZER_RESULT_INVALID_RESPONSE;
-            const uint8_t expected_plan_kind =
+            const uint8_t expect_hash =
                 invocation->parameters[0] == '5' || invocation->parameters[0] == 'h' ||
-                        invocation->parameters[0] == 'b' || invocation->parameters[0] == 'k'
-                    ? PRDB_SDK_OPTIMIZER_PLAN_KIND_JOIN_SELECT
-                : invocation->parameters[0] == '6'
-                    ? PRDB_SDK_OPTIMIZER_PLAN_KIND_INDEX_PREFIX_NESTED_LOOP_JOIN
-                    : PRDB_SDK_OPTIMIZER_PLAN_KIND_INDEX_NESTED_LOOP_JOIN;
-            if (benchmark_plan_status != PRDB_SDK_OPTIMIZER_RESULT_OK ||
-                benchmark_plan.status != PRDB_SDK_OPTIMIZER_STATUS_SUCCESS ||
-                benchmark_plan.plan == NULL || benchmark_plan.plan_len < 3 ||
-                benchmark_plan.plan[2] != expected_plan_kind) {
+                invocation->parameters[0] == 'b' || invocation->parameters[0] == 'k';
+            const uint8_t expect_prefix = invocation->parameters[0] == '6';
+            uint32_t has_expected_join = 0;
+            if (benchmark_plan_status == PRDB_SDK_OPTIMIZER_RESULT_OK &&
+                benchmark_plan.status == PRDB_SDK_OPTIMIZER_STATUS_SUCCESS &&
+                benchmark_plan.plan != NULL &&
+                prdb_sdk_optimizer_decode_unified_plan_v1(
+                    benchmark_plan.plan, benchmark_plan.plan_len,
+                    &decoded_benchmark, sizeof(decoded_benchmark)) ==
+                    PRDB_SDK_OPTIMIZER_PLAN_OK) {
+                for (uint32_t ni = 0; ni < decoded_benchmark.node_count; ++ni) {
+                    const prdb_sdk_optimizer_physical_node_v1 *pn =
+                        &decoded_benchmark.nodes[ni];
+                    if (expect_hash && pn->op_tag == PRDB_OPTIMIZER_PHYSICAL_OP_HASH_JOIN) {
+                        has_expected_join = 1;
+                    } else if (!expect_hash &&
+                               pn->op_tag == PRDB_OPTIMIZER_PHYSICAL_OP_INDEX_NESTED_LOOP_JOIN &&
+                               (!expect_prefix || pn->key_count > 1)) {
+                        has_expected_join = 1;
+                    }
+                }
+            }
+            if (!has_expected_join) {
                 char message[96];
                 int message_len = snprintf(
                     message, sizeof(message),
@@ -857,13 +872,14 @@ static int32_t run_write_read_fixture(
         cancel_update_original_host = optimizer_host_v5;
         cancel_update_ready_sent = 0;
         cancel_host.executor_request = cancel_update_executor_request;
-        update_status = prdb_sdk_optimizer_execute_update_ast_v1(
+        update_status = prdb_sdk_optimizer_execute_update_unified_v1(
             &cancel_host, &update, parameters, 2, schema, sizeof(schema) - 1,
-            16, sizeof(batch_response), request, sizeof(request), response,
-            sizeof(response), relation_response, sizeof(relation_response),
-            scan_response, sizeof(scan_response), batch_response,
-            sizeof(batch_response), &relation, sizeof(relation), columns, 2,
-            &binding, sizeof(binding), scratch, 2, target_handles, 2, &updated);
+            request, sizeof(request), response, sizeof(response),
+            relation_response, sizeof(relation_response), scan_response,
+            sizeof(scan_response), batch_response, sizeof(batch_response),
+            &relation, sizeof(relation), columns, 2, scratch, 2,
+            target_handles, 2, &updated);
+        (void)binding;
         cancel_update_original_host = NULL;
         if (update_status != PRDB_SDK_OPTIMIZER_PLAN_CANCELLED || updated != 0 ||
             cancel_update_ready_sent == 0 ||
@@ -871,7 +887,7 @@ static int32_t run_write_read_fixture(
                                sizeof(confirmed) - 1) != 0) {
             return 1;
         }
-        return 0;
+        return 1;
     }
     if (invocation->parameters_len == 1 && invocation->parameters != NULL &&
         invocation->parameters[0] == 'G') {
@@ -917,13 +933,14 @@ static int32_t run_write_read_fixture(
          * request can fail after the first one has been accepted. */
         fail_next_stage_update = 2;
         failure_host.executor_request = cancel_update_executor_request;
-        update_status = prdb_sdk_optimizer_execute_update_ast_v1(
+        update_status = prdb_sdk_optimizer_execute_update_unified_v1(
             &failure_host, &update, parameters, 2, schema, sizeof(schema) - 1,
-            16, 64, request, sizeof(request), response,
-            sizeof(response), relation_response, sizeof(relation_response),
-            scan_response, sizeof(scan_response), batch_response,
-            sizeof(batch_response), &relation, sizeof(relation), columns, 2,
-            &binding, sizeof(binding), scratch, 2, target_handles, 2, &updated);
+            request, sizeof(request), response, sizeof(response),
+            relation_response, sizeof(relation_response), scan_response,
+            sizeof(scan_response), batch_response, sizeof(batch_response),
+            &relation, sizeof(relation), columns, 2, scratch, 2,
+            target_handles, 2, &updated);
+        (void)binding;
         cancel_update_original_host = NULL;
         if (update_status != PRDB_SDK_OPTIMIZER_PLAN_CALLBACK_ERROR ||
             updated != 0 || fail_next_stage_update != 0) {
@@ -968,14 +985,14 @@ static int32_t run_write_read_fixture(
             host->write_result(host->context, ready, sizeof(ready) - 1) != 0) {
             return 1;
         }
-        update_status = prdb_sdk_optimizer_execute_update_ast_v1(
+        update_status = prdb_sdk_optimizer_execute_update_unified_v1(
             optimizer_host_v5, &update, parameters, 2, schema,
-            sizeof(schema) - 1, 16, sizeof(batch_response), request,
-            sizeof(request), response, sizeof(response), relation_response,
-            sizeof(relation_response), scan_response, sizeof(scan_response),
-            batch_response, sizeof(batch_response), &relation, sizeof(relation),
-            columns, 2, &binding, sizeof(binding), scratch, 2, target_handles,
-            1, &updated);
+            sizeof(schema) - 1, request, sizeof(request), response,
+            sizeof(response), relation_response, sizeof(relation_response),
+            scan_response, sizeof(scan_response), batch_response,
+            sizeof(batch_response), &relation, sizeof(relation), columns, 2,
+            scratch, 2, target_handles, 1, &updated);
+        (void)binding;
         if (update_status != PRDB_SDK_OPTIMIZER_PLAN_REQUEST_LIMIT ||
             updated != 0) {
             static const uint8_t message[] =
@@ -1029,15 +1046,15 @@ static int32_t run_write_read_fixture(
         cancel_update_original_host = optimizer_host_v5;
         observe_next_stage_update = 1;
         observe_only_stage_update = 1;
-        update_status = prdb_sdk_optimizer_execute_update_ast_v1(
+        update_status = prdb_sdk_optimizer_execute_update_unified_v1(
             &observed_host, &denied_update, denied_parameters, 2,
-            schema, sizeof(schema) - 1, 16, sizeof(batch_response),
-            request, sizeof(request), response, sizeof(response),
-            relation_response, sizeof(relation_response), scan_response,
-            sizeof(scan_response), batch_response, sizeof(batch_response),
-            &relation, sizeof(relation), columns, 2, &binding, sizeof(binding),
+            schema, sizeof(schema) - 1, request, sizeof(request), response,
+            sizeof(response), relation_response, sizeof(relation_response),
+            scan_response, sizeof(scan_response), batch_response,
+            sizeof(batch_response), &relation, sizeof(relation), columns, 2,
             scratch, 2, targets, PRDB_SDK_OPTIMIZER_PLAN_MAX_DELETE_TARGETS,
             &updated);
+        (void)binding;
         cancel_update_original_host = NULL;
         observe_only_stage_update = 0;
         if (update_status == PRDB_SDK_OPTIMIZER_PLAN_OK || updated != 0 ||
@@ -2513,13 +2530,26 @@ static int32_t run_write_read_fixture(
         const uint64_t response_len =
             (uint64_t)PRDB_OPTIMIZER_RESPONSE_SUCCESS_HEADER_BYTES + plan_len;
         prdb_sdk_optimizer_response_v1 selected_plan = {0};
-        if (response_len > sizeof(composite_join_optimizer_response) ||
+        prdb_sdk_optimizer_unified_plan_v1 decoded_selected = {0};
+        uint32_t has_prefix_join = 0;
+        if (response_len <= sizeof(composite_join_optimizer_response) &&
             prdb_sdk_optimizer_decode_response_v1(
                 composite_join_optimizer_response, response_len, &selected_plan,
-                sizeof(selected_plan)) != PRDB_SDK_OPTIMIZER_RESULT_OK ||
-            selected_plan.status != PRDB_SDK_OPTIMIZER_STATUS_SUCCESS ||
-            selected_plan.plan == NULL || selected_plan.plan_len < 3 ||
-            selected_plan.plan[2] != PRDB_SDK_OPTIMIZER_PLAN_KIND_INDEX_PREFIX_NESTED_LOOP_JOIN) {
+                sizeof(selected_plan)) == PRDB_SDK_OPTIMIZER_RESULT_OK &&
+            selected_plan.status == PRDB_SDK_OPTIMIZER_STATUS_SUCCESS &&
+            selected_plan.plan != NULL &&
+            prdb_sdk_optimizer_decode_unified_plan_v1(
+                selected_plan.plan, selected_plan.plan_len, &decoded_selected,
+                sizeof(decoded_selected)) == PRDB_SDK_OPTIMIZER_PLAN_OK) {
+            for (uint32_t ni = 0; ni < decoded_selected.node_count; ++ni) {
+                if (decoded_selected.nodes[ni].op_tag ==
+                        PRDB_OPTIMIZER_PHYSICAL_OP_INDEX_NESTED_LOOP_JOIN &&
+                    decoded_selected.nodes[ni].key_count > 1) {
+                    has_prefix_join = 1;
+                }
+            }
+        }
+        if (!has_prefix_join) {
             static const uint8_t message[] = "fixture-error-composite-prefix-plan";
             return report_failure(host, message, sizeof(message) - 1);
         }
@@ -2644,12 +2674,12 @@ static int32_t run_write_read_fixture(
                 optimizer_select_sql, sizeof(optimizer_select_sql) - 1,
                 &optimizer_statement, sizeof(optimizer_statement),
                 &parse_error_offset) != PRDB_SDK_SQL_OK ||
-            prdb_sdk_optimizer_execute_select_ast_with_parameters_v1(
+            prdb_sdk_optimizer_execute_select_unified_cb_v1(
                 optimizer_host, &optimizer_statement, &optimizer_parameter, 1,
-                schema, sizeof(schema) - 1, 16, sizeof(optimizer_batch),
-                optimizer_request, sizeof(optimizer_request),
-                optimizer_response, sizeof(optimizer_response),
-                relation_response, sizeof(relation_response), scan_response,
+                schema, sizeof(schema) - 1, optimizer_request,
+                sizeof(optimizer_request), optimizer_response,
+                sizeof(optimizer_response), relation_response,
+                sizeof(relation_response), scan_response,
                 sizeof(scan_response), optimizer_batch,
                 sizeof(optimizer_batch), &optimizer_relation,
                 sizeof(optimizer_relation), optimizer_columns, 9,
@@ -2678,11 +2708,10 @@ static int32_t run_write_read_fixture(
                     sizeof(optimizer_small_estimate_select_sql) - 1,
                     &optimizer_statement, sizeof(optimizer_statement),
                     &parse_error_offset) != PRDB_SDK_SQL_OK ||
-                prdb_sdk_optimizer_execute_select_ast_with_parameters_v1(
+                prdb_sdk_optimizer_execute_select_unified_cb_v1(
                     &range_observer_host, &optimizer_statement,
                     &optimizer_small_estimate_parameter, 1,
-                    schema, sizeof(schema) - 1, 16,
-                    sizeof(optimizer_batch), optimizer_request,
+                    schema, sizeof(schema) - 1, optimizer_request,
                     sizeof(optimizer_request), optimizer_response,
                     sizeof(optimizer_response), relation_response,
                     sizeof(relation_response), scan_response,
@@ -2752,14 +2781,14 @@ static int32_t run_write_read_fixture(
             range_observer_host.executor_request =
                 observe_range_executor_request;
             optimizer_range_status =
-                prdb_sdk_optimizer_execute_select_ast_with_parameters_v1(
+                prdb_sdk_optimizer_execute_select_unified_cb_v1(
                     &range_observer_host, &optimizer_statement,
                     optimizer_large_range_parameters, 2,
-                    schema, sizeof(schema) - 1, 32, sizeof(optimizer_batch),
-                    optimizer_request, sizeof(optimizer_request),
-                    optimizer_response, sizeof(optimizer_response),
-                    relation_response, sizeof(relation_response),
-                    scan_response, sizeof(scan_response), optimizer_batch,
+                    schema, sizeof(schema) - 1, optimizer_request,
+                    sizeof(optimizer_request), optimizer_response,
+                    sizeof(optimizer_response), relation_response,
+                    sizeof(relation_response), scan_response,
+                    sizeof(scan_response), optimizer_batch,
                     sizeof(optimizer_batch), &optimizer_relation,
                     sizeof(optimizer_relation), optimizer_columns, 9,
                     optimizer_source_cells, 9, optimizer_projected_values, 9,
@@ -2855,20 +2884,19 @@ static int32_t run_write_read_fixture(
                     sizeof(optimizer_ordered_select_sql) - 1,
                     &ordered_statement, sizeof(ordered_statement),
                     &ordered_parse_error) != PRDB_SDK_SQL_OK ||
-                prdb_sdk_optimizer_execute_ordered_select_ast_v1(
-                    optimizer_host, &ordered_statement, schema,
-                    sizeof(schema) - 1, 16, sizeof(ordered_batch),
-                    ordered_request, sizeof(ordered_request),
-                    ordered_response, sizeof(ordered_response),
-                    ordered_relation_response,
+                prdb_sdk_optimizer_execute_select_unified_cb_v1(
+                    optimizer_host, &ordered_statement, NULL, 0, schema,
+                    sizeof(schema) - 1, ordered_request,
+                    sizeof(ordered_request), ordered_response,
+                    sizeof(ordered_response), ordered_relation_response,
                     sizeof(ordered_relation_response), ordered_scan_response,
                     sizeof(ordered_scan_response), ordered_batch,
                     sizeof(ordered_batch), &ordered_relation,
                     sizeof(ordered_relation), ordered_columns, 9,
                     ordered_source_cells, 9, ordered_projected_values, 1,
-                    ordered_materialized, sizeof(ordered_materialized),
                     emit_ordered_optimizer_row, &ordered_results,
                     &ordered_rows) != PRDB_SDK_OPTIMIZER_PLAN_OK ||
+                ((void)ordered_materialized, 0) ||
                 ordered_rows != 2 || ordered_results.row_count != 2) {
                 static const uint8_t message[] =
                     "fixture-error-optimizer-ordered-select";
@@ -2969,19 +2997,18 @@ static int32_t run_write_read_fixture(
                 sizeof(optimizer_grouped_update_sql) - 1, &grouped_update,
                 sizeof(grouped_update), &parse_error_offset) !=
                 PRDB_SDK_SQL_OK ||
-            prdb_sdk_optimizer_execute_update_ast_v1(
+            prdb_sdk_optimizer_execute_update_unified_v1(
                 optimizer_host_v5, &grouped_update, grouped_parameters, 3,
-                schema, sizeof(schema) - 1, 16,
-                sizeof(grouped_batch_response), grouped_request,
+                schema, sizeof(schema) - 1, grouped_request,
                 sizeof(grouped_request), grouped_optimizer_response,
                 sizeof(grouped_optimizer_response), grouped_relation_response,
                 sizeof(grouped_relation_response), grouped_scan_response,
                 sizeof(grouped_scan_response), grouped_batch_response,
                 sizeof(grouped_batch_response), &grouped_relation,
-                sizeof(grouped_relation), grouped_columns, 2, &grouped_binding,
-                sizeof(grouped_binding), grouped_scratch, 2, grouped_targets,
-                PRDB_SDK_OPTIMIZER_PLAN_MAX_DELETE_TARGETS,
+                sizeof(grouped_relation), grouped_columns, 2, grouped_scratch,
+                2, grouped_targets, PRDB_SDK_OPTIMIZER_PLAN_MAX_DELETE_TARGETS,
                 &grouped_update_count) != PRDB_SDK_OPTIMIZER_PLAN_OK ||
+            ((void)grouped_binding, 0) ||
             grouped_update_count != 2) {
             static const uint8_t message[] =
                 "fixture-error-optimizer-update-multiple";
@@ -3006,18 +3033,16 @@ static int32_t run_write_read_fixture(
                 sizeof(optimizer_grouped_verify_sql) - 1, &grouped_update,
                 sizeof(grouped_update), &parse_error_offset) !=
                 PRDB_SDK_SQL_OK ||
-            prdb_sdk_optimizer_execute_update_ast_v1(
+            prdb_sdk_optimizer_execute_update_unified_v1(
                 optimizer_host_v5, &grouped_update, grouped_verify_parameters,
-                3, schema, sizeof(schema) - 1, 16,
-                sizeof(grouped_batch_response), grouped_request,
+                3, schema, sizeof(schema) - 1, grouped_request,
                 sizeof(grouped_request), grouped_optimizer_response,
                 sizeof(grouped_optimizer_response), grouped_relation_response,
                 sizeof(grouped_relation_response), grouped_scan_response,
                 sizeof(grouped_scan_response), grouped_batch_response,
                 sizeof(grouped_batch_response), &grouped_relation,
-                sizeof(grouped_relation), grouped_columns, 2,
-                &grouped_binding, sizeof(grouped_binding), grouped_scratch, 2,
-                grouped_targets, PRDB_SDK_OPTIMIZER_PLAN_MAX_DELETE_TARGETS,
+                sizeof(grouped_relation), grouped_columns, 2, grouped_scratch,
+                2, grouped_targets, PRDB_SDK_OPTIMIZER_PLAN_MAX_DELETE_TARGETS,
                 &grouped_verify_count) != PRDB_SDK_OPTIMIZER_PLAN_OK ||
             grouped_verify_count != 2) {
             static const uint8_t message[] =
@@ -3059,20 +3084,19 @@ static int32_t run_write_read_fixture(
             static const uint8_t message[] = "fixture-error-optimizer-update";
             return report_failure(host, message, sizeof(message) - 1);
         }
-        optimized_update_status = prdb_sdk_optimizer_execute_update_ast_v1(
+        optimized_update_status = prdb_sdk_optimizer_execute_update_unified_v1(
             optimizer_host_v5, &optimizer_update, optimizer_update_parameters,
-            2, schema, sizeof(schema) - 1, 16,
-            sizeof(optimizer_batch_response), optimizer_update_request,
+            2, schema, sizeof(schema) - 1, optimizer_update_request,
             sizeof(optimizer_update_request), optimizer_update_response,
             sizeof(optimizer_update_response), optimizer_relation_response,
             sizeof(optimizer_relation_response), optimizer_scan_response,
             sizeof(optimizer_scan_response), optimizer_batch_response,
             sizeof(optimizer_batch_response), &optimizer_update_relation,
             sizeof(optimizer_update_relation), optimizer_update_columns, 1,
-            &optimizer_update_binding, sizeof(optimizer_update_binding),
             optimizer_update_cell_scratch, 1, optimizer_update_targets,
             PRDB_SDK_OPTIMIZER_PLAN_MAX_DELETE_TARGETS,
             &optimized_update_count);
+        (void)optimizer_update_binding;
         if (optimized_update_status != PRDB_SDK_OPTIMIZER_PLAN_OK) {
             static const uint8_t message[] = "fixture-error-optimizer-update";
             return report_failure(host, message, sizeof(message) - 1);
@@ -3113,17 +3137,15 @@ static int32_t run_write_read_fixture(
                 optimizer_null_update_sql,
                 sizeof(optimizer_null_update_sql) - 1, &optimizer_update,
                 sizeof(optimizer_update), NULL) != PRDB_SDK_SQL_OK ||
-            prdb_sdk_optimizer_execute_update_ast_v1(
+            prdb_sdk_optimizer_execute_update_unified_v1(
                 optimizer_host_v5, &optimizer_update, &optimizer_null_parameter,
-                1, schema, sizeof(schema) - 1, 16,
-                sizeof(optimizer_batch_response), optimizer_update_request,
+                1, schema, sizeof(schema) - 1, optimizer_update_request,
                 sizeof(optimizer_update_request), optimizer_update_response,
                 sizeof(optimizer_update_response), optimizer_relation_response,
                 sizeof(optimizer_relation_response), optimizer_scan_response,
                 sizeof(optimizer_scan_response), optimizer_batch_response,
                 sizeof(optimizer_batch_response), &optimizer_update_relation,
                 sizeof(optimizer_update_relation), optimizer_update_columns, 1,
-                &optimizer_update_binding, sizeof(optimizer_update_binding),
                 optimizer_update_cell_scratch, 1, optimizer_update_targets,
                 PRDB_SDK_OPTIMIZER_PLAN_MAX_DELETE_TARGETS,
                 &optimized_null_update_count) != PRDB_SDK_OPTIMIZER_PLAN_OK ||
@@ -3175,19 +3197,17 @@ static int32_t run_write_read_fixture(
                 optimizer_delete_sql, sizeof(optimizer_delete_sql) - 1,
                 &optimizer_delete, sizeof(optimizer_delete), NULL) !=
                 PRDB_SDK_SQL_OK ||
-            prdb_sdk_optimizer_execute_delete_ast_v1(
+            prdb_sdk_optimizer_execute_delete_unified_v1(
                 optimizer_host_v5, &optimizer_delete,
                 &optimizer_update_parameters[1], 1, schema,
-                sizeof(schema) - 1, 16, sizeof(optimizer_batch_response),
-                optimizer_update_request, sizeof(optimizer_update_request),
-                optimizer_update_response, sizeof(optimizer_update_response),
-                optimizer_relation_response, sizeof(optimizer_relation_response),
-                optimizer_scan_response, sizeof(optimizer_scan_response),
-                optimizer_batch_response, sizeof(optimizer_batch_response),
-                &optimizer_update_relation, sizeof(optimizer_update_relation),
-                optimizer_update_columns, 1, &optimizer_update_binding,
-                sizeof(optimizer_update_binding), optimizer_update_cell_scratch,
-                1, optimizer_delete_targets,
+                sizeof(schema) - 1, optimizer_update_request,
+                sizeof(optimizer_update_request), optimizer_update_response,
+                sizeof(optimizer_update_response), optimizer_relation_response,
+                sizeof(optimizer_relation_response), optimizer_scan_response,
+                sizeof(optimizer_scan_response), optimizer_batch_response,
+                sizeof(optimizer_batch_response), &optimizer_update_relation,
+                sizeof(optimizer_update_relation), optimizer_update_columns, 1,
+                optimizer_update_cell_scratch, 1, optimizer_delete_targets,
                 PRDB_SDK_OPTIMIZER_PLAN_MAX_DELETE_TARGETS,
                 &optimized_delete_count) != PRDB_SDK_OPTIMIZER_PLAN_OK ||
             optimized_delete_count != 2) {

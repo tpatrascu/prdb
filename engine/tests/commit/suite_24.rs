@@ -480,7 +480,9 @@ pub(super) fn sandboxed_optimizer_metadata_submission_cancels_over_tcp()
                             &mut supervisor_service,
                             request_id,
                             move |operation, _request_id| {
-                                if operation != prdb_engine::ipc::Operation::EstimateScan as u16 {
+                                if operation != prdb_engine::ipc::Operation::EstimateScan as u16
+                                    && operation != prdb_engine::ipc::Operation::EstimateScans as u16
+                                {
                                     return;
                                 }
                                 if invocation_index == 0 {

@@ -1195,31 +1195,43 @@ pub fn run_optimizer_predicate_estimate_termination_case(
         .trim()
         .parse::<u32>()?;
 
-    let mut request = vec![0, 1, 1, 0];
-    for name in ["information_schema", "tables"] {
-        request.push(name.len() as u8);
-        request.extend_from_slice(name.as_bytes());
-    }
-    request.extend_from_slice(&1u16.to_be_bytes());
-    request.push(10);
-    request.extend_from_slice(b"table_name");
-    request.extend_from_slice(&0u32.to_be_bytes());
-    request.push(0);
-    let predicate = [
-        0x20, 5, 0x10, 10, b't', b'a', b'b', b'l', b'e', b'_', b'n', b'a', b'm', b'e', 0x03, 0, 1,
-        b'm',
-    ];
-    request.truncate(request.len() - 5);
-    request.extend_from_slice(&(predicate.len() as u32).to_be_bytes());
-    request.extend_from_slice(&predicate);
-    request.push(0);
+    let request = prdb_engine::optimizer_ir::encode_logical_request(
+        &prdb_engine::optimizer_ir::LogicalRequest {
+            schema_name: "information_schema".to_owned(),
+            root: prdb_engine::optimizer_ir::LogicalOp::Project {
+                columns: vec![prdb_engine::optimizer_ir::expr::ColumnRef {
+                    relation_index: 0,
+                    column_name: "table_name".to_owned(),
+                }],
+                input: Box::new(prdb_engine::optimizer_ir::LogicalOp::Filter {
+                    predicate: prdb_engine::optimizer_ir::Expr::Compare {
+                        op: prdb_engine::optimizer_ir::Comparison::GreaterOrEqual,
+                        left: Box::new(prdb_engine::optimizer_ir::Expr::Column(
+                            prdb_engine::optimizer_ir::expr::ColumnRef {
+                                relation_index: 0,
+                                column_name: "table_name".to_owned(),
+                            },
+                        )),
+                        right: Box::new(prdb_engine::optimizer_ir::Expr::Text("m".to_owned())),
+                    },
+                    input: Box::new(prdb_engine::optimizer_ir::LogicalOp::Scan {
+                        relation_index: 0,
+                        relation_name: "tables".to_owned(),
+                    }),
+                }),
+            },
+        },
+    )
+    .map_err(|e| format!("encode logical request: {e:?}"))?;
     let (estimate_request_tx, estimate_request_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let release_rx = std::sync::Arc::new(std::sync::Mutex::new(release_rx));
     let observer = {
         let release_rx = std::sync::Arc::clone(&release_rx);
         move |operation, request_id| {
-            if operation == Operation::EstimateScan as u16 {
+            if operation == Operation::EstimateScan as u16
+                || operation == Operation::EstimateScans as u16
+            {
                 let _ = estimate_request_tx.send(request_id);
                 if let Ok(release) = release_rx.lock() {
                     let _ = release.recv_timeout(Duration::from_secs(10));

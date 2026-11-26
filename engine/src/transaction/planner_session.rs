@@ -556,8 +556,7 @@ impl PlannerMetadataConnection<'_, '_> {
         predicate_bytes: &[u8],
     ) -> Result<Option<(u64, u64)>, TransactionError> {
         self.transaction.check_deadline()?;
-        if predicate_bytes.is_empty()
-            || predicate_bytes.len() > crate::optimizer_request::MAX_PREDICATE_BYTES
+        if predicate_bytes.is_empty() || predicate_bytes.len() > crate::optimizer_ir::MAX_EXPR_BYTES
         {
             return Ok(None);
         }
@@ -607,7 +606,7 @@ impl PlannerMetadataConnection<'_, '_> {
             .zip(&state.schema.column_ids)
             .enumerate()
             .map(
-                |(ordinal, (column, &column_id))| crate::optimizer_binding::BoundColumn {
+                |(ordinal, (column, &column_id))| crate::optimizer_ir::BoundColumn {
                     column_id,
                     ordinal: ordinal as u32,
                     scalar_type: column.scalar_type,
@@ -616,7 +615,7 @@ impl PlannerMetadataConnection<'_, '_> {
             )
             .collect::<Vec<_>>();
         let predicate =
-            crate::optimizer_plan::decode_bound_predicate_v1(predicate_bytes, &scan_columns)
+            crate::optimizer_ir::decode_bound_expr_for_columns(predicate_bytes, &scan_columns)
                 .map_err(|_| TransactionError::InvalidMetadataRequest)?;
         let projection = AuthorizedProjection {
             columns: &state.schema.columns,
@@ -655,5 +654,55 @@ impl PlannerMetadataConnection<'_, '_> {
             .remove(&handle.token)
             .map(|_| ())
             .ok_or(TransactionError::InvalidMetadataRequest)
+    }
+
+    /// Estimate authorized-view relation statistics (row count, authorized byte
+    /// width, NDV, null/redacted fractions, and equi-depth histograms) using
+    /// the invocation's shared estimate allowance.
+    pub fn estimate_relation_stats(
+        &mut self,
+        handle: &PlanningTableHandle,
+        candidate_limit: usize,
+    ) -> Result<Option<crate::statistics::AuthorizedRelationStats>, TransactionError> {
+        let description = self.describe_relation(handle)?;
+        if self
+            .handles
+            .get(&handle.token)
+            .is_some_and(|state| state.schema_name == "information_schema")
+        {
+            return Ok(None);
+        }
+        if !consume_planner_estimate_budget(
+            &mut self.estimate_requests,
+            self.transaction.coordination.max_planner_estimate_requests,
+        ) {
+            return Ok(None);
+        }
+        let state = self
+            .transaction
+            .load_catalog_estimate_projection(description.relation_id)?;
+        let projection = AuthorizedProjection {
+            context: &state.context,
+            grants: &state.grants,
+            policies: &state.policies,
+            checks: &state.checks,
+            policy_driving_columns: &state.policy_driving_columns,
+            dependencies: &[],
+            schema_id: state.schema.schema_id,
+            schema_version: state.schema.schema_version,
+            columns: &state.schema.columns,
+            column_ids: &state.schema.column_ids,
+        };
+        let clamped_limit = candidate_limit.min(
+            self.transaction
+                .coordination
+                .max_planner_estimate_candidates
+                .min(MAX_CONFIGURABLE_ESTIMATE_CANDIDATES),
+        );
+        self.transaction.estimate_authorized_relation_stats(
+            description.relation_id,
+            &projection,
+            clamped_limit,
+        )
     }
 }
