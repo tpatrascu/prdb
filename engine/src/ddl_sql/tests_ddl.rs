@@ -1144,3 +1144,39 @@ fn parses_and_binds_boolean_truth_tests() {
         assert!(parse_add_check_constraint(sql).is_err(), "accepted {sql}");
     }
 }
+
+#[test]
+fn parses_tpcc_and_tpch_column_type_aliases() {
+    let parsed = parse_create_table(
+        "CREATE TABLE tpcc.customer (
+            c_id INTEGER NOT NULL,
+            c_middle CHAR(2) NOT NULL,
+            c_flag CHAR,
+            c_name CHARACTER(16),
+            c_since TIMESTAMP,
+            c_balance NUMERIC(12, 2),
+            PRIMARY KEY (c_id)
+        );",
+    )
+    .unwrap();
+    assert_eq!(
+        parsed.columns[1].scalar_type,
+        ScalarType::Varchar { max_chars: 2 }
+    );
+    assert_eq!(
+        parsed.columns[2].scalar_type,
+        ScalarType::Varchar { max_chars: 1 }
+    );
+    assert_eq!(
+        parsed.columns[3].scalar_type,
+        ScalarType::Varchar { max_chars: 16 }
+    );
+    assert_eq!(parsed.columns[4].scalar_type, ScalarType::TimestampTz);
+    assert_eq!(
+        parsed.columns[5].scalar_type,
+        ScalarType::Decimal {
+            precision: 12,
+            scale: 2
+        }
+    );
+}

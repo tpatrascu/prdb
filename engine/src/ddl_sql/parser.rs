@@ -449,8 +449,8 @@ impl Parser {
             "bytea" => ScalarType::Bytea,
             "uuid" => ScalarType::Uuid,
             "date" => ScalarType::Date,
-            "timestamptz" => ScalarType::TimestampTz,
-            "decimal" => {
+            "timestamptz" | "timestamp" => ScalarType::TimestampTz,
+            "decimal" | "numeric" => {
                 self.take(Token::LeftParen)?;
                 let precision = self.number()?;
                 self.take(Token::Comma)?;
@@ -464,10 +464,17 @@ impl Parser {
                     scale: scale as u8,
                 }
             }
-            "varchar" => {
-                self.take(Token::LeftParen)?;
-                let length = self.number()?;
-                self.take(Token::RightParen)?;
+            "varchar" | "char" | "character" => {
+                let length = if matches!(self.peek(), Some(Token::LeftParen)) {
+                    self.take(Token::LeftParen)?;
+                    let length = self.number()?;
+                    self.take(Token::RightParen)?;
+                    length
+                } else if name != "varchar" {
+                    1
+                } else {
+                    return Err(DdlSqlError::InvalidStatement);
+                };
                 if length == 0 {
                     return Err(DdlSqlError::InvalidStatement);
                 }

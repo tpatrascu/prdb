@@ -5,6 +5,7 @@
 #include "prdb_sdk_optimizer_plan_v1.h"
 #include "prdb_sdk_sql_v1.h"
 #include "prdb_sdk_sql_spill_sort_v1.h"
+#include "sql_ast_internal.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -770,6 +771,10 @@ static int32_t sql_run_internal(
                 is_ordered_row_select = 1;
                 ordered_row_statement = parsed;
             }
+        } else {
+            return prdb_sql_execute_unified_v1(
+                host, schema, schema_len, sql, sql_len, parameters,
+                parameters_len);
         }
     }
     (void)single_key_join_statement;
@@ -1641,8 +1646,9 @@ int32_t prdb_sdk_sql_run_statement_optimizer_v1(
     status = prdb_sdk_sql_parse_select_v1(
         sql, sql_len, &statement, sizeof(statement), NULL);
     if (status != PRDB_SDK_SQL_OK) {
-        return latch_sql_failure(host,
-                                 PRDB_SDK_SQL_DISPATCH_INVALID_ARGUMENT);
+        return prdb_sql_execute_unified_v1(
+            host, schema, schema_len, sql, sql_len, parameters,
+            parameters_len);
     }
     if (parameters_len >= 8 && memcmp(parameters, "PSP1", 4) == 0)
         declared_count = read_u16_be(parameters + 4);
