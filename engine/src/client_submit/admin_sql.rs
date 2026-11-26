@@ -668,24 +668,48 @@ impl AdminClient {
                     | AdminObjectPrivilege::References
             )
         });
-        if has_data_privilege && has_object_privilege {
-            let entries = privileges
-                .into_iter()
-                .map(|privilege| AdminObjectGrantEntry {
-                    target: if matches!(
+        let has_table_data_privilege = statement.table_name.is_some()
+            && statement.column_names.is_empty()
+            && privileges.iter().any(|privilege| {
+                matches!(
+                    privilege,
+                    AdminObjectPrivilege::Select
+                        | AdminObjectPrivilege::Insert
+                        | AdminObjectPrivilege::Update
+                )
+            });
+        if (has_data_privilege && has_object_privilege) || has_table_data_privilege {
+            let mut entries = Vec::new();
+            for privilege in privileges {
+                let is_data = matches!(
+                    privilege,
+                    AdminObjectPrivilege::Select
+                        | AdminObjectPrivilege::Insert
+                        | AdminObjectPrivilege::Update
+                        | AdminObjectPrivilege::References
+                );
+                if has_table_data_privilege
+                    && matches!(
                         privilege,
                         AdminObjectPrivilege::Select
                             | AdminObjectPrivilege::Insert
                             | AdminObjectPrivilege::Update
-                            | AdminObjectPrivilege::References
-                    ) {
+                    )
+                {
+                    entries.push(AdminObjectGrantEntry {
+                        target: AdminObjectGrantTarget::Object,
+                        privilege,
+                    });
+                }
+                entries.push(AdminObjectGrantEntry {
+                    target: if is_data {
                         target.clone()
                     } else {
                         AdminObjectGrantTarget::Object
                     },
                     privilege,
-                })
-                .collect();
+                });
+            }
             return self.change_object_grant_entries(
                 if statement.grant {
                     "objects.grant"

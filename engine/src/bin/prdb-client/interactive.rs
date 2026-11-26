@@ -868,7 +868,11 @@ impl SqlBatchResultDecoder {
         if self.bytes.is_empty() {
             Ok(())
         } else {
-            Err("truncated SQL batch result record".to_owned())
+            Err(format!(
+                "truncated SQL batch result record (len={}, head={:02x?})",
+                self.bytes.len(),
+                &self.bytes[..self.bytes.len().min(32)]
+            ))
         }
     }
 }

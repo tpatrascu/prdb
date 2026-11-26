@@ -369,12 +369,17 @@ static int32_t scan_base_relation(exec_ctx *ec, const uint8_t *schema,
                 goto fail;
             }
         }
-        if (batch.finished || batch.continuation == NULL) break;
+        if (batch.finished || batch.continuation == NULL) {
+            cursor_open = 0;
+            break;
+        }
         memcpy(cursor, batch.continuation, 16);
     }
 
-    prdb_sdk_executor_close_cursor_v1(ec->host, cursor, ec->resp_buf,
-                                      EXEC_RESP_BYTES, &resp_len);
+    if (cursor_open) {
+        prdb_sdk_executor_close_cursor_v1(ec->host, cursor, ec->resp_buf,
+                                          EXEC_RESP_BYTES, &resp_len);
+    }
     free(cols);
     free(cells);
     return PRDB_SDK_SQL_DISPATCH_OK;

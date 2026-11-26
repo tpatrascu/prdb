@@ -1,5 +1,6 @@
 #include "prdb_sdk_sql_batch_v1.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 typedef struct batch_host_context {
@@ -72,7 +73,6 @@ static int32_t emit_record(batch_host_context *context, uint8_t event,
                            const uint8_t *payload, uint64_t payload_len) {
     uint8_t header[PRDB_SDK_SQL_BATCH_RESULT_HEADER_BYTES] = {
         'S', 'Q', 'L', 'B', 1, event, 0, 0, 0, 0, 0, 0};
-    int32_t status;
     if (context == NULL || context->base == NULL ||
         context->base->write_result == NULL || payload_len > UINT32_MAX ||
         (payload_len != 0 && payload == NULL)) {
@@ -80,12 +80,26 @@ static int32_t emit_record(batch_host_context *context, uint8_t event,
     }
     write_u16_be(header + 6, context->statement_ordinal);
     write_u32_be(header + 8, (uint32_t)payload_len);
-    status = context->base->write_result(context->base->context, header,
-                                         sizeof(header));
-    if (status != 0) return status;
-    if (payload_len == 0) return 0;
-    return context->base->write_result(context->base->context, payload,
-                                       payload_len);
+    if (payload_len == 0) {
+        return context->base->write_result(context->base->context, header,
+                                           sizeof(header));
+    }
+    uint64_t total_len = sizeof(header) + payload_len;
+    if (total_len <= 4096) {
+        uint8_t buf[4096];
+        memcpy(buf, header, sizeof(header));
+        memcpy(buf + sizeof(header), payload, (size_t)payload_len);
+        return context->base->write_result(context->base->context, buf,
+                                           total_len);
+    }
+    uint8_t *buf = (uint8_t *)malloc((size_t)total_len);
+    if (buf == NULL) return PRDB_QUERY_CALLBACK_INVALID_ARGUMENT;
+    memcpy(buf, header, sizeof(header));
+    memcpy(buf + sizeof(header), payload, (size_t)payload_len);
+    int32_t status =
+        context->base->write_result(context->base->context, buf, total_len);
+    free(buf);
+    return status;
 }
 
 static int32_t frame_result(void *opaque, const uint8_t *bytes,

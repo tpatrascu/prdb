@@ -751,6 +751,42 @@ int32_t prdb_sdk_sql_execute_select_typed_v1(
         PRDB_SDK_SQL_ABI_V1_VERSION, on_row, result_context);
 }
 
+int32_t prdb_sdk_sql_execute_select_typed_ordered_v1(
+    const prdb_host_api_v1 *host, const uint8_t *schema, uint32_t schema_len,
+    const uint8_t *sql, uint64_t sql_len,
+    const prdb_sdk_value_v1 *parameters,
+    const prdb_sdk_sql_parameter_metadata_v1 *parameter_metadata,
+    uint32_t parameter_count, uint16_t max_candidates,
+    uint32_t max_batch_bytes, uint8_t *planner_response,
+    uint64_t planner_response_capacity, uint8_t *executor_response,
+    uint64_t executor_response_capacity, uint8_t *batch_response,
+    uint64_t batch_response_capacity,
+    prdb_sdk_sql_column_shape_v1 *planner_columns,
+    uint32_t planner_column_capacity,
+    prdb_sdk_sql_column_shape_v1 *executor_columns,
+    uint32_t executor_column_capacity, prdb_sdk_value_v1 *cell_scratch,
+    uint32_t cell_scratch_capacity, uint8_t *materialized_rows,
+    uint64_t materialized_rows_capacity,
+    prdb_sdk_sql_result_row_v1_fn on_row, void *result_context) {
+    if (host == NULL || host->struct_size < sizeof(*host) ||
+        host->abi_version != PRDB_QUERY_ABI_VERSION ||
+        host->statement_failure == NULL) {
+        return PRDB_SDK_SQL_EXEC_INVALID_ARGUMENT;
+    }
+    if (parameter_count != 0 && parameter_metadata == NULL) {
+        return fail_statement(host, PRDB_SDK_SQL_EXEC_INVALID_ARGUMENT);
+    }
+    return execute_select_internal(
+        host, schema, schema_len, NULL, sql, sql_len, parameters, parameter_metadata,
+        parameter_count, max_candidates, max_batch_bytes, planner_response,
+        planner_response_capacity, executor_response,
+        executor_response_capacity, batch_response, batch_response_capacity,
+        planner_columns, planner_column_capacity, executor_columns,
+        executor_column_capacity, cell_scratch, cell_scratch_capacity,
+        materialized_rows, materialized_rows_capacity,
+        PRDB_SDK_SQL_ABI_V1_VERSION, on_row, result_context);
+}
+
 int32_t prdb_sdk_sql_execute_insert_v1(
     const prdb_host_api_v1 *host_v3, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,

@@ -224,13 +224,144 @@ fn run_interactive_sql(
     Ok(())
 }
 
-fn provision_profiles_and_schema(cfg: &Config) -> Result<(), String> {
-    let stmts = [
+fn create_bench_users_and_credentials(
+    cfg: &Config,
+    oltp_creds_path: &Path,
+    olap_creds_path: &Path,
+) -> Result<(), String> {
+    use prdb_engine::client_credentials::{read_client_credentials, write_client_credentials};
+    use prdb_engine::client_protocol::ClientCredentials;
+    use prdb_engine::client_submit::AdminClient;
+    use std::net::SocketAddr;
+
+    let addr: SocketAddr = cfg
+        .address
+        .parse()
+        .map_err(|e| format!("invalid address {}: {e}", cfg.address))?;
+    let mut admin_creds =
+        read_client_credentials(&cfg.admin_credentials).map_err(|e| e.to_string())?;
+    let mut admin = AdminClient::connect_authenticated(
+        addr,
+        admin_creds.token_id,
+        &mut admin_creds.token_secret,
+    )
+    .map_err(|e| e.to_string())?;
+
+    let now_us = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_micros() as i64;
+    let expires_at_us = now_us + 86_400_000_000;
+
+    let oltp_user = admin
+        .create_user_with_profile("bench_oltp_user", "bench_oltp")
+        .map_err(|e| format!("create bench_oltp_user failed: {e}"))?;
+    let mut oltp_tok = admin
+        .issue_token(oltp_user.identity_id, "bench_oltp", expires_at_us)
+        .map_err(|e| format!("issue bench_oltp_user token failed: {e}"))?;
+    write_client_credentials(
+        oltp_creds_path,
+        &ClientCredentials {
+            token_id: oltp_tok.token_id,
+            token_secret: *oltp_tok.token_secret(),
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    let _ = &mut oltp_tok;
+
+    let olap_user = admin
+        .create_user_with_profile("bench_olap_user", "bench_olap")
+        .map_err(|e| format!("create bench_olap_user failed: {e}"))?;
+    let mut olap_tok = admin
+        .issue_token(olap_user.identity_id, "bench_olap", expires_at_us)
+        .map_err(|e| format!("issue bench_olap_user token failed: {e}"))?;
+    write_client_credentials(
+        olap_creds_path,
+        &ClientCredentials {
+            token_id: olap_tok.token_id,
+            token_secret: *olap_tok.token_secret(),
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    let _ = &mut olap_tok;
+    Ok(())
+}
+
+fn compute_profile_limits(size_gb: f64) -> (u64, u64, u64, u64, u64, u64, u64) {
+    // Baseline is the verified 0.1 GB run.
+    let scale = (size_gb / 0.1).max(1.0);
+    let sqrt_scale = scale.sqrt();
+
+    let oltp_mem = ((512.0 * 1024.0 * 1024.0) * sqrt_scale)
+        .min(1024.0 * 1024.0 * 1024.0)
+        .round() as u64;
+    let oltp_deadline = (30_000.0 * sqrt_scale.min(4.0)).round() as u64;
+
+    let olap_mem = ((2.0 * 1024.0 * 1024.0 * 1024.0) * sqrt_scale)
+        .min(8.0 * 1024.0 * 1024.0 * 1024.0)
+        .round() as u64;
+    let olap_scan_work = (50_000_000.0 * scale).round() as u64;
+    let olap_result_bytes = ((256.0 * 1024.0 * 1024.0) * sqrt_scale)
+        .min(2.0 * 1024.0 * 1024.0 * 1024.0)
+        .round() as u64;
+    let olap_spill_bytes = ((32.0 * 1024.0 * 1024.0 * 1024.0) * sqrt_scale)
+        .min(32.0 * 1024.0 * 1024.0 * 1024.0)
+        .round() as u64;
+    let olap_deadline = (600_000.0 * sqrt_scale).min(3_600_000.0).round() as u64;
+
+    (
+        oltp_mem,
+        oltp_deadline,
+        olap_mem,
+        olap_scan_work,
+        olap_result_bytes,
+        olap_spill_bytes,
+        olap_deadline,
+    )
+}
+
+fn provision_profiles_and_schema(
+    cfg: &Config,
+    oltp_creds_path: &Path,
+    olap_creds_path: &Path,
+) -> Result<(), String> {
+    let (
+        oltp_mem,
+        oltp_deadline,
+        olap_mem,
+        olap_scan_work,
+        olap_result_bytes,
+        olap_spill_bytes,
+        olap_deadline,
+    ) = compute_profile_limits(cfg.size_gb);
+    println!(
+        "prdb-bench: configuring profiles for {:.2} GB (oltp_mem={} MiB, olap_mem={} MiB, olap_scan_work={}, olap_result_bytes={} MiB, olap_spill={} GiB)",
+        cfg.size_gb,
+        oltp_mem / (1024 * 1024),
+        olap_mem / (1024 * 1024),
+        olap_scan_work,
+        olap_result_bytes / (1024 * 1024),
+        olap_spill_bytes / (1024 * 1024 * 1024),
+    );
+    let oltp_profile_sql = format!(
+        "CREATE WORKLOAD PROFILE IF NOT EXISTS bench_oltp FROM large_operational WITH (memory_max_bytes = {oltp_mem}, max_deadline_ms = {oltp_deadline});"
+    );
+    let olap_profile_sql = format!(
+        "CREATE WORKLOAD PROFILE IF NOT EXISTS bench_olap FROM large_analytical WITH (memory_max_bytes = {olap_mem}, max_invocation_scan_work = {olap_scan_work}, max_total_result_bytes = {olap_result_bytes}, spill_max_bytes = {olap_spill_bytes}, max_deadline_ms = {olap_deadline});"
+    );
+    let pre_stmts = [
         "CREATE SCHEMA IF NOT EXISTS bench;",
-        "CREATE WORKLOAD PROFILE IF NOT EXISTS bench_oltp FROM small_operational WITH (max_deadline_ms = 30000);",
-        "CREATE WORKLOAD PROFILE IF NOT EXISTS bench_olap FROM large_analytical WITH (memory_max_bytes = 2147483648, max_invocation_scan_work = 50000000, max_total_result_bytes = 268435456, spill_max_bytes = 34359738368, max_deadline_ms = 600000);",
-        "CREATE USER IF NOT EXISTS bench_oltp_user LOGIN WORKLOAD PROFILE bench_oltp;",
-        "CREATE USER IF NOT EXISTS bench_olap_user LOGIN WORKLOAD PROFILE bench_olap;",
+        oltp_profile_sql.as_str(),
+        olap_profile_sql.as_str(),
+    ];
+    for stmt in pre_stmts {
+        run_admin_sql(cfg, stmt)?;
+    }
+    create_bench_users_and_credentials(cfg, oltp_creds_path, olap_creds_path)?;
+    let stmts = [
+        "GRANT USAGE ON SCHEMA bench TO USER admin;",
+        "GRANT USAGE ON SCHEMA bench TO USER bench_oltp_user;",
+        "GRANT USAGE ON SCHEMA bench TO USER bench_olap_user;",
         "CREATE TABLE bench.warehouse (w_id BIGINT NOT NULL, w_name TEXT NOT NULL, w_ytd DECIMAL(12,2) NOT NULL, w_tax DECIMAL(4,4) NOT NULL);",
         "CREATE TABLE bench.district (d_id BIGINT NOT NULL, d_w_id BIGINT NOT NULL, d_name TEXT NOT NULL, d_ytd DECIMAL(12,2) NOT NULL, d_next_o_id BIGINT NOT NULL);",
         "CREATE TABLE bench.customer (c_id BIGINT NOT NULL, c_d_id BIGINT NOT NULL, c_w_id BIGINT NOT NULL, c_last TEXT NOT NULL, c_balance DECIMAL(12,2) NOT NULL, c_ytd_payment DECIMAL(12,2) NOT NULL, c_payment_cnt BIGINT NOT NULL);",
@@ -249,29 +380,43 @@ fn provision_profiles_and_schema(cfg: &Config) -> Result<(), String> {
         run_admin_sql(cfg, stmt)?;
     }
 
-    let tables = [
-        "warehouse",
-        "district",
-        "customer",
-        "orders",
-        "order_line",
-        "stock",
-        "item",
-        "region",
-        "nation",
-        "supplier",
-        "part",
-        "h_orders",
-        "lineitem",
+    let tables: [(&str, &str); 13] = [
+        ("warehouse", "w_id, w_name, w_ytd, w_tax"),
+        ("district", "d_id, d_w_id, d_name, d_ytd, d_next_o_id"),
+        (
+            "customer",
+            "c_id, c_d_id, c_w_id, c_last, c_balance, c_ytd_payment, c_payment_cnt",
+        ),
+        ("orders", "o_id, o_d_id, o_w_id, o_c_id, o_ol_cnt"),
+        (
+            "order_line",
+            "ol_o_id, ol_d_id, ol_w_id, ol_number, ol_i_id, ol_amount, ol_quantity",
+        ),
+        ("stock", "s_i_id, s_w_id, s_quantity"),
+        ("item", "i_id, i_name, i_price"),
+        ("region", "r_regionkey, r_name"),
+        ("nation", "n_nationkey, n_name, n_regionkey"),
+        ("supplier", "s_suppkey, s_name, s_nationkey, s_acctbal"),
+        ("part", "p_partkey, p_name, p_size, p_retailprice"),
+        (
+            "h_orders",
+            "o_orderkey, o_custkey, o_orderstatus, o_totalprice, o_orderdate",
+        ),
+        (
+            "lineitem",
+            "l_orderkey, l_partkey, l_suppkey, l_linenumber, l_quantity, l_extendedprice, l_discount, l_tax, l_returnflag, l_linestatus, l_shipdate",
+        ),
     ];
-    for t in tables {
+    for (t, cols) in tables {
         run_admin_sql(
             cfg,
             &format!("GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE bench.{t} TO USER admin;"),
         )?;
         run_admin_sql(
             cfg,
-            &format!("GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE bench.{t} TO USER bench_oltp_user;"),
+            &format!(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE bench.{t} TO USER bench_oltp_user;"
+            ),
         )?;
         run_admin_sql(
             cfg,
@@ -279,26 +424,58 @@ fn provision_profiles_and_schema(cfg: &Config) -> Result<(), String> {
         )?;
         run_admin_sql(
             cfg,
-            &format!("CREATE ROW POLICY allow_sel_{t} ON bench.{t} FOR SELECT TO USER admin, USER bench_oltp_user, USER bench_olap_user AS ALLOW USING (TRUE);"),
+            &format!(
+                "CREATE ROW POLICY allow_sel_{t} ON bench.{t} FOR SELECT TO USER admin, USER bench_oltp_user, USER bench_olap_user AS ALLOW USING (TRUE);"
+            ),
         )?;
         run_admin_sql(
             cfg,
-            &format!("CREATE ROW POLICY allow_ins_{t} ON bench.{t} FOR INSERT TO USER admin, USER bench_oltp_user AS ALLOW WITH CHECK (TRUE);"),
+            &format!(
+                "CREATE ROW POLICY allow_ins_{t} ON bench.{t} FOR INSERT TO USER admin, USER bench_oltp_user AS ALLOW WITH CHECK (TRUE);"
+            ),
         )?;
         run_admin_sql(
             cfg,
-            &format!("CREATE ROW POLICY allow_upd_{t} ON bench.{t} FOR UPDATE TO USER admin, USER bench_oltp_user AS ALLOW USING (TRUE) WITH CHECK (TRUE);"),
+            &format!(
+                "CREATE ROW POLICY allow_upd_{t} ON bench.{t} FOR UPDATE TO USER admin, USER bench_oltp_user AS ALLOW USING (TRUE) WITH CHECK (TRUE);"
+            ),
         )?;
         run_admin_sql(
             cfg,
-            &format!("CREATE ROW POLICY allow_del_{t} ON bench.{t} FOR DELETE TO USER admin, USER bench_oltp_user AS ALLOW USING (TRUE);"),
+            &format!(
+                "CREATE ROW POLICY allow_del_{t} ON bench.{t} FOR DELETE TO USER admin, USER bench_oltp_user AS ALLOW USING (TRUE);"
+            ),
+        )?;
+        run_admin_sql(
+            cfg,
+            &format!(
+                "CREATE CELL POLICY allow_cell_sel_{t} ON bench.{t} ({cols}) FOR SELECT TO USER admin, USER bench_oltp_user, USER bench_olap_user AS ALLOW USING (TRUE);"
+            ),
+        )?;
+        run_admin_sql(
+            cfg,
+            &format!(
+                "CREATE CELL POLICY allow_cell_ins_{t} ON bench.{t} ({cols}) FOR INSERT TO USER admin, USER bench_oltp_user AS ALLOW WITH CHECK (TRUE);"
+            ),
+        )?;
+        run_admin_sql(
+            cfg,
+            &format!(
+                "CREATE CELL POLICY allow_cell_upd_{t} ON bench.{t} ({cols}) FOR UPDATE TO USER admin, USER bench_oltp_user AS ALLOW USING (TRUE) WITH CHECK (TRUE);"
+            ),
         )?;
     }
     Ok(())
 }
 
-fn generate_scope(cfg: &Config, credentials_path: &Path, output: &Path) -> Result<(), String> {
-    use prdb_engine::authorization::Operation;
+fn generate_scope(
+    cfg: &Config,
+    credentials_path: &Path,
+    output: &Path,
+    table_names: &[&str],
+    rel_ops: &[prdb_engine::authorization::Operation],
+    col_ops: &[prdb_engine::authorization::Operation],
+) -> Result<(), String> {
     use prdb_engine::client_credentials::read_client_credentials;
     use prdb_engine::client_submit::MetadataClient;
     use prdb_engine::submission_scope::RequestedScopeBuilder;
@@ -308,8 +485,7 @@ fn generate_scope(cfg: &Config, credentials_path: &Path, output: &Path) -> Resul
         .address
         .parse()
         .map_err(|e| format!("invalid address {}: {e}", cfg.address))?;
-    let mut credentials =
-        read_client_credentials(credentials_path).map_err(|e| e.to_string())?;
+    let mut credentials = read_client_credentials(credentials_path).map_err(|e| e.to_string())?;
     let mut client = MetadataClient::connect_authenticated(
         addr,
         credentials.token_id,
@@ -329,16 +505,21 @@ fn generate_scope(cfg: &Config, credentials_path: &Path, output: &Path) -> Resul
     builder
         .include_schema(schema)
         .map_err(|e| format!("include_schema failed: {e:?}"))?;
-    let ops = [
-        Operation::Select,
-        Operation::Insert,
-        Operation::Update,
-        Operation::Delete,
-    ];
     for rel in &relations {
+        if !table_names.contains(&rel.name.as_str()) {
+            continue;
+        }
         builder
-            .include_relation(schema, rel, &ops)
+            .include_relation(schema, rel, rel_ops)
             .map_err(|e| format!("include_relation {} failed: {e:?}", rel.name))?;
+        let columns = client
+            .list_columns(schema.schema_id, rel.relation_id)
+            .map_err(|e| e.to_string())?;
+        for col in &columns {
+            builder
+                .include_column(schema, rel, col, col_ops)
+                .map_err(|e| format!("include_column {}.{} failed: {e:?}", rel.name, col.name))?;
+        }
     }
     let bytes = builder
         .encode()
@@ -372,9 +553,7 @@ fn generate_and_load_data(
 
     let mut sql = String::with_capacity(64 * 1024);
     for r in 0..5 {
-        sql.push_str(&format!(
-            "INSERT INTO region VALUES ({r}, 'REGION_{r}');\n"
-        ));
+        sql.push_str(&format!("INSERT INTO region VALUES ({r}, 'REGION_{r}');\n"));
     }
     for n in 0..25 {
         sql.push_str(&format!(
@@ -395,13 +574,23 @@ fn generate_and_load_data(
     load_batch(&sql)?;
     sql.clear();
 
-    // Load items & stock in bounded batches (<= 64 statements per interactive-sql batch)
-    for i in 1..=items {
-        sql.push_str(&format!(
-            "INSERT INTO item VALUES ({i}, 'ITEM_{i}', {:.2});\n",
-            10.0 + (i % 100) as f64
-        ));
-        if i % 50 == 0 {
+    // Load items in multi-row INSERTs (10 rows per statement, <= 50 statements per batch)
+    let mut i = 1usize;
+    while i <= items {
+        let end = (i + 9).min(items);
+        sql.push_str("INSERT INTO item VALUES ");
+        for k in i..=end {
+            if k > i {
+                sql.push_str(", ");
+            }
+            sql.push_str(&format!(
+                "({k}, 'ITEM_{k}', {:.2})",
+                10.0 + (k % 100) as f64
+            ));
+        }
+        sql.push_str(";\n");
+        i = end + 1;
+        if sql.lines().count() >= 50 {
             load_batch(&sql)?;
             sql.clear();
         }
@@ -411,24 +600,41 @@ fn generate_and_load_data(
         sql.clear();
     }
 
-    for o in 1..=h_orders {
-        sql.push_str(&format!(
-            "INSERT INTO h_orders VALUES ({o}, {}, 'O', {:.2}, {});\n",
-            (o % 1000) + 1,
-            100.0 + (o % 500) as f64,
-            19950101 + (o % 1000)
-        ));
-        for l in 1..=lineitems_per_order {
+    let mut o = 1usize;
+    while o <= h_orders {
+        let end = (o + 9).min(h_orders);
+        sql.push_str("INSERT INTO h_orders VALUES ");
+        for k in o..=end {
+            if k > o {
+                sql.push_str(", ");
+            }
             sql.push_str(&format!(
-                "INSERT INTO lineitem VALUES ({o}, {}, {}, {l}, {:.2}, {:.2}, 0.05, 0.08, 'N', 'O', {});\n",
-                ((o + l) % items) + 1,
-                ((o + l) % 100) + 1,
-                (l * 5) as f64,
-                (l * 100) as f64,
-                19950201 + (o % 1000)
+                "({k}, {}, 'O', {:.2}, {})",
+                (k % 1000) + 1,
+                100.0 + (k % 500) as f64,
+                19950101 + (k % 1000)
             ));
         }
-        if o % 10 == 0 {
+        sql.push_str(";\n");
+        for k in o..=end {
+            sql.push_str("INSERT INTO lineitem VALUES ");
+            for l in 1..=lineitems_per_order {
+                if l > 1 {
+                    sql.push_str(", ");
+                }
+                sql.push_str(&format!(
+                    "({k}, {}, {}, {l}, {:.2}, {:.2}, 0.05, 0.08, 'N', 'O', {})",
+                    ((k + l) % items) + 1,
+                    ((k + l) % 100) + 1,
+                    (l * 5) as f64,
+                    (l * 100) as f64,
+                    19950201 + (k % 1000)
+                ));
+            }
+            sql.push_str(";\n");
+        }
+        o = end + 1;
+        if sql.lines().count() >= 44 {
             load_batch(&sql)?;
             sql.clear();
         }
@@ -443,6 +649,7 @@ fn generate_and_load_data(
 struct QueryStats {
     latencies_us: Vec<u64>,
     errors: u64,
+    logged_err: bool,
 }
 
 fn percentile(sorted: &[u64], pct: f64) -> u64 {
@@ -528,8 +735,8 @@ fn prepare_sdk_repo(repo_dir: &Path, release_dir: &Path) -> Result<(), String> {
         .arg("--remove-rpath")
         .arg(&tmp_lib)
         .output();
-    let library = fs::read(&tmp_lib)
-        .map_err(|e| format!("failed to read libprdb_sql.so.1: {e}"))?;
+    let library =
+        fs::read(&tmp_lib).map_err(|e| format!("failed to read libprdb_sql.so.1: {e}"))?;
     let _ = fs::remove_file(&tmp_lib);
 
     use sha2::{Digest, Sha256};
@@ -550,10 +757,11 @@ fn prepare_sdk_repo(repo_dir: &Path, release_dir: &Path) -> Result<(), String> {
     }
     metadata.push('\n');
 
-    repo.install(metadata.as_bytes(), &library, &allowed).map_err(|e| {
-        let dyn_info = prdb_engine::submission_manifest::decode_elf_dynamic_info(&library);
-        format!("failed to install sdk release: {e:?} (dyn={dyn_info:?}, meta={metadata:?})")
-    })?;
+    repo.install(metadata.as_bytes(), &library, &allowed)
+        .map_err(|e| {
+            let dyn_info = prdb_engine::submission_manifest::decode_elf_dynamic_info(&library);
+            format!("failed to install sdk release: {e:?} (dyn={dyn_info:?}, meta={metadata:?})")
+        })?;
     Ok(())
 }
 
@@ -586,21 +794,56 @@ fn run() -> Result<(), String> {
     fs::create_dir_all(&query_dir)
         .map_err(|e| format!("failed to create {}: {e}", query_dir.display()))?;
 
-    println!("prdb-bench: provisioning schema and workload profiles...");
-    provision_profiles_and_schema(&cfg)?;
+    let oltp_creds = run_dir.join("oltp.creds");
+    let olap_creds = run_dir.join("olap.creds");
 
-    let admin_scope = run_dir.join("admin.scope");
-    generate_scope(&cfg, &cfg.admin_credentials, &admin_scope)?;
+    println!("prdb-bench: provisioning schema and workload profiles...");
+    provision_profiles_and_schema(&cfg, &oltp_creds, &olap_creds)?;
+
+    use prdb_engine::authorization::Operation;
+    let load_scope = run_dir.join("load.scope");
+    generate_scope(
+        &cfg,
+        &cfg.admin_credentials,
+        &load_scope,
+        &[
+            "region",
+            "nation",
+            "warehouse",
+            "district",
+            "item",
+            "h_orders",
+            "lineitem",
+        ],
+        &[Operation::Insert],
+        &[Operation::Insert],
+    )?;
 
     println!(
         "prdb-bench: generating data for target size {:.2} GB...",
         cfg.size_gb
     );
-    generate_and_load_data(&cfg, &admin_scope, &query_dir)?;
+    generate_and_load_data(&cfg, &load_scope, &query_dir)?;
 
     let (oltp_paths, olap_paths) = write_query_files(&query_dir)?;
-    let oltp_scope = admin_scope.clone();
-    let olap_scope = admin_scope;
+    let oltp_scope = run_dir.join("oltp.scope");
+    let olap_scope = run_dir.join("olap.scope");
+    generate_scope(
+        &cfg,
+        &cfg.admin_credentials,
+        &oltp_scope,
+        &["item", "warehouse", "district"],
+        &[Operation::Select, Operation::Update],
+        &[Operation::Select, Operation::Update],
+    )?;
+    generate_scope(
+        &cfg,
+        &cfg.admin_credentials,
+        &olap_scope,
+        &["lineitem", "h_orders"],
+        &[Operation::Select],
+        &[Operation::Select],
+    )?;
 
     let stats: Arc<Mutex<BTreeMap<String, QueryStats>>> = Arc::new(Mutex::new(BTreeMap::new()));
     let stop = Arc::new(AtomicBool::new(false));
@@ -613,7 +856,7 @@ fn run() -> Result<(), String> {
             let _ = cfg_ref;
             let addr = cfg.address.clone();
             let client = cfg.prdb_client.clone();
-            let creds = cfg.admin_credentials.clone();
+            let creds = oltp_creds.clone();
             let sdk_lib = cfg.sdk_library.clone();
             let inc_dir = cfg.include_dir.clone();
             let rt_prof = cfg.runtime_profile.clone();
@@ -651,14 +894,20 @@ fn run() -> Result<(), String> {
                         qpath,
                     );
                     let elapsed_us = t0.elapsed().as_micros() as u64;
-                    if rec_c.load(Ordering::Relaxed) {
+                    if let Err(ref e) = res {
                         let mut map = stats_c.lock().unwrap();
                         let entry = map.entry((*qname).to_owned()).or_default();
-                        if res.is_ok() {
-                            entry.latencies_us.push(elapsed_us);
-                        } else {
+                        if !entry.logged_err {
+                            entry.logged_err = true;
+                            eprintln!("prdb-bench: first error for {qname}: {e}");
+                        }
+                        if rec_c.load(Ordering::Relaxed) {
                             entry.errors += 1;
                         }
+                    } else if rec_c.load(Ordering::Relaxed) {
+                        let mut map = stats_c.lock().unwrap();
+                        let entry = map.entry((*qname).to_owned()).or_default();
+                        entry.latencies_us.push(elapsed_us);
                     }
                 }
             }));
@@ -669,7 +918,7 @@ fn run() -> Result<(), String> {
         for _ in 0..cfg.olap_threads {
             let addr = cfg.address.clone();
             let client = cfg.prdb_client.clone();
-            let creds = cfg.admin_credentials.clone();
+            let creds = olap_creds.clone();
             let sdk_lib = cfg.sdk_library.clone();
             let inc_dir = cfg.include_dir.clone();
             let rt_prof = cfg.runtime_profile.clone();
@@ -707,14 +956,20 @@ fn run() -> Result<(), String> {
                         qpath,
                     );
                     let elapsed_us = t0.elapsed().as_micros() as u64;
-                    if rec_c.load(Ordering::Relaxed) {
+                    if let Err(ref e) = res {
                         let mut map = stats_c.lock().unwrap();
                         let entry = map.entry((*qname).to_owned()).or_default();
-                        if res.is_ok() {
-                            entry.latencies_us.push(elapsed_us);
-                        } else {
+                        if !entry.logged_err {
+                            entry.logged_err = true;
+                            eprintln!("prdb-bench: first error for {qname}: {e}");
+                        }
+                        if rec_c.load(Ordering::Relaxed) {
                             entry.errors += 1;
                         }
+                    } else if rec_c.load(Ordering::Relaxed) {
+                        let mut map = stats_c.lock().unwrap();
+                        let entry = map.entry((*qname).to_owned()).or_default();
+                        entry.latencies_us.push(elapsed_us);
                     }
                 }
             }));

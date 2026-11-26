@@ -202,10 +202,22 @@ int32_t prdb_sdk_sql_decode_parameters_v1(
         value.abi_version = PRDB_SDK_VALUE_ABI_V1_VERSION;
         value.state = state;
         if (state == PRDB_SDK_VALUE_STATE_VALUE) {
+            uint8_t be_buf[8];
+            prdb_sdk_value_v1 validate_value;
             value.type_code = type_code;
             value.data = parameters + offset;
             value.data_len = payload_len;
-            if (prdb_sdk_value_validate_v1(&value) != PRDB_SDK_VALUE_VALID ||
+            validate_value = value;
+            if ((type_code == PRDB_SDK_VALUE_TYPE_DATE && payload_len == 4) ||
+                (type_code == PRDB_SDK_VALUE_TYPE_TIMESTAMPTZ &&
+                 payload_len == 8)) {
+                for (uint32_t b = 0; b < payload_len; ++b) {
+                    be_buf[b] = value.data[payload_len - 1u - b];
+                }
+                validate_value.data = be_buf;
+            }
+            if (prdb_sdk_value_validate_v1(&validate_value) !=
+                    PRDB_SDK_VALUE_VALID ||
                 !validate_parameter_range(&value) ||
                 (type_code == PRDB_SDK_VALUE_TYPE_DECIMAL &&
                  (payload_len != 16 ||
@@ -724,6 +736,7 @@ static int32_t sql_run_internal(
     int is_single_key_join = 0;
     int is_single_grouped = 0;
     int is_ordered_row_select = 0;
+    int is_ordered_select = 0;
     int ordered_join_needs_latch = 0;
     uint32_t parameter_count = 0;
     uint32_t declared_count = 0;
@@ -770,6 +783,8 @@ static int32_t sql_run_internal(
             } else if (spill_host != NULL && parsed.has_order_by != 0) {
                 is_ordered_row_select = 1;
                 ordered_row_statement = parsed;
+            } else if (parsed.has_order_by != 0) {
+                is_ordered_select = 1;
             }
         } else {
             return prdb_sql_execute_unified_v1(
@@ -779,7 +794,8 @@ static int32_t sql_run_internal(
     }
     (void)single_key_join_statement;
     (void)single_grouped_statement;
-    if (is_grouped || is_join || is_single_key_join || is_single_grouped) {
+    if (is_grouped || is_join || is_single_key_join || is_single_grouped ||
+        is_ordered_select) {
         materialized_bytes = (uint8_t *)dispatch_calloc(
             1, SQL_DISPATCH_BATCH_BYTES, &allocated_heap_bytes);
         if (materialized_bytes == NULL) {
@@ -1127,6 +1143,18 @@ static int32_t sql_run_internal(
                 PRDB_SDK_SQL_MAX_RELATION_COLUMNS, executor_columns,
                 PRDB_SDK_SQL_MAX_RELATION_COLUMNS, cell_scratch,
                 PRDB_SDK_SQL_MAX_RELATION_COLUMNS, write_sqlr_row, &result);
+        } else if (is_ordered_select) {
+            status = prdb_sdk_sql_execute_select_typed_ordered_v1(
+                host, schema, schema_len, sql, sql_len, values, metadata,
+                parameter_count, SQL_DISPATCH_CANDIDATES,
+                SQL_DISPATCH_BATCH_BYTES, planner_response,
+                SQL_DISPATCH_RESPONSE_BYTES, executor_response,
+                SQL_DISPATCH_RESPONSE_BYTES, batch_response,
+                SQL_DISPATCH_BATCH_BYTES, planner_columns,
+                PRDB_SDK_SQL_MAX_RELATION_COLUMNS, executor_columns,
+                PRDB_SDK_SQL_MAX_RELATION_COLUMNS, cell_scratch,
+                PRDB_SDK_SQL_MAX_RELATION_COLUMNS, materialized_bytes,
+                SQL_DISPATCH_BATCH_BYTES, write_sqlr_row, &result);
         } else {
             status = prdb_sdk_sql_execute_select_typed_v1(
                 host, schema, schema_len, sql, sql_len, values, metadata,

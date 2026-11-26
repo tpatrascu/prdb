@@ -79,10 +79,12 @@ systemd-run --user --pipe --collect \
         --retention-seconds 3600 \
         --max-rows 1000000 \
         --max-bytes 268435456 \
+        --max-total-result-bytes 2147483648 \
+        --max-invocation-scan-work 5000000000 \
         --max-principal-reservations 64 \
         --cpu-quota-us 800000 \
         --cpu-period-us 100000 \
-        --memory-max-bytes 2147483648 \
+        --memory-max-bytes 8589934592 \
         --max-processes 64 &
 SUP_PID=$!
 
@@ -99,7 +101,7 @@ echo "Starting prdb-gateway on $GW_ADDR..."
     --connections-per-ip 10000 \
     --workers 64 \
     --queue-capacity 256 \
-    --max-total-result-bytes 268435456 &
+    --max-total-result-bytes 2147483648 &
 GW_PID=$!
 sleep 1
 
