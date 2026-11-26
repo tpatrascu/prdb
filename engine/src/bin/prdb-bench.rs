@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -145,7 +145,34 @@ fn parse_args() -> Result<Config, String> {
     Ok(cfg)
 }
 
-fn run_admin_sql(cfg: &Config, sql: &str) -> Result<String, String> {
+type QueryLogger = Arc<Mutex<BufWriter<File>>>;
+
+fn log_query(
+    logger: &QueryLogger,
+    phase: &str,
+    user: &str,
+    workload: &str,
+    elapsed_us: u64,
+    ok: bool,
+    sql: &str,
+) {
+    let ts_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let status = if ok { "OK" } else { "ERR" };
+    if let Ok(mut guard) = logger.lock() {
+        let _ = writeln!(
+            guard,
+            "[{ts_ms}] phase={phase} user={user} workload={workload} status={status} elapsed_ms={:.3}\n{sql}",
+            elapsed_us as f64 / 1000.0
+        );
+        let _ = guard.flush();
+    }
+}
+
+fn run_admin_sql(cfg: &Config, logger: &QueryLogger, sql: &str) -> Result<String, String> {
+    let t0 = Instant::now();
     let mut child = Command::new(&cfg.prdb_client)
         .args(["admin-sql", "--address", &cfg.address, "--credentials"])
         .arg(&cfg.admin_credentials)
@@ -164,6 +191,16 @@ fn run_admin_sql(cfg: &Config, sql: &str) -> Result<String, String> {
     let out = child
         .wait_with_output()
         .map_err(|e| format!("failed waiting for admin-sql: {e}"))?;
+    let elapsed_us = t0.elapsed().as_micros() as u64;
+    log_query(
+        logger,
+        "admin_sql",
+        "admin",
+        "admin",
+        elapsed_us,
+        out.status.success(),
+        sql.trim_end(),
+    );
     if !out.status.success() {
         return Err(format!(
             "admin-sql failed ({}): {}",
@@ -322,6 +359,7 @@ fn compute_profile_limits(size_gb: f64) -> (u64, u64, u64, u64, u64, u64, u64) {
 
 fn provision_profiles_and_schema(
     cfg: &Config,
+    logger: &QueryLogger,
     oltp_creds_path: &Path,
     olap_creds_path: &Path,
 ) -> Result<(), String> {
@@ -355,7 +393,7 @@ fn provision_profiles_and_schema(
         olap_profile_sql.as_str(),
     ];
     for stmt in pre_stmts {
-        run_admin_sql(cfg, stmt)?;
+        run_admin_sql(cfg, logger, stmt)?;
     }
     create_bench_users_and_credentials(cfg, oltp_creds_path, olap_creds_path)?;
     let stmts = [
@@ -377,7 +415,7 @@ fn provision_profiles_and_schema(
         "CREATE TABLE bench.lineitem (l_orderkey BIGINT NOT NULL, l_partkey BIGINT NOT NULL, l_suppkey BIGINT NOT NULL, l_linenumber BIGINT NOT NULL, l_quantity DECIMAL(12,2) NOT NULL, l_extendedprice DECIMAL(12,2) NOT NULL, l_discount DECIMAL(4,2) NOT NULL, l_tax DECIMAL(4,2) NOT NULL, l_returnflag TEXT NOT NULL, l_linestatus TEXT NOT NULL, l_shipdate BIGINT NOT NULL);",
     ];
     for stmt in stmts {
-        run_admin_sql(cfg, stmt)?;
+        run_admin_sql(cfg, logger, stmt)?;
     }
 
     let tables: [(&str, &str); 13] = [
@@ -410,56 +448,66 @@ fn provision_profiles_and_schema(
     for (t, cols) in tables {
         run_admin_sql(
             cfg,
+            logger,
             &format!("GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE bench.{t} TO USER admin;"),
         )?;
         run_admin_sql(
             cfg,
+            logger,
             &format!(
                 "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE bench.{t} TO USER bench_oltp_user;"
             ),
         )?;
         run_admin_sql(
             cfg,
+            logger,
             &format!("GRANT SELECT ON TABLE bench.{t} TO USER bench_olap_user;"),
         )?;
         run_admin_sql(
             cfg,
+            logger,
             &format!(
                 "CREATE ROW POLICY allow_sel_{t} ON bench.{t} FOR SELECT TO USER admin, USER bench_oltp_user, USER bench_olap_user AS ALLOW USING (TRUE);"
             ),
         )?;
         run_admin_sql(
             cfg,
+            logger,
             &format!(
                 "CREATE ROW POLICY allow_ins_{t} ON bench.{t} FOR INSERT TO USER admin, USER bench_oltp_user AS ALLOW WITH CHECK (TRUE);"
             ),
         )?;
         run_admin_sql(
             cfg,
+            logger,
             &format!(
                 "CREATE ROW POLICY allow_upd_{t} ON bench.{t} FOR UPDATE TO USER admin, USER bench_oltp_user AS ALLOW USING (TRUE) WITH CHECK (TRUE);"
             ),
         )?;
         run_admin_sql(
             cfg,
+            logger,
             &format!(
                 "CREATE ROW POLICY allow_del_{t} ON bench.{t} FOR DELETE TO USER admin, USER bench_oltp_user AS ALLOW USING (TRUE);"
             ),
         )?;
         run_admin_sql(
             cfg,
+            logger,
             &format!(
                 "CREATE CELL POLICY allow_cell_sel_{t} ON bench.{t} ({cols}) FOR SELECT TO USER admin, USER bench_oltp_user, USER bench_olap_user AS ALLOW USING (TRUE);"
             ),
         )?;
         run_admin_sql(
             cfg,
+            logger,
             &format!(
                 "CREATE CELL POLICY allow_cell_ins_{t} ON bench.{t} ({cols}) FOR INSERT TO USER admin, USER bench_oltp_user AS ALLOW WITH CHECK (TRUE);"
             ),
         )?;
         run_admin_sql(
             cfg,
+            logger,
             &format!(
                 "CREATE CELL POLICY allow_cell_upd_{t} ON bench.{t} ({cols}) FOR UPDATE TO USER admin, USER bench_oltp_user AS ALLOW USING (TRUE) WITH CHECK (TRUE);"
             ),
@@ -530,20 +578,33 @@ fn generate_scope(
 
 fn generate_and_load_data(
     cfg: &Config,
+    logger: &QueryLogger,
     admin_scope: &Path,
     query_dir: &Path,
 ) -> Result<(), String> {
     let batch_path = query_dir.join("load_batch.sql");
     let load_batch = |sql: &str| -> Result<(), String> {
         fs::write(&batch_path, sql).map_err(|e| e.to_string())?;
-        run_interactive_sql(
+        let t0 = Instant::now();
+        let res = run_interactive_sql(
             cfg,
             &cfg.admin_credentials,
             "admin",
             admin_scope,
             "operational",
             &batch_path,
-        )
+        );
+        let elapsed_us = t0.elapsed().as_micros() as u64;
+        log_query(
+            logger,
+            "data_load",
+            "admin",
+            "operational",
+            elapsed_us,
+            res.is_ok(),
+            sql.trim_end(),
+        );
+        res
     };
     // Scale factor: 5.0 GB -> ~50 warehouses / SF 5.0 equivalent; minimum 1 warehouse.
     let warehouses = ((cfg.size_gb / 0.1).round() as usize).max(1);
@@ -791,14 +852,21 @@ fn run() -> Result<(), String> {
         .clone()
         .unwrap_or_else(|| cfg.bench_root.join(format!("runs/r{run_id}")));
     let query_dir = run_dir.join("queries");
+    let log_dir = run_dir.join("logs");
     fs::create_dir_all(&query_dir)
         .map_err(|e| format!("failed to create {}: {e}", query_dir.display()))?;
+    fs::create_dir_all(&log_dir)
+        .map_err(|e| format!("failed to create {}: {e}", log_dir.display()))?;
+    let query_log_path = log_dir.join("queries.log");
+    let query_log_file = File::create(&query_log_path)
+        .map_err(|e| format!("failed to create {}: {e}", query_log_path.display()))?;
+    let logger: QueryLogger = Arc::new(Mutex::new(BufWriter::new(query_log_file)));
 
     let oltp_creds = run_dir.join("oltp.creds");
     let olap_creds = run_dir.join("olap.creds");
 
     println!("prdb-bench: provisioning schema and workload profiles...");
-    provision_profiles_and_schema(&cfg, &oltp_creds, &olap_creds)?;
+    provision_profiles_and_schema(&cfg, &logger, &oltp_creds, &olap_creds)?;
 
     use prdb_engine::authorization::Operation;
     let load_scope = run_dir.join("load.scope");
@@ -823,7 +891,7 @@ fn run() -> Result<(), String> {
         "prdb-bench: generating data for target size {:.2} GB...",
         cfg.size_gb
     );
-    generate_and_load_data(&cfg, &load_scope, &query_dir)?;
+    generate_and_load_data(&cfg, &logger, &load_scope, &query_dir)?;
 
     let (oltp_paths, olap_paths) = write_query_files(&query_dir)?;
     let oltp_scope = run_dir.join("oltp.scope");
@@ -865,6 +933,7 @@ fn run() -> Result<(), String> {
             let scope = oltp_scope.clone();
             let queries = oltp_paths.clone();
             let stats_c = Arc::clone(&stats);
+            let logger_c = Arc::clone(&logger);
             let stop_c = Arc::clone(&stop);
             let rec_c = Arc::clone(&record);
 
@@ -894,6 +963,16 @@ fn run() -> Result<(), String> {
                         qpath,
                     );
                     let elapsed_us = t0.elapsed().as_micros() as u64;
+                    let sql_text = fs::read_to_string(qpath).unwrap_or_default();
+                    log_query(
+                        &logger_c,
+                        qname,
+                        "bench_oltp_user",
+                        "operational",
+                        elapsed_us,
+                        res.is_ok(),
+                        sql_text.trim_end(),
+                    );
                     if let Err(ref e) = res {
                         let mut map = stats_c.lock().unwrap();
                         let entry = map.entry((*qname).to_owned()).or_default();
@@ -927,6 +1006,7 @@ fn run() -> Result<(), String> {
             let scope = olap_scope.clone();
             let queries = olap_paths.clone();
             let stats_c = Arc::clone(&stats);
+            let logger_c = Arc::clone(&logger);
             let stop_c = Arc::clone(&stop);
             let rec_c = Arc::clone(&record);
 
@@ -956,6 +1036,16 @@ fn run() -> Result<(), String> {
                         qpath,
                     );
                     let elapsed_us = t0.elapsed().as_micros() as u64;
+                    let sql_text = fs::read_to_string(qpath).unwrap_or_default();
+                    log_query(
+                        &logger_c,
+                        qname,
+                        "bench_olap_user",
+                        "analytical",
+                        elapsed_us,
+                        res.is_ok(),
+                        sql_text.trim_end(),
+                    );
                     if let Err(ref e) = res {
                         let mut map = stats_c.lock().unwrap();
                         let entry = map.entry((*qname).to_owned()).or_default();
@@ -1015,6 +1105,7 @@ fn run() -> Result<(), String> {
     let mut f = File::create(&results_path).map_err(|e| e.to_string())?;
     writeln!(f, "{{\n{}\n}}", json_entries.join(",\n")).map_err(|e| e.to_string())?;
     println!("\nResults written to {}", results_path.display());
+    println!("Query log written to {}", query_log_path.display());
 
     if !cfg.keep_data {
         let _ = fs::remove_dir_all(&run_dir);
