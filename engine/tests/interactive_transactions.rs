@@ -358,7 +358,7 @@ fn runas_package_crosses_v2_tcp_gateway_and_confined_executor()
         ArtifactCompatibilityProfile, VersionedSubmissionMetadataValidator,
     };
     use prdb_engine::submission_scope::RequestedScopeBuilder;
-    use prdb_engine::supervisor::{StagingLimits, StagingStore, WorkloadClass};
+    use prdb_engine::supervisor::{StagingLimits, StagingStore};
     use prdb_engine::supervisor_ipc::{
         GatewayAdmissionConfig, GatewayClientServiceEvent, GatewayExecutorConfig,
         serve_gateway_client_session_with_executor,
@@ -944,7 +944,6 @@ int32_t prdb_query_main_v1(const prdb_host_api_v1 *host,
             memory_max_bytes: 256 * 1024 * 1024,
             max_processes: 32,
         },
-        analytical_resource_limits: None,
         launch: prdb_engine::executor_launcher::ExecutorLaunchConfig {
             executor_path: PathBuf::from(env!("CARGO_BIN_EXE_prdb-executor")),
             optimizer_path: PathBuf::from(env!("CARGO_BIN_EXE_prdb-optimizer")),
@@ -953,10 +952,8 @@ int32_t prdb_query_main_v1(const prdb_host_api_v1 *host,
             runtime_read_only: required_paths("PRDB_TEST_RUNTIME_READ_ONLY")?,
             spill_broker: None,
             max_total_result_bytes: prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
-            analytical_max_total_result_bytes: None,
             max_sql_index_probe_candidates:
                 prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
-            analytical_max_sql_index_probe_candidates: None,
             cleanup_timeout: Duration::from_secs(2),
         },
     };
@@ -1061,7 +1058,6 @@ int32_t prdb_query_main_v1(const prdb_host_api_v1 *host,
                 &package,
                 batch_parameters.as_slice(),
                 30_000,
-                WorkloadClass::Operational,
                 transaction_id,
                 package_id,
             )?;
@@ -1173,7 +1169,6 @@ int32_t prdb_query_main_v1(const prdb_host_api_v1 *host,
                 &hidden_package,
                 &[],
                 30_000,
-                WorkloadClass::Operational,
                 transaction_id,
                 hidden_package_id,
             )?;
@@ -1244,7 +1239,6 @@ int32_t prdb_query_main_v1(const prdb_host_api_v1 *host,
                 &package,
                 batch_parameters.as_slice(),
                 30_000,
-                WorkloadClass::Operational,
                 transaction_id,
                 second_package_id,
             )?;
@@ -1330,7 +1324,6 @@ int32_t prdb_query_main_v1(const prdb_host_api_v1 *host,
                 &hostile_package,
                 &[],
                 30_000,
-                WorkloadClass::Operational,
                 transaction_id,
                 hostile_package_id,
             )?;
@@ -1404,12 +1397,8 @@ int32_t prdb_query_main_v1(const prdb_host_api_v1 *host,
             let autocommit_parameters = encode_parameter_file(
                 br#"{"format":"PDB-SQL-PARAMETERS-1","values":[{"type":"integer","value":"9"}]}"#,
             )?;
-            let invocation_id = client.upload_and_seal(
-                &package,
-                autocommit_parameters.as_slice(),
-                30_000,
-                WorkloadClass::Operational,
-            )?;
+            let invocation_id =
+                client.upload_and_seal(&package, autocommit_parameters.as_slice(), 30_000)?;
             let mut started = client
                 .start(invocation_id, &fixture.0.join("autocommit.receipt"))
                 .map_err(|error| format!("autocommit START failed: {error:?}"))?;
@@ -1456,7 +1445,6 @@ int32_t prdb_query_main_v1(const prdb_host_api_v1 *host,
                 &package,
                 rollback_parameters.as_slice(),
                 30_000,
-                WorkloadClass::Operational,
                 rollback_transaction_id,
                 rollback_package_id,
             )?;
@@ -1516,7 +1504,7 @@ int32_t prdb_query_main_v1(const prdb_host_api_v1 *host,
                 &mut actor_verification_secret,
             )?;
             let verification_invocation_id =
-                client.upload_and_seal(&hidden_package, &[], 30_000, WorkloadClass::Operational)?;
+                client.upload_and_seal(&hidden_package, &[], 30_000)?;
             let mut verification_started = client.start(
                 verification_invocation_id,
                 &fixture.0.join("runas-rollback-verify.receipt"),
@@ -1609,7 +1597,6 @@ int32_t prdb_query_main_v1(const prdb_host_api_v1 *host,
                 &package,
                 revocation_parameters.as_slice(),
                 30_000,
-                WorkloadClass::Operational,
                 revocation_transaction_id,
                 revocation_package_id,
             )?;
@@ -1695,7 +1682,7 @@ int32_t prdb_query_main_v1(const prdb_host_api_v1 *host,
                 &mut verification_hidden_actor_secret,
             )?;
             let verification_invocation_id =
-                client.upload_and_seal(&hidden_package, &[], 30_000, WorkloadClass::Operational)?;
+                client.upload_and_seal(&hidden_package, &[], 30_000)?;
             let mut verification_started = client.start(
                 verification_invocation_id,
                 &fixture.0.join("runas-revocation-verify.receipt"),

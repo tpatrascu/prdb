@@ -507,12 +507,14 @@ static int32_t executor_request(void *context, uint16_t operation,
     ++mock->executor_requests;
     assert(mock->executor_requests <= 256);
     if (operation == PRDB_SDK_EXECUTOR_OP_GET_WORKLOAD_BUDGETS) {
-        assert(request_len == 0 && capacity >= 12);
+        assert(request_len == 0 &&
+               capacity >= PRDB_QUERY_WORKLOAD_BUDGETS_WIRE_BYTES);
+        memset(response, 0, PRDB_QUERY_WORKLOAD_BUDGETS_WIRE_BYTES);
         memcpy(response, "PQB1", 4);
         response[4] = 0;
         response[5] = PRDB_QUERY_WORKLOAD_BUDGETS_VERSION;
         response[6] = 0;
-        response[7] = 12;
+        response[7] = PRDB_QUERY_WORKLOAD_BUDGETS_WIRE_BYTES;
         uint32_t candidates = mock->max_index_probe_candidates == 0
             ? PRDB_MAX_SQL_INDEX_PROBE_CANDIDATES
             : mock->max_index_probe_candidates;
@@ -520,7 +522,7 @@ static int32_t executor_request(void *context, uint16_t operation,
         response[9] = (uint8_t)(candidates >> 16);
         response[10] = (uint8_t)(candidates >> 8);
         response[11] = (uint8_t)candidates;
-        *response_len = 12;
+        *response_len = PRDB_QUERY_WORKLOAD_BUDGETS_WIRE_BYTES;
     } else if (operation == PRDB_SDK_EXECUTOR_OP_CHECK_CANCELLATION) {
         uint8_t reply[] = {0, 1, 0};
         assert(request_len == 0 && sizeof(reply) <= capacity);

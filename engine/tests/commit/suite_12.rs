@@ -250,19 +250,13 @@ pub(super) fn storage_manager_audits_cancellation_before_commit_and_preserves_te
         StorageManagerConfig {
             ddl_fence_timeout: Duration::from_millis(100),
             max_active_invocations: 1,
-            max_active_analytical_invocations: 1,
             max_invocation_age: Duration::from_secs(15 * 60),
             max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
             max_authorized_index_range_candidates: 128,
-            max_analytical_authorized_index_range_candidates: None,
             max_authorized_index_range_bytes: 16 * 1024 * 1024,
-            max_analytical_authorized_index_range_bytes: None,
-            max_analytical_invocation_scan_work: None,
             max_planner_estimate_requests:
                 prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
-            max_analytical_planner_estimate_requests: None,
             max_planner_estimate_candidates: prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
-            max_analytical_planner_estimate_candidates: None,
             max_statistics_collection_rows: prdb_engine::statistics::MAX_COMMITTED_POPULATION_ROWS
                 as usize,
             max_token_lifecycle_requests_per_minute: 30,
@@ -560,7 +554,6 @@ pub(super) fn admin_cancellation_sync_failure_quarantines_until_reopen()
                     memory_max_bytes: 64 * 1024 * 1024,
                     max_processes: 16,
                 },
-                analytical_resource_limits: None,
                 launch: prdb_engine::executor_launcher::ExecutorLaunchConfig {
                     executor_path: std::env::current_exe()?,
                     optimizer_path: std::env::current_exe()?,
@@ -569,10 +562,8 @@ pub(super) fn admin_cancellation_sync_failure_quarantines_until_reopen()
                     runtime_read_only: Vec::new(),
                     spill_broker: None,
                     max_total_result_bytes: prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
-                    analytical_max_total_result_bytes: None,
                     max_sql_index_probe_candidates:
                         prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
-                    analytical_max_sql_index_probe_candidates: None,
                     cleanup_timeout: Duration::from_millis(100),
                 },
             },

@@ -29,7 +29,7 @@ The following names describe internal record sets, not supported SQL tables. Lis
 | `expressions` | expression ID | Typed bounded IR, IR version, resolved object/column dependencies, purpose |
 | `constraints` | constraint ID | Table ID, kind, ordered source columns, check expression or referenced key, action/null rules, validation state |
 | `indexes` | index ID | Table ID, ordered columns, method, uniqueness/null rules, owning constraint, logical root reference, validity state |
-| `principals` | principal ID | User/role kind, name, login state, authority epoch; stable ID used by authentication |
+| `principals` | principal ID | User/role kind, name, login state, authority epoch, optional workload profile ID; stable ID used by authentication |
 | `memberships` | member ID, role ID | Granting actor, membership version; directed edges with cycle checks |
 | `grants` | grantee, object, privilege, field target | Direct grant provenance and epoch; field target is an explicit column ID or object scope |
 | `policies` | policy ID | Table ID, row/cell kind, operation, ALLOW/RESTRICT, old/new expression IDs |
@@ -37,6 +37,7 @@ The following names describe internal record sets, not supported SQL tables. Lis
 | `dependencies` | dependent ID, referenced ID, edge kind | Ownership, expression reference, foreign-key target, backing-index, or authority dependency |
 | `credential_verifiers` | token ID | User ID, verifier/algorithm version, expiry, revocation, label; protected authentication-only storage |
 | `identity_tombstones` | retired object ID | Permanent family-17 reservation preventing reuse of dropped schema, table, column, expression, constraint, index, policy, and principal object IDs |
+| `workload_profiles` | profile ID | Named workload profile (object kind 11), epoch, built-in flag, and fixed 332-byte versioned limits payload |
 
 Parent `objects` records exist for named logical objects, including principals; child records must agree with their kind and lifetime. Composite grants and dependency rows need no separate public object identity. Constraint/index lifecycle is initially private BUILDING then atomically VALID, or discarded on failure; committed DROPPED definitions remain readable only to old snapshots.
 

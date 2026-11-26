@@ -7,7 +7,6 @@ use prdb_engine::client_credentials::{
 };
 use prdb_engine::client_protocol::ClientCredentials;
 use prdb_engine::client_submit::{AdminClient, SdkLibraryInfo};
-use prdb_engine::supervisor::WorkloadClass;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::{self};
@@ -450,7 +449,7 @@ pub(super) fn run_configured_submission(
         .map(|value| parse_number(value, "--deadline-ms"))
         .transpose()?
         .unwrap_or(30_000u64);
-    let workload = parse_workload(fields)?;
+    parse_workload(fields)?;
     reject_unknown(fields)?;
     validate_package_selection(&package, &instance.sdk)?;
     let mut parameters = read_parameters(parameters_path.as_ref())?;
@@ -463,7 +462,6 @@ pub(super) fn run_configured_submission(
         &mut parameters,
         sql_data.as_deref(),
         deadline_ms,
-        workload,
         true,
     );
     parameters.fill(0);
@@ -614,13 +612,9 @@ pub(super) fn run_configured_interactive(
 
 pub(super) fn parse_workload(
     fields: &mut HashMap<String, std::ffi::OsString>,
-) -> Result<WorkloadClass, String> {
-    match fields.remove("--workload") {
-        None => Ok(WorkloadClass::Operational),
-        Some(value) if value == "operational" => Ok(WorkloadClass::Operational),
-        Some(value) if value == "analytical" => Ok(WorkloadClass::Analytical),
-        Some(_) => Err("--workload must be operational or analytical".to_owned()),
-    }
+) -> Result<(), String> {
+    let _ = fields.remove("--workload");
+    Ok(())
 }
 
 pub(super) fn validate_package_selection(

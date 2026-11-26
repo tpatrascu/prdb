@@ -95,7 +95,9 @@ pub(super) fn supervisor_cancellation_and_deadline_during_worker_wait_abort()
             max_rows: 2,
             max_bytes: 64,
             deadline: Some(std::time::Instant::now() + Duration::from_millis(40)),
-            workload_class: prdb_engine::supervisor::WorkloadClass::Operational,
+            workload_profile: Some(
+                prdb_engine::workload_profile::WorkloadProfileLimits::small_operational(),
+            ),
         },
         &secret,
     )?;
@@ -242,7 +244,7 @@ pub(super) fn sealed_start_admits_only_current_credentials_and_enforces_request_
     };
     use prdb_engine::supervisor::{
         ChunkKind, PrepareSubmission, StagingError, StagingLimits, StagingStore,
-        SubmissionMetadata, SubmissionMetadataValidator, WorkloadClass,
+        SubmissionMetadata, SubmissionMetadataValidator,
     };
     use prdb_engine::transaction::TransactionError;
     use sha2::{Digest, Sha256};
@@ -310,7 +312,9 @@ pub(super) fn sealed_start_admits_only_current_credentials_and_enforces_request_
             sql_data_bytes: 0,
             sql_data_sha256: Sha256::digest([]).into(),
             deadline_ms: 10_000,
-            workload_class: WorkloadClass::Operational,
+            workload_profile_id: prdb_engine::workload_profile::SMALL_OPERATIONAL_PROFILE_ID,
+            workload_profile:
+                prdb_engine::workload_profile::WorkloadProfileLimits::small_operational(),
         },
     )?;
     staging.upload_chunk(owner, first.invocation_id, ChunkKind::Artifact, 0, artifact)?;
@@ -398,7 +402,9 @@ pub(super) fn sealed_start_admits_only_current_credentials_and_enforces_request_
             sql_data_bytes: 0,
             sql_data_sha256: Sha256::digest([]).into(),
             deadline_ms: 10_000,
-            workload_class: WorkloadClass::Operational,
+            workload_profile_id: prdb_engine::workload_profile::SMALL_OPERATIONAL_PROFILE_ID,
+            workload_profile:
+                prdb_engine::workload_profile::WorkloadProfileLimits::small_operational(),
         },
     )?;
     staging.upload_chunk(
@@ -425,7 +431,6 @@ pub(super) fn sealed_start_admits_only_current_credentials_and_enforces_request_
             memory_max_bytes: 64 * 1024 * 1024,
             max_processes: 16,
         },
-        analytical_resource_limits: None,
         launch: prdb_engine::executor_launcher::ExecutorLaunchConfig {
             executor_path: std::env::current_exe()?,
             optimizer_path: std::env::current_exe()?,
@@ -434,10 +439,8 @@ pub(super) fn sealed_start_admits_only_current_credentials_and_enforces_request_
             runtime_read_only: Vec::new(),
             spill_broker: None,
             max_total_result_bytes: prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
-            analytical_max_total_result_bytes: None,
             max_sql_index_probe_candidates:
                 prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
-            analytical_max_sql_index_probe_candidates: None,
             cleanup_timeout: Duration::from_millis(100),
         },
     };
@@ -541,18 +544,12 @@ pub(super) fn storage_manager_issues_and_revokes_tokens_for_manage_users()
     let token_config = StorageManagerConfig {
         ddl_fence_timeout: Duration::from_millis(100),
         max_active_invocations: 128,
-        max_active_analytical_invocations: 8,
         max_invocation_age: Duration::from_secs(15 * 60),
         max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
         max_authorized_index_range_candidates: 128,
-        max_analytical_authorized_index_range_candidates: None,
         max_authorized_index_range_bytes: 16 * 1024 * 1024,
-        max_analytical_authorized_index_range_bytes: None,
-        max_analytical_invocation_scan_work: None,
         max_planner_estimate_requests: prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
-        max_analytical_planner_estimate_requests: None,
         max_planner_estimate_candidates: prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
-        max_analytical_planner_estimate_candidates: None,
         max_statistics_collection_rows: prdb_engine::statistics::MAX_COMMITTED_POPULATION_ROWS
             as usize,
         max_token_lifecycle_requests_per_minute: 5,
@@ -1635,7 +1632,7 @@ pub(super) fn membership_limit_applies_to_final_graph_independent_of_write_order
     let catalog = read.open_table(prdb_engine::schema::CATALOG)?;
     assert!(catalog.get(old.key.as_slice())?.is_none());
     assert!(catalog.get(new.key.as_slice())?.is_some());
-    assert_eq!(catalog.len()?, 293 + 8192);
+    assert_eq!(catalog.len()?, 301 + 8192);
     drop(catalog);
     drop(read);
     let mut advance = principal_write_with_epoch(member, 2, 3);

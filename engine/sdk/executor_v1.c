@@ -46,6 +46,15 @@ static int32_t invoke(const prdb_host_api_v1 *host, uint16_t operation,
     return PRDB_SDK_EXECUTOR_OK;
 }
 
+static uint32_t read_be_u32(const uint8_t *p) {
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+           ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+}
+
+static uint64_t read_be_u64(const uint8_t *p) {
+    return ((uint64_t)read_be_u32(p) << 32) | (uint64_t)read_be_u32(p + 4);
+}
+
 int32_t prdb_sdk_executor_get_workload_budgets_v1(
     const prdb_host_api_v1 *host, uint8_t *response,
     uint64_t response_capacity, uint64_t *response_len,
@@ -54,25 +63,59 @@ int32_t prdb_sdk_executor_get_workload_budgets_v1(
     uint32_t candidates;
     int32_t status;
     if (out == NULL || out_capacity < sizeof(*out) || response == NULL ||
-        response_capacity < 12 || response_len == NULL)
+        response_capacity < PRDB_QUERY_WORKLOAD_BUDGETS_WIRE_BYTES ||
+        response_len == NULL)
         return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
     status = invoke(host, PRDB_SDK_EXECUTOR_OP_GET_WORKLOAD_BUDGETS,
                     &empty_request, 0, response, response_capacity,
                     response_len);
     if (status != PRDB_SDK_EXECUTOR_OK) return status;
-    if (*response_len != 12 ||
+    if (*response_len != PRDB_QUERY_WORKLOAD_BUDGETS_WIRE_BYTES ||
         memcmp(response, PRDB_QUERY_WORKLOAD_BUDGETS_MAGIC, 4) != 0 ||
         response[4] != 0 ||
         response[5] != PRDB_QUERY_WORKLOAD_BUDGETS_VERSION ||
-        response[6] != 0 || response[7] != 12)
+        response[6] != 0 ||
+        response[7] != PRDB_QUERY_WORKLOAD_BUDGETS_WIRE_BYTES)
         return PRDB_SDK_EXECUTOR_INVALID_PAYLOAD;
-    candidates = ((uint32_t)response[8] << 24) |
-                 ((uint32_t)response[9] << 16) |
-                 ((uint32_t)response[10] << 8) | response[11];
+    candidates = read_be_u32(response + 8);
     if (candidates == 0 || candidates > PRDB_MAX_SQL_INDEX_PROBE_CANDIDATES)
         return PRDB_SDK_EXECUTOR_INVALID_PAYLOAD;
     *out = (prdb_sdk_workload_budgets_v1){
-        sizeof(*out), PRDB_QUERY_WORKLOAD_BUDGETS_VERSION, candidates};
+        .struct_size = sizeof(*out),
+        .abi_version = PRDB_QUERY_WORKLOAD_BUDGETS_VERSION,
+        .max_index_probe_candidates = candidates,
+        .max_executor_requests = read_be_u32(response + 12),
+        .max_planner_requests = read_be_u32(response + 16),
+        .max_optimizer_requests = read_be_u32(response + 20),
+        .sql_max_query_bytes = read_be_u32(response + 24),
+        .sql_max_projection_columns = read_be_u32(response + 28),
+        .sql_max_predicate_nodes = read_be_u32(response + 32),
+        .sql_max_expression_depth = read_be_u32(response + 36),
+        .sql_max_group_keys = read_be_u32(response + 40),
+        .sql_max_join_keys = read_be_u32(response + 44),
+        .sql_max_order_keys = read_be_u32(response + 48),
+        .sql_max_in_values = read_be_u32(response + 52),
+        .sql_max_limit = read_be_u32(response + 56),
+        .sql_batch_max_statements = read_be_u32(response + 60),
+        .sql_exec_max_scan_pages = read_be_u32(response + 64),
+        .sql_exec_max_mutation_targets = read_be_u32(response + 68),
+        .sql_in_mem_max_rows = read_be_u32(response + 72),
+        .sql_in_mem_join_max_pairs = read_be_u32(response + 76),
+        .sql_spill_sort_max_row_bytes = read_be_u32(response + 80),
+        .sql_spill_sort_max_workspace_bytes = read_be_u32(response + 84),
+        .sql_spill_join_max_record_bytes = read_be_u32(response + 88),
+        .sql_spill_join_max_workspace_bytes = read_be_u32(response + 92),
+        .optimizer_max_plan_bytes = read_be_u32(response + 96),
+        .reserved_pad = 0,
+        .max_parameter_bytes = read_be_u64(response + 100),
+        .max_sql_data_bytes = read_be_u64(response + 108),
+        .max_ipc_request_bytes = read_be_u64(response + 116),
+        .max_ipc_response_bytes = read_be_u64(response + 124),
+        .max_result_chunk_bytes = read_be_u64(response + 132),
+        .max_total_result_bytes = read_be_u64(response + 140),
+        .sql_dispatch_max_heap_bytes = read_be_u64(response + 148),
+        .sql_exec_max_materialized_bytes = read_be_u64(response + 156),
+    };
     return PRDB_SDK_EXECUTOR_OK;
 }
 

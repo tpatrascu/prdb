@@ -981,10 +981,19 @@ pub fn decode_client_admin_command(
             }
             let mut args = arguments.ok_or(ClientControlError::MissingKey)?;
             let name = args.remove("name").ok_or(ClientControlError::MissingKey)?;
+            let workload_profile = args.remove("workload_profile");
+            if let Some(ref p) = workload_profile
+                && !is_canonical_admin_principal_name(p)
+            {
+                return Err(ClientControlError::InvalidPrepare);
+            }
             if !is_canonical_admin_principal_name(&name) || !args.is_empty() {
                 return Err(ClientControlError::InvalidPrepare);
             }
-            Ok(ClientAdminCommand::PrepareCreateUser { name })
+            Ok(ClientAdminCommand::PrepareCreateUser {
+                name,
+                workload_profile,
+            })
         }
         Some("prepare")
             if version == Some(1) && operation.as_deref() == Some("users.create_no_login") =>
@@ -994,10 +1003,19 @@ pub fn decode_client_admin_command(
             }
             let mut args = arguments.ok_or(ClientControlError::MissingKey)?;
             let name = args.remove("name").ok_or(ClientControlError::MissingKey)?;
+            let workload_profile = args.remove("workload_profile");
+            if let Some(ref p) = workload_profile
+                && !is_canonical_admin_principal_name(p)
+            {
+                return Err(ClientControlError::InvalidPrepare);
+            }
             if !is_canonical_admin_principal_name(&name) || !args.is_empty() {
                 return Err(ClientControlError::InvalidPrepare);
             }
-            Ok(ClientAdminCommand::PrepareCreateUserNoLogin { name })
+            Ok(ClientAdminCommand::PrepareCreateUserNoLogin {
+                name,
+                workload_profile,
+            })
         }
         Some("prepare") if version == Some(1) && operation.as_deref() == Some("roles.create") => {
             if operation_id.is_some() || seen.len() != 4 {
@@ -2085,6 +2103,107 @@ pub fn decode_client_admin_command(
         Some("prepare") if version == Some(1) && operation.as_deref() == Some("users.login") => {
             decode_user_login_prepare(arguments, operation_id, seen.len())
         }
+        Some("prepare")
+            if version == Some(1) && operation.as_deref() == Some("users.set_workload_profile") =>
+        {
+            if operation_id.is_some() || seen.len() != 4 {
+                return Err(ClientControlError::UnknownKey);
+            }
+            let mut args = arguments.ok_or(ClientControlError::MissingKey)?;
+            let user_id = decode_lower_hex_id(
+                &args
+                    .remove("user_id")
+                    .ok_or(ClientControlError::MissingKey)?,
+            )
+            .map_err(|_| ClientControlError::InvalidPrepare)?;
+            let profile_name = args
+                .remove("profile_name")
+                .ok_or(ClientControlError::MissingKey)?;
+            if !is_canonical_admin_principal_name(&profile_name) || !args.is_empty() {
+                return Err(ClientControlError::InvalidPrepare);
+            }
+            Ok(ClientAdminCommand::PrepareSetUserWorkloadProfile {
+                user_id,
+                profile_name,
+            })
+        }
+        Some("prepare")
+            if version == Some(1) && operation.as_deref() == Some("workload_profiles.create") =>
+        {
+            if operation_id.is_some() || seen.len() != 4 {
+                return Err(ClientControlError::UnknownKey);
+            }
+            let mut args = arguments.ok_or(ClientControlError::MissingKey)?;
+            let name = args.remove("name").ok_or(ClientControlError::MissingKey)?;
+            let base_profile = args.remove("base_profile");
+            if let Some(ref b) = base_profile
+                && !is_canonical_admin_principal_name(b)
+            {
+                return Err(ClientControlError::InvalidPrepare);
+            }
+            let settings_str = args.remove("settings").unwrap_or_default();
+            let settings = decode_profile_settings(&settings_str)?;
+            if !is_canonical_admin_principal_name(&name) || !args.is_empty() {
+                return Err(ClientControlError::InvalidPrepare);
+            }
+            Ok(ClientAdminCommand::PrepareCreateWorkloadProfile {
+                name,
+                base_profile,
+                settings,
+            })
+        }
+        Some("prepare")
+            if version == Some(1) && operation.as_deref() == Some("workload_profiles.alter") =>
+        {
+            if operation_id.is_some() || seen.len() != 4 {
+                return Err(ClientControlError::UnknownKey);
+            }
+            let mut args = arguments.ok_or(ClientControlError::MissingKey)?;
+            let name = args.remove("name").ok_or(ClientControlError::MissingKey)?;
+            let settings_str = args
+                .remove("settings")
+                .ok_or(ClientControlError::MissingKey)?;
+            let settings = decode_profile_settings(&settings_str)?;
+            if settings.is_empty() || !is_canonical_admin_principal_name(&name) || !args.is_empty()
+            {
+                return Err(ClientControlError::InvalidPrepare);
+            }
+            Ok(ClientAdminCommand::PrepareAlterWorkloadProfile { name, settings })
+        }
+        Some("prepare")
+            if version == Some(1) && operation.as_deref() == Some("workload_profiles.rename") =>
+        {
+            if operation_id.is_some() || seen.len() != 4 {
+                return Err(ClientControlError::UnknownKey);
+            }
+            let mut args = arguments.ok_or(ClientControlError::MissingKey)?;
+            let old_name = args
+                .remove("old_name")
+                .ok_or(ClientControlError::MissingKey)?;
+            let new_name = args
+                .remove("new_name")
+                .ok_or(ClientControlError::MissingKey)?;
+            if !is_canonical_admin_principal_name(&old_name)
+                || !is_canonical_admin_principal_name(&new_name)
+                || !args.is_empty()
+            {
+                return Err(ClientControlError::InvalidPrepare);
+            }
+            Ok(ClientAdminCommand::PrepareRenameWorkloadProfile { old_name, new_name })
+        }
+        Some("prepare")
+            if version == Some(1) && operation.as_deref() == Some("workload_profiles.drop") =>
+        {
+            if operation_id.is_some() || seen.len() != 4 {
+                return Err(ClientControlError::UnknownKey);
+            }
+            let mut args = arguments.ok_or(ClientControlError::MissingKey)?;
+            let name = args.remove("name").ok_or(ClientControlError::MissingKey)?;
+            if !is_canonical_admin_principal_name(&name) || !args.is_empty() {
+                return Err(ClientControlError::InvalidPrepare);
+            }
+            Ok(ClientAdminCommand::PrepareDropWorkloadProfile { name })
+        }
         Some("prepare") if version == Some(1) && operation.as_deref() == Some("roles.grant") => {
             decode_role_membership_prepare(arguments, operation_id, seen.len(), true)
         }
@@ -2508,6 +2627,26 @@ pub(super) fn decode_user_login_prepare(
         return Err(ClientControlError::UnknownKey);
     }
     Ok(ClientAdminCommand::PrepareSetUserLogin { user_id, enabled })
+}
+
+fn decode_profile_settings(raw: &str) -> Result<Vec<(String, u64)>, ClientControlError> {
+    if raw.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut settings = Vec::new();
+    for pair in raw.split(',') {
+        let (k, v) = pair
+            .split_once('=')
+            .ok_or(ClientControlError::InvalidPrepare)?;
+        if !is_canonical_admin_principal_name(k) {
+            return Err(ClientControlError::InvalidPrepare);
+        }
+        let val = v
+            .parse::<u64>()
+            .map_err(|_| ClientControlError::InvalidPrepare)?;
+        settings.push((k.to_owned(), val));
+    }
+    Ok(settings)
 }
 
 pub(super) fn decode_identity_drop_prepare(

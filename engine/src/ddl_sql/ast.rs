@@ -237,6 +237,39 @@ pub struct CreateIdentitySql {
     pub if_not_exists: bool,
     pub name: String,
     pub login_enabled: bool,
+    pub workload_profile: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetUserWorkloadProfileSql {
+    pub user_name: String,
+    pub profile_name: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreateWorkloadProfileSql {
+    pub if_not_exists: bool,
+    pub name: String,
+    pub base_profile: Option<String>,
+    pub settings: Vec<(String, u64)>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AlterWorkloadProfileSql {
+    pub name: String,
+    pub settings: Vec<(String, u64)>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RenameWorkloadProfileSql {
+    pub old_name: String,
+    pub new_name: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DropWorkloadProfileSql {
+    pub name: String,
+    pub if_exists: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -50,18 +50,12 @@ pub struct StagingLimits {
     pub max_live_reservations: usize,
     /// Maximum live reservations owned by one authenticated principal.
     pub max_live_reservations_per_principal: usize,
-    /// Maximum non-active operational submissions uploading, sealing, or prepared.
-    pub max_pending_operational: usize,
-    /// Maximum non-active analytical submissions uploading, sealing, or prepared.
-    pub max_pending_analytical: usize,
-    /// Maximum reservations entering or executing START with operational limits.
-    pub max_active_operational: usize,
-    /// Maximum reservations entering or executing START with analytical limits.
-    pub max_active_analytical: usize,
-    /// Maximum active operational reservations owned by one principal.
-    pub max_active_operational_per_principal: usize,
-    /// Maximum active analytical reservations owned by one principal.
-    pub max_active_analytical_per_principal: usize,
+    /// Maximum non-active submissions uploading, sealing, or prepared.
+    pub max_pending_submissions: usize,
+    /// Maximum reservations entering or executing START globally.
+    pub max_active_invocations: usize,
+    /// Maximum active reservations owned by one principal.
+    pub max_active_per_principal: usize,
     pub reservation_ttl: Duration,
 }
 
@@ -72,11 +66,9 @@ pub struct StagingRuntimeUsage {
     pub pending_submissions: u64,
     pub starting_submissions: u64,
     pub started_submissions: u64,
-    pub queued_operational_starts: u64,
-    pub queued_analytical_starts: u64,
+    pub queued_starts: u64,
     pub oldest_queued_start_wait_us: u64,
-    pub operational_start_wait_buckets: [u64; 6],
-    pub analytical_start_wait_buckets: [u64; 6],
+    pub start_wait_buckets: [u64; 6],
     pub reserved_submission_bytes: u64,
 }
 
@@ -95,12 +87,9 @@ impl Default for StagingLimits {
             max_deadline_ms: DEFAULT_MAX_DEADLINE_MS,
             max_live_reservations: 1024,
             max_live_reservations_per_principal: 128,
-            max_pending_operational: 256,
-            max_pending_analytical: 64,
-            max_active_operational: 64,
-            max_active_analytical: 8,
-            max_active_operational_per_principal: 16,
-            max_active_analytical_per_principal: 2,
+            max_pending_submissions: 256,
+            max_active_invocations: 64,
+            max_active_per_principal: 16,
             reservation_ttl: Duration::from_secs(300),
         }
     }
@@ -119,13 +108,8 @@ pub struct PrepareSubmission {
     pub sql_data_bytes: u64,
     pub sql_data_sha256: [u8; 32],
     pub deadline_ms: u64,
-    pub workload_class: WorkloadClass,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WorkloadClass {
-    Operational,
-    Analytical,
+    pub workload_profile_id: [u8; 16],
+    pub workload_profile: crate::workload_profile::WorkloadProfileLimits,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -135,7 +119,8 @@ pub struct SubmissionMetadata {
     pub scope_version: u32,
     pub requested_scope: Vec<u8>,
     pub deadline_ms: u64,
-    pub workload_class: WorkloadClass,
+    pub workload_profile_id: [u8; 16],
+    pub workload_profile: crate::workload_profile::WorkloadProfileLimits,
 }
 
 /// Trusted supervisor logic validates versioned metadata without loading the
@@ -229,10 +214,7 @@ impl SealedSubmission {
         digest.update(self.data.metadata.manifest_version.to_le_bytes());
         digest.update(self.data.metadata.scope_version.to_le_bytes());
         digest.update(self.data.metadata.deadline_ms.to_le_bytes());
-        digest.update([match self.data.metadata.workload_class {
-            WorkloadClass::Operational => 1,
-            WorkloadClass::Analytical => 2,
-        }]);
+        digest.update(self.data.metadata.workload_profile_id);
         for bytes in [
             self.data.metadata.manifest.as_slice(),
             self.data.metadata.requested_scope.as_slice(),
@@ -296,8 +278,7 @@ struct Reservation {
 struct StagingState {
     reservations: BTreeMap<[u8; 16], Reservation>,
     start_queue: BTreeMap<u128, StartQueueEntry>,
-    operational_start_wait_buckets: [u64; 6],
-    analytical_start_wait_buckets: [u64; 6],
+    start_wait_buckets: [u64; 6],
     next_start_ticket: u128,
     connection_reservations: HashMap<[u8; 16], [u8; 16]>,
     global_reserved_bytes: u64,
@@ -305,11 +286,13 @@ struct StagingState {
     reaper_cursor: Option<[u8; 16]>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct StartQueueEntry {
     invocation_id: [u8; 16],
     principal_id: [u8; 16],
-    workload_class: WorkloadClass,
+    workload_profile_id: [u8; 16],
+    max_active_per_principal: usize,
+    max_active_for_profile: usize,
     queued_at: Instant,
     was_blocked: bool,
 }
@@ -383,12 +366,9 @@ impl StagingStore {
             || limits.max_deadline_ms == 0
             || limits.max_live_reservations == 0
             || limits.max_live_reservations_per_principal == 0
-            || limits.max_pending_operational == 0
-            || limits.max_pending_analytical == 0
-            || limits.max_active_operational == 0
-            || limits.max_active_analytical == 0
-            || limits.max_active_operational_per_principal == 0
-            || limits.max_active_analytical_per_principal == 0
+            || limits.max_pending_submissions == 0
+            || limits.max_active_invocations == 0
+            || limits.max_active_per_principal == 0
             || limits.reservation_ttl.is_zero()
         {
             return Err(StagingError::InvalidLimits);
@@ -428,8 +408,7 @@ impl StagingStore {
         let state = self.state.lock().map_err(|_| StagingError::Poisoned)?;
         let mut summary = StagingRuntimeUsage {
             reserved_submission_bytes: state.global_reserved_bytes,
-            operational_start_wait_buckets: state.operational_start_wait_buckets,
-            analytical_start_wait_buckets: state.analytical_start_wait_buckets,
+            start_wait_buckets: state.start_wait_buckets,
             ..StagingRuntimeUsage::default()
         };
         for reservation in state.reservations.values() {
@@ -449,16 +428,7 @@ impl StagingStore {
             }
         }
         for queued in state.start_queue.values() {
-            match queued.workload_class {
-                WorkloadClass::Operational => {
-                    summary.queued_operational_starts =
-                        summary.queued_operational_starts.saturating_add(1);
-                }
-                WorkloadClass::Analytical => {
-                    summary.queued_analytical_starts =
-                        summary.queued_analytical_starts.saturating_add(1);
-                }
-            }
+            summary.queued_starts = summary.queued_starts.saturating_add(1);
             summary.oldest_queued_start_wait_us = summary.oldest_queued_start_wait_us.max(
                 u64::try_from(
                     observed_at
@@ -484,18 +454,37 @@ impl StagingStore {
         {
             return Err(StagingError::UnsupportedMetadataVersion);
         }
+        let max_artifact = self
+            .limits
+            .max_artifact_bytes
+            .min(request.workload_profile.max_artifact_bytes);
+        let max_params = self
+            .limits
+            .max_parameter_bytes
+            .min(request.workload_profile.max_parameter_bytes);
+        let max_sql_data = self
+            .limits
+            .max_sql_data_bytes
+            .min(request.workload_profile.max_sql_data_bytes);
+        let max_deadline = self
+            .limits
+            .max_deadline_ms
+            .min(request.workload_profile.max_deadline_ms);
+        let max_manifest =
+            MAX_MANIFEST_BYTES.min(request.workload_profile.max_manifest_bytes as usize);
+        let max_scope = MAX_SCOPE_BYTES.min(request.workload_profile.max_scope_bytes as usize);
         if owner.connection_id == [0; 16]
             || owner.principal_id == [0; 16]
             || request.artifact_bytes == 0
-            || request.artifact_bytes > self.limits.max_artifact_bytes
-            || request.parameter_bytes > self.limits.max_parameter_bytes
-            || request.sql_data_bytes > self.limits.max_sql_data_bytes
+            || request.artifact_bytes > max_artifact
+            || request.parameter_bytes > max_params
+            || request.sql_data_bytes > max_sql_data
             || request.deadline_ms == 0
-            || request.deadline_ms > self.limits.max_deadline_ms
+            || request.deadline_ms > max_deadline
             || request.manifest.is_empty()
-            || request.manifest.len() > MAX_MANIFEST_BYTES
+            || request.manifest.len() > max_manifest
             || request.requested_scope.is_empty()
-            || request.requested_scope.len() > MAX_SCOPE_BYTES
+            || request.requested_scope.len() > max_scope
         {
             return Err(StagingError::InvalidRequest);
         }
@@ -527,10 +516,14 @@ impl StagingStore {
             .values()
             .filter(|reservation| reservation.principal_id == owner.principal_id)
             .count();
-        if principal_reservation_count >= self.limits.max_live_reservations_per_principal {
+        let principal_reservation_limit = self
+            .limits
+            .max_live_reservations_per_principal
+            .min(request.workload_profile.max_live_reservations_per_principal as usize);
+        if principal_reservation_count >= principal_reservation_limit {
             return Err(StagingError::ResourceLimit);
         }
-        let pending_class_count = state
+        let pending_count = state
             .reservations
             .values()
             .filter(|reservation| {
@@ -540,14 +533,26 @@ impl StagingStore {
                         | ReservationState::Sealing
                         | ReservationState::Sealed
                         | ReservationState::DiscardRequested
-                ) && reservation.metadata.workload_class == request.workload_class
+                )
             })
             .count();
-        let pending_class_limit = match request.workload_class {
-            WorkloadClass::Operational => self.limits.max_pending_operational,
-            WorkloadClass::Analytical => self.limits.max_pending_analytical,
-        };
-        if pending_class_count >= pending_class_limit {
+        if pending_count >= self.limits.max_pending_submissions {
+            return Err(StagingError::ResourceLimit);
+        }
+        let principal_pending_count = state
+            .reservations
+            .values()
+            .filter(|reservation| {
+                matches!(
+                    reservation.state,
+                    ReservationState::Uploading
+                        | ReservationState::Sealing
+                        | ReservationState::Sealed
+                        | ReservationState::DiscardRequested
+                ) && reservation.principal_id == owner.principal_id
+            })
+            .count();
+        if principal_pending_count >= request.workload_profile.max_pending_per_principal as usize {
             return Err(StagingError::ResourceLimit);
         }
         let next_global = state
@@ -562,8 +567,12 @@ impl StagingStore {
         let next_principal = principal_bytes
             .checked_add(reservation_size)
             .ok_or(StagingError::ResourceLimit)?;
+        let max_principal_bytes = self
+            .limits
+            .max_principal_reserved_bytes
+            .min(request.workload_profile.max_principal_reserved_bytes);
         if next_global > self.limits.max_global_reserved_bytes
-            || next_principal > self.limits.max_principal_reserved_bytes
+            || next_principal > max_principal_bytes
         {
             return Err(StagingError::ResourceLimit);
         }
@@ -580,7 +589,8 @@ impl StagingStore {
                     scope_version: request.scope_version,
                     requested_scope: request.requested_scope,
                     deadline_ms: request.deadline_ms,
-                    workload_class: request.workload_class,
+                    workload_profile_id: request.workload_profile_id,
+                    workload_profile: request.workload_profile,
                 },
                 interactive_package: None,
                 artifact_bytes: request.artifact_bytes,
@@ -854,7 +864,13 @@ impl StagingStore {
             let entry = StartQueueEntry {
                 invocation_id,
                 principal_id: reservation.principal_id,
-                workload_class: reservation.metadata.workload_class,
+                workload_profile_id: reservation.metadata.workload_profile_id,
+                max_active_per_principal: reservation
+                    .metadata
+                    .workload_profile
+                    .max_active_per_principal as usize,
+                max_active_for_profile: reservation.metadata.workload_profile.max_active_for_profile
+                    as usize,
                 queued_at: Instant::now(),
                 was_blocked: false,
             };
@@ -964,13 +980,19 @@ impl StagingStore {
                     matches!(
                         reservation.state,
                         ReservationState::Starting | ReservationState::Started
-                    ) && reservation.metadata.workload_class == entry.workload_class
+                    )
                 })
                 .count();
-            let active_limit = match entry.workload_class {
-                WorkloadClass::Operational => self.limits.max_active_operational,
-                WorkloadClass::Analytical => self.limits.max_active_analytical,
-            };
+            let profile_active_count = state
+                .reservations
+                .values()
+                .filter(|reservation| {
+                    matches!(
+                        reservation.state,
+                        ReservationState::Starting | ReservationState::Started
+                    ) && reservation.metadata.workload_profile_id == entry.workload_profile_id
+                })
+                .count();
             let principal_active_count = state
                 .reservations
                 .values()
@@ -979,14 +1001,15 @@ impl StagingStore {
                         reservation.state,
                         ReservationState::Starting | ReservationState::Started
                     ) && reservation.principal_id == entry.principal_id
-                        && reservation.metadata.workload_class == entry.workload_class
                 })
                 .count();
-            let principal_active_limit = match entry.workload_class {
-                WorkloadClass::Operational => self.limits.max_active_operational_per_principal,
-                WorkloadClass::Analytical => self.limits.max_active_analytical_per_principal,
-            };
-            (active_count < active_limit && principal_active_count < principal_active_limit)
+            let principal_active_limit = self
+                .limits
+                .max_active_per_principal
+                .min(entry.max_active_per_principal);
+            (active_count < self.limits.max_active_invocations
+                && profile_active_count < entry.max_active_for_profile
+                && principal_active_count < principal_active_limit)
                 .then_some((*ticket, entry.invocation_id))
         })
     }
@@ -1328,14 +1351,10 @@ fn record_completed_start_wait(state: &mut StagingState, entry: StartQueueEntry,
     }
     let elapsed_us = u64::try_from(now.saturating_duration_since(entry.queued_at).as_micros())
         .unwrap_or(u64::MAX);
-    record_start_wait_sample(state, entry.workload_class, elapsed_us);
+    record_start_wait_sample(state, elapsed_us);
 }
 
-fn record_start_wait_sample(
-    state: &mut StagingState,
-    workload_class: WorkloadClass,
-    elapsed_us: u64,
-) {
+fn record_start_wait_sample(state: &mut StagingState, elapsed_us: u64) {
     let bucket = if elapsed_us <= 1_000 {
         0
     } else if elapsed_us <= 5_000 {
@@ -1349,11 +1368,7 @@ fn record_start_wait_sample(
     } else {
         5
     };
-    let buckets = match workload_class {
-        WorkloadClass::Operational => &mut state.operational_start_wait_buckets,
-        WorkloadClass::Analytical => &mut state.analytical_start_wait_buckets,
-    };
-    buckets[bucket] = buckets[bucket].saturating_add(1);
+    state.start_wait_buckets[bucket] = state.start_wait_buckets[bucket].saturating_add(1);
 }
 
 fn reap_expired(
@@ -1517,14 +1532,6 @@ mod tests {
     }
 
     fn request(artifact: &[u8], parameters: &[u8]) -> PrepareSubmission {
-        request_for_class(artifact, parameters, WorkloadClass::Operational)
-    }
-
-    fn request_for_class(
-        artifact: &[u8],
-        parameters: &[u8],
-        workload_class: WorkloadClass,
-    ) -> PrepareSubmission {
         PrepareSubmission {
             manifest_version: 1,
             manifest: b"manifest".to_vec(),
@@ -1537,7 +1544,8 @@ mod tests {
             sql_data_bytes: 0,
             sql_data_sha256: Sha256::digest([]).into(),
             deadline_ms: 30_000,
-            workload_class,
+            workload_profile_id: crate::workload_profile::SMALL_OPERATIONAL_PROFILE_ID,
+            workload_profile: crate::workload_profile::WorkloadProfileLimits::small_operational(),
         }
     }
 
@@ -1606,28 +1614,7 @@ mod tests {
         artifact: &[u8],
         parameters: &[u8],
     ) -> [u8; 16] {
-        upload_and_seal_for_class(
-            store,
-            owner,
-            artifact,
-            parameters,
-            WorkloadClass::Operational,
-        )
-    }
-
-    fn upload_and_seal_for_class(
-        store: &StagingStore,
-        owner: StagingOwner,
-        artifact: &[u8],
-        parameters: &[u8],
-        workload_class: WorkloadClass,
-    ) -> [u8; 16] {
-        let reservation = store
-            .prepare(
-                owner,
-                request_for_class(artifact, parameters, workload_class),
-            )
-            .unwrap();
+        let reservation = store.prepare(owner, request(artifact, parameters)).unwrap();
         store
             .upload_chunk(
                 owner,
@@ -1655,31 +1642,21 @@ mod tests {
     #[test]
     fn runtime_usage_summary_reports_bounded_queue_and_reservation_totals() {
         let staging = store(Arc::new(AcceptMetadata));
-        let operational_owner = make_owner(201, 202);
-        let analytical_owner = make_owner(203, 204);
-        let operational_id = upload_and_seal_for_class(
-            &staging,
-            operational_owner,
-            b"one",
-            b"p",
-            WorkloadClass::Operational,
-        );
-        let analytical_id = upload_and_seal_for_class(
-            &staging,
-            analytical_owner,
-            b"two",
-            b"ab",
-            WorkloadClass::Analytical,
-        );
+        let owner_one = make_owner(201, 202);
+        let owner_two = make_owner(203, 204);
+        let id_one = upload_and_seal(&staging, owner_one, b"one", b"p");
+        let id_two = upload_and_seal(&staging, owner_two, b"two", b"ab");
         let observed_at = Instant::now();
         {
             let mut state = staging.state.lock().unwrap();
             state.start_queue.insert(
                 1,
                 StartQueueEntry {
-                    invocation_id: operational_id,
-                    principal_id: operational_owner.principal_id(),
-                    workload_class: WorkloadClass::Operational,
+                    invocation_id: id_one,
+                    principal_id: owner_one.principal_id(),
+                    workload_profile_id: crate::workload_profile::SMALL_OPERATIONAL_PROFILE_ID,
+                    max_active_for_profile: 64,
+                    max_active_per_principal: 64,
                     queued_at: observed_at
                         .checked_sub(Duration::from_micros(2_000))
                         .unwrap(),
@@ -1689,9 +1666,11 @@ mod tests {
             state.start_queue.insert(
                 2,
                 StartQueueEntry {
-                    invocation_id: analytical_id,
-                    principal_id: analytical_owner.principal_id(),
-                    workload_class: WorkloadClass::Analytical,
+                    invocation_id: id_two,
+                    principal_id: owner_two.principal_id(),
+                    workload_profile_id: crate::workload_profile::SMALL_OPERATIONAL_PROFILE_ID,
+                    max_active_for_profile: 64,
+                    max_active_per_principal: 64,
                     queued_at: observed_at
                         .checked_sub(Duration::from_micros(4_000))
                         .unwrap(),
@@ -1705,11 +1684,9 @@ mod tests {
                 pending_submissions: 2,
                 starting_submissions: 0,
                 started_submissions: 0,
-                queued_operational_starts: 1,
-                queued_analytical_starts: 1,
+                queued_starts: 2,
                 oldest_queued_start_wait_us: 4_000,
-                operational_start_wait_buckets: [0; 6],
-                analytical_start_wait_buckets: [0; 6],
+                start_wait_buckets: [0; 6],
                 reserved_submission_bytes: 73,
             }
         );
@@ -1724,49 +1701,47 @@ mod tests {
         assert_eq!(usage.pending_submissions, 0);
         assert_eq!(usage.starting_submissions, 0);
         assert_eq!(usage.started_submissions, 1);
-        assert_eq!(usage.queued_operational_starts, 0);
-        assert_eq!(usage.queued_analytical_starts, 0);
+        assert_eq!(usage.queued_starts, 0);
     }
 
     #[test]
-    fn completed_start_wait_buckets_use_bounded_class_specific_histograms() {
+    fn completed_start_wait_buckets_use_bounded_histograms() {
         let observed_at = Instant::now();
         let mut state = StagingState::default();
-        let operational_boundaries = [
+        let boundaries = [
             1_000, 1_001, 5_000, 5_001, 10_000, 10_001, 50_000, 50_001, 100_000, 100_001,
         ];
-        for elapsed_us in operational_boundaries {
-            record_start_wait_sample(&mut state, WorkloadClass::Operational, elapsed_us);
+        for elapsed_us in boundaries {
+            record_start_wait_sample(&mut state, elapsed_us);
         }
-        record_start_wait_sample(&mut state, WorkloadClass::Analytical, 5_001);
         record_completed_start_wait(
             &mut state,
             StartQueueEntry {
                 invocation_id: [21; 16],
                 principal_id: [31; 16],
-                workload_class: WorkloadClass::Operational,
+                workload_profile_id: crate::workload_profile::SMALL_OPERATIONAL_PROFILE_ID,
+                max_active_for_profile: 64,
+                max_active_per_principal: 64,
                 queued_at: observed_at,
                 was_blocked: false,
             },
             observed_at,
         );
-        state.operational_start_wait_buckets[0] = u64::MAX;
+        state.start_wait_buckets[0] = u64::MAX;
         record_completed_start_wait(
             &mut state,
             StartQueueEntry {
                 invocation_id: [22; 16],
                 principal_id: [30; 16],
-                workload_class: WorkloadClass::Operational,
+                workload_profile_id: crate::workload_profile::SMALL_OPERATIONAL_PROFILE_ID,
+                max_active_for_profile: 64,
+                max_active_per_principal: 64,
                 queued_at: observed_at - Duration::from_micros(1_000),
                 was_blocked: true,
             },
             observed_at,
         );
-        assert_eq!(
-            state.operational_start_wait_buckets,
-            [u64::MAX, 2, 2, 2, 2, 1]
-        );
-        assert_eq!(state.analytical_start_wait_buckets, [0, 0, 1, 0, 0, 0]);
+        assert_eq!(state.start_wait_buckets, [u64::MAX, 2, 2, 2, 2, 1]);
     }
 
     #[test]
@@ -1784,8 +1759,8 @@ mod tests {
                 assert_eq!(submission.parameters(), b"params");
                 assert_eq!(submission.metadata().deadline_ms, 30_000);
                 assert_eq!(
-                    submission.metadata().workload_class,
-                    WorkloadClass::Operational
+                    submission.metadata().workload_profile_id,
+                    crate::workload_profile::SMALL_OPERATIONAL_PROFILE_ID
                 );
                 Ok::<_, ()>(submission.invocation_id())
             })
@@ -1934,49 +1909,29 @@ mod tests {
     }
 
     #[test]
-    fn active_invocation_quotas_are_isolated_by_class_and_retain_prepared_work() {
+    fn active_invocation_quotas_retain_prepared_work() {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::mpsc;
 
         let store = StagingStore::new(
             StagingLimits {
-                max_active_operational: 1,
-                max_active_analytical: 1,
+                max_active_invocations: 1,
                 ..StagingLimits::default()
             },
             Arc::new(AcceptMetadata),
         )
         .unwrap();
-        let operational_owner = make_owner(31, 41);
+        let owner_one = make_owner(31, 41);
         let queued_owner = make_owner(32, 42);
-        let analytical_owner = make_owner(33, 43);
-        let operational_id = upload_and_seal(&store, operational_owner, b"op1", b"");
+        let id_one = upload_and_seal(&store, owner_one, b"op1", b"");
         let queued_id = upload_and_seal(&store, queued_owner, b"op2", b"");
-        let analytical_reservation = store
-            .prepare(
-                analytical_owner,
-                request_for_class(b"an1", b"", WorkloadClass::Analytical),
-            )
-            .unwrap();
-        store
-            .upload_chunk(
-                analytical_owner,
-                analytical_reservation.invocation_id,
-                ChunkKind::Artifact,
-                0,
-                b"an1",
-            )
-            .unwrap();
-        store
-            .seal(analytical_owner, analytical_reservation.invocation_id)
-            .unwrap();
 
         let (started_sender, started_receiver) = mpsc::sync_channel(0);
         let (resume_sender, resume_receiver) = mpsc::sync_channel(0);
         std::thread::scope(|scope| {
             let store_ref = &store;
             let starting = scope.spawn(move || {
-                store_ref.start_with(operational_owner, operational_id, |_| {
+                store_ref.start_with(owner_one, id_one, |_| {
                     started_sender.send(()).unwrap();
                     resume_receiver.recv().unwrap();
                     Ok::<_, ()>(())
@@ -1998,24 +1953,11 @@ mod tests {
                 Ok(SubmissionState::Prepared)
             );
 
-            store
-                .start_with(
-                    analytical_owner,
-                    analytical_reservation.invocation_id,
-                    |_| Ok::<_, ()>(()),
-                )
-                .unwrap();
-            store
-                .finish_started(analytical_owner, analytical_reservation.invocation_id)
-                .unwrap();
-
             resume_sender.send(()).unwrap();
             starting.join().unwrap().unwrap();
         });
 
-        store
-            .finish_started(operational_owner, operational_id)
-            .unwrap();
+        store.finish_started(owner_one, id_one).unwrap();
         store
             .start_with(queued_owner, queued_id, |_| Ok::<_, ()>(()))
             .unwrap();
@@ -2023,10 +1965,9 @@ mod tests {
     }
 
     #[test]
-    fn configured_global_active_start_caps_allow_64_operational_and_8_analytical() {
+    fn configured_global_active_start_caps_allow_64_invocations() {
         let store = store(Arc::new(AcceptMetadata));
-        let mut operational = Vec::new();
-        let mut analytical = Vec::new();
+        let mut started = Vec::new();
 
         for connection in 1..=64u8 {
             let owner = make_owner(connection, connection);
@@ -2034,102 +1975,27 @@ mod tests {
             store
                 .start_with(owner, invocation_id, |_| Ok::<_, ()>(()))
                 .unwrap();
-            operational.push((owner, invocation_id));
-        }
-        for connection in 101..=108u8 {
-            let owner = make_owner(connection, connection);
-            let reservation = store
-                .prepare(
-                    owner,
-                    request_for_class(b"an", b"", WorkloadClass::Analytical),
-                )
-                .unwrap();
-            store
-                .upload_chunk(
-                    owner,
-                    reservation.invocation_id,
-                    ChunkKind::Artifact,
-                    0,
-                    b"an",
-                )
-                .unwrap();
-            store.seal(owner, reservation.invocation_id).unwrap();
-            store
-                .start_with(owner, reservation.invocation_id, |_| Ok::<_, ()>(()))
-                .unwrap();
-            analytical.push((owner, reservation.invocation_id));
+            started.push((owner, invocation_id));
         }
 
-        let operational_overflow_owner = make_owner(250, 250);
-        let operational_overflow_id =
-            upload_and_seal(&store, operational_overflow_owner, b"op-overflow", b"");
+        let overflow_owner = make_owner(250, 250);
+        let overflow_id = upload_and_seal(&store, overflow_owner, b"op-overflow", b"");
         assert!(matches!(
-            store.start_with(operational_overflow_owner, operational_overflow_id, |_| {
-                Ok::<_, ()>(())
-            }),
+            store.start_with(overflow_owner, overflow_id, |_| { Ok::<_, ()>(()) }),
             Err(StartError::Staging(StagingError::ResourceLimit))
         ));
         assert_eq!(
-            store.status(operational_overflow_owner, operational_overflow_id),
+            store.status(overflow_owner, overflow_id),
             Ok(SubmissionState::Prepared)
         );
 
-        let analytical_overflow_owner = make_owner(251, 251);
-        let analytical_overflow = store
-            .prepare(
-                analytical_overflow_owner,
-                request_for_class(b"an-overflow", b"", WorkloadClass::Analytical),
-            )
-            .unwrap();
-        store
-            .upload_chunk(
-                analytical_overflow_owner,
-                analytical_overflow.invocation_id,
-                ChunkKind::Artifact,
-                0,
-                b"an-overflow",
-            )
-            .unwrap();
-        store
-            .seal(analytical_overflow_owner, analytical_overflow.invocation_id)
-            .unwrap();
-        assert!(matches!(
-            store.start_with(
-                analytical_overflow_owner,
-                analytical_overflow.invocation_id,
-                |_| Ok::<_, ()>(())
-            ),
-            Err(StartError::Staging(StagingError::ResourceLimit))
-        ));
-        assert_eq!(
-            store.status(analytical_overflow_owner, analytical_overflow.invocation_id),
-            Ok(SubmissionState::Prepared)
-        );
-
-        for (owner, invocation_id) in operational {
-            store.finish_started(owner, invocation_id).unwrap();
-        }
-        for (owner, invocation_id) in analytical {
+        for (owner, invocation_id) in started {
             store.finish_started(owner, invocation_id).unwrap();
         }
         store
-            .start_with(operational_overflow_owner, operational_overflow_id, |_| {
-                Ok::<_, ()>(())
-            })
+            .start_with(overflow_owner, overflow_id, |_| Ok::<_, ()>(()))
             .unwrap();
-        store
-            .finish_started(operational_overflow_owner, operational_overflow_id)
-            .unwrap();
-        store
-            .start_with(
-                analytical_overflow_owner,
-                analytical_overflow.invocation_id,
-                |_| Ok::<_, ()>(()),
-            )
-            .unwrap();
-        store
-            .finish_started(analytical_overflow_owner, analytical_overflow.invocation_id)
-            .unwrap();
+        store.finish_started(overflow_owner, overflow_id).unwrap();
     }
 
     #[test]
@@ -2205,7 +2071,7 @@ mod tests {
     fn start_retries_preserve_fifo_order_within_eligible_capacity() {
         let store = StagingStore::new(
             StagingLimits {
-                max_active_operational: 1,
+                max_active_invocations: 1,
                 ..StagingLimits::default()
             },
             Arc::new(AcceptMetadata),
@@ -2248,16 +2114,15 @@ mod tests {
             .unwrap();
         store.finish_started(third_owner, third_id).unwrap();
         let usage = store.runtime_usage_summary().unwrap();
-        assert_eq!(usage.operational_start_wait_buckets.iter().sum::<u64>(), 2);
-        assert_eq!(usage.analytical_start_wait_buckets, [0; 6]);
+        assert_eq!(usage.start_wait_buckets.iter().sum::<u64>(), 2);
     }
 
     #[test]
     fn start_queue_skips_principal_blocked_ticket_without_losing_its_turn() {
         let store = StagingStore::new(
             StagingLimits {
-                max_active_operational: 2,
-                max_active_operational_per_principal: 1,
+                max_active_invocations: 2,
+                max_active_per_principal: 1,
                 ..StagingLimits::default()
             },
             Arc::new(AcceptMetadata),
@@ -2309,7 +2174,7 @@ mod tests {
     fn canceling_a_queued_start_releases_its_turn() {
         let store = StagingStore::new(
             StagingLimits {
-                max_active_operational: 1,
+                max_active_invocations: 1,
                 ..StagingLimits::default()
             },
             Arc::new(AcceptMetadata),
@@ -2381,11 +2246,11 @@ mod tests {
     }
 
     #[test]
-    fn active_invocation_quota_also_bounds_each_principal_within_a_class() {
+    fn active_invocation_quota_also_bounds_each_principal() {
         let store = StagingStore::new(
             StagingLimits {
-                max_active_operational: 2,
-                max_active_operational_per_principal: 1,
+                max_active_invocations: 2,
+                max_active_per_principal: 1,
                 ..StagingLimits::default()
             },
             Arc::new(AcceptMetadata),
@@ -2421,41 +2286,28 @@ mod tests {
     }
 
     #[test]
-    fn pending_submission_quotas_are_isolated_by_class_and_released_on_cancel() {
+    fn pending_submission_quotas_are_released_on_cancel() {
         let store = StagingStore::new(
             StagingLimits {
-                max_pending_operational: 1,
-                max_pending_analytical: 1,
+                max_pending_submissions: 1,
                 ..StagingLimits::default()
             },
             Arc::new(AcceptMetadata),
         )
         .unwrap();
-        let operational = make_owner(91, 101);
-        let next_operational = make_owner(92, 102);
-        let analytical = make_owner(93, 103);
-        let first = store.prepare(operational, request(b"op", b"")).unwrap();
+        let owner_one = make_owner(91, 101);
+        let owner_two = make_owner(92, 102);
+        let first = store.prepare(owner_one, request(b"op", b"")).unwrap();
         assert!(matches!(
-            store.prepare(next_operational, request(b"op2", b"")),
+            store.prepare(owner_two, request(b"op2", b"")),
             Err(StagingError::ResourceLimit)
         ));
-        let analytical_request = store
-            .prepare(
-                analytical,
-                request_for_class(b"an", b"", WorkloadClass::Analytical),
-            )
-            .unwrap();
         store
-            .cancel_prepared(operational, first.invocation_id)
+            .cancel_prepared(owner_one, first.invocation_id)
             .unwrap();
-        let replacement = store
-            .prepare(next_operational, request(b"op3", b""))
-            .unwrap();
+        let replacement = store.prepare(owner_two, request(b"op3", b"")).unwrap();
         store
-            .cancel_prepared(analytical, analytical_request.invocation_id)
-            .unwrap();
-        store
-            .cancel_prepared(next_operational, replacement.invocation_id)
+            .cancel_prepared(owner_two, replacement.invocation_id)
             .unwrap();
     }
 
@@ -2539,9 +2391,7 @@ mod tests {
             runtime_read_only: Vec::new(),
             spill_broker: None,
             max_total_result_bytes: crate::query_abi::MAX_TOTAL_RESULT_BYTES,
-            analytical_max_total_result_bytes: None,
             max_sql_index_probe_candidates: crate::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
-            analytical_max_sql_index_probe_candidates: None,
             cleanup_timeout: std::time::Duration::from_millis(100),
         };
 
@@ -2760,7 +2610,7 @@ mod tests {
     }
 
     #[test]
-    fn staging_preserves_workload_class_and_bounds_requested_deadline() {
+    fn staging_preserves_workload_profile_and_bounds_requested_deadline() {
         let limits = StagingLimits {
             max_deadline_ms: 10,
             ..StagingLimits::default()
@@ -2775,7 +2625,9 @@ mod tests {
         ));
         let mut accepted = request(b"artifact", b"");
         accepted.deadline_ms = 10;
-        accepted.workload_class = WorkloadClass::Analytical;
+        accepted.workload_profile_id = crate::workload_profile::LARGE_ANALYTICAL_PROFILE_ID;
+        accepted.workload_profile =
+            crate::workload_profile::WorkloadProfileLimits::large_analytical();
         let reservation = store.prepare(owner, accepted).unwrap();
         store
             .upload_chunk(
@@ -2791,8 +2643,8 @@ mod tests {
             .start_with(owner, reservation.invocation_id, |submission| {
                 assert_eq!(submission.metadata().deadline_ms, 10);
                 assert_eq!(
-                    submission.metadata().workload_class,
-                    WorkloadClass::Analytical
+                    submission.metadata().workload_profile_id,
+                    crate::workload_profile::LARGE_ANALYTICAL_PROFILE_ID
                 );
                 Ok::<_, ()>(())
             })

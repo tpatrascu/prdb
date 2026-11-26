@@ -32,41 +32,26 @@ pub struct ExecutorLaunchConfig {
     pub runtime_read_only: Vec<PathBuf>,
     /// Shared trusted broker. Absence keeps spill disabled.
     pub spill_broker: Option<crate::spill::SpillBroker>,
-    /// Trusted per-invocation output budget. The fixed chunk size remains an
-    /// ABI safety limit; this cumulative budget is deployment-configurable.
+    /// Host-level ceiling for per-invocation output budget.
     pub max_total_result_bytes: u64,
-    /// Optional analytical-class result-byte ceiling. Omission inherits the
-    /// operational value so the gateway profile remains a separate upper cap.
-    pub analytical_max_total_result_bytes: Option<u64>,
-    /// Trusted per-statement bound for candidate rows returned by one batched
-    /// SQL index-probe operation. The SDK retains its fixed safety envelope.
+    /// Host-level ceiling for per-statement SQL index-probe candidates.
     pub max_sql_index_probe_candidates: u32,
-    /// Optional analytical-class override. Omission inherits the operational
-    /// value so existing deployments keep one effective profile value.
-    pub analytical_max_sql_index_probe_candidates: Option<u32>,
     pub cleanup_timeout: Duration,
 }
 
 impl ExecutorLaunchConfig {
-    fn max_total_result_bytes_for(&self, workload_class: crate::supervisor::WorkloadClass) -> u64 {
-        match workload_class {
-            crate::supervisor::WorkloadClass::Operational => self.max_total_result_bytes,
-            crate::supervisor::WorkloadClass::Analytical => self
-                .analytical_max_total_result_bytes
-                .unwrap_or(self.max_total_result_bytes),
-        }
-    }
-
-    fn max_sql_index_probe_candidates_for(
+    pub fn clamp_profile(
         &self,
-        workload_class: crate::supervisor::WorkloadClass,
-    ) -> u32 {
-        match workload_class {
-            crate::supervisor::WorkloadClass::Operational => self.max_sql_index_probe_candidates,
-            crate::supervisor::WorkloadClass::Analytical => self
-                .analytical_max_sql_index_probe_candidates
-                .unwrap_or(self.max_sql_index_probe_candidates),
-        }
+        profile: &crate::workload_profile::WorkloadProfileLimits,
+    ) -> crate::workload_profile::WorkloadProfileLimits {
+        let mut clamped = profile.clone();
+        clamped.max_total_result_bytes = clamped
+            .max_total_result_bytes
+            .min(self.max_total_result_bytes);
+        clamped.max_sql_index_probe_candidates = clamped
+            .max_sql_index_probe_candidates
+            .min(self.max_sql_index_probe_candidates);
+        clamped
     }
 }
 
@@ -144,6 +129,8 @@ pub struct PreparedExecutor {
     optimizer_command: Option<Command>,
     parameters: Option<File>,
     sql_data: Option<File>,
+    #[allow(dead_code)]
+    profile_file: Option<File>,
     cgroup: Option<WorkerCgroup>,
     artifact_directory: Option<PrivateArtifactDirectory>,
     worker_channels: Option<WorkerChannelPair>,
@@ -773,7 +760,7 @@ fn create_spill_session(
         return Ok(None);
     };
     let metadata = submission.metadata();
-    if metadata.workload_class != crate::supervisor::WorkloadClass::Analytical {
+    if !metadata.workload_profile.spill_enabled() {
         return Ok(None);
     }
     let (invocation_id, package_id) = match submission.interactive_package() {
@@ -784,8 +771,15 @@ fn create_spill_session(
     let deadline = std::time::Instant::now()
         .checked_add(Duration::from_millis(metadata.deadline_ms))
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "spill deadline overflow"))?;
+    let spill_limits = crate::spill::SpillInvocationLimits {
+        max_bytes: metadata.workload_profile.spill_max_bytes,
+        max_io_bytes: metadata.workload_profile.spill_max_io_bytes,
+        max_streams: metadata.workload_profile.spill_max_streams as u64,
+        max_operations: metadata.workload_profile.spill_max_operations,
+        max_response_bytes: metadata.workload_profile.spill_max_response_bytes,
+    };
     broker
-        .open_package(package, metadata.workload_class, deadline)
+        .open_package(package, Some(spill_limits), deadline)
         .map_err(|error| io::Error::other(format!("spill package admission failed: {error:?}")))?;
     Ok(Some(Arc::new(SpillSession {
         broker: broker.clone(),
@@ -803,32 +797,39 @@ fn prepare_executor(
     spill_session: Option<Arc<SpillSession>>,
     config: &ExecutorLaunchConfig,
 ) -> Result<PreparedExecutor, ExecutorLaunchError> {
+    let effective_profile = config.clamp_profile(&submission.metadata().workload_profile);
     let mut effective_config = config.clone();
-    effective_config.max_total_result_bytes =
-        config.max_total_result_bytes_for(submission.metadata().workload_class);
+    effective_config.max_total_result_bytes = effective_profile.max_total_result_bytes;
     effective_config.max_sql_index_probe_candidates =
-        config.max_sql_index_probe_candidates_for(submission.metadata().workload_class);
+        effective_profile.max_sql_index_probe_candidates;
     match build_command(
         submission,
         &cgroup,
         &channels,
         spill_session.is_some(),
         &effective_config,
+        &effective_profile,
     ) {
-        Ok((command, optimizer_command, parameters, sql_data, artifact_directory)) => {
-            Ok(PreparedExecutor {
-                command,
-                optimizer_command: Some(optimizer_command),
-                parameters: Some(parameters),
-                sql_data: Some(sql_data),
-                cgroup: Some(cgroup),
-                artifact_directory: Some(artifact_directory),
-                worker_channels: Some(channels),
-                spill_session,
-                cleanup_timeout: config.cleanup_timeout,
-                max_total_result_bytes: effective_config.max_total_result_bytes,
-            })
-        }
+        Ok((
+            command,
+            optimizer_command,
+            parameters,
+            sql_data,
+            profile_file,
+            artifact_directory,
+        )) => Ok(PreparedExecutor {
+            command,
+            optimizer_command: Some(optimizer_command),
+            parameters: Some(parameters),
+            sql_data: Some(sql_data),
+            profile_file: Some(profile_file),
+            cgroup: Some(cgroup),
+            artifact_directory: Some(artifact_directory),
+            worker_channels: Some(channels),
+            spill_session,
+            cleanup_timeout: config.cleanup_timeout,
+            max_total_result_bytes: effective_config.max_total_result_bytes,
+        }),
         Err(launch_error) => Err(ExecutorLaunchError {
             launch_error,
             cleanup_error: cgroup.cleanup(config.cleanup_timeout).err(),
@@ -922,7 +923,8 @@ fn build_command(
     channels: &WorkerChannelPair,
     spill_enabled: bool,
     config: &ExecutorLaunchConfig,
-) -> io::Result<(Command, Command, File, File, PrivateArtifactDirectory)> {
+    profile: &crate::workload_profile::WorkloadProfileLimits,
+) -> io::Result<(Command, Command, File, File, File, PrivateArtifactDirectory)> {
     let executor_path = config.executor_path.canonicalize()?;
     if !executor_path.is_file() {
         return Err(io::Error::new(
@@ -938,6 +940,8 @@ fn build_command(
     )?;
     let parameters = create_sealed_memfd(c"prdb-query-parameters", submission.parameters())?;
     let sql_data = create_sealed_memfd(c"prdb-query-sql-data", submission.sql_data())?;
+    let profile_bytes = profile.encode();
+    let profile_file = create_sealed_memfd(c"prdb-query-profile", &profile_bytes)?;
     let optimizer_path = config.optimizer_path.canonicalize()?;
     if !optimizer_path.is_file() {
         return Err(io::Error::new(
@@ -980,12 +984,15 @@ fn build_command(
         .arg(config.max_total_result_bytes.to_string())
         .arg("--max-sql-index-probe-candidates")
         .arg(config.max_sql_index_probe_candidates.to_string())
+        .arg("--profile-fd")
+        .arg(profile_file.as_raw_fd().to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let mut inherited_fds = vec![
         parameters.as_raw_fd(),
         sql_data.as_raw_fd(),
+        profile_file.as_raw_fd(),
         planner_fd,
         executor_fd,
         optimizer_fd,
@@ -1024,6 +1031,7 @@ fn build_command(
         optimizer_command,
         parameters,
         sql_data,
+        profile_file,
         artifact_directory,
     ))
 }
@@ -1165,7 +1173,7 @@ mod tests {
     use std::os::unix::net::UnixStream;
 
     #[test]
-    fn analytical_probe_budget_override_is_optional_and_class_scoped() {
+    fn profile_budgets_are_clamped_by_host_launch_ceilings() {
         let config = ExecutorLaunchConfig {
             executor_path: std::path::PathBuf::new(),
             optimizer_path: std::path::PathBuf::new(),
@@ -1173,44 +1181,16 @@ mod tests {
             runtime_read_execute: Vec::new(),
             runtime_read_only: Vec::new(),
             spill_broker: None,
-            max_total_result_bytes: 1,
-            analytical_max_total_result_bytes: Some(2),
-            max_sql_index_probe_candidates: 128,
-            analytical_max_sql_index_probe_candidates: Some(512),
+            max_total_result_bytes: 100,
+            max_sql_index_probe_candidates: 256,
             cleanup_timeout: std::time::Duration::ZERO,
         };
-        assert_eq!(
-            config
-                .max_sql_index_probe_candidates_for(crate::supervisor::WorkloadClass::Operational),
-            128
-        );
-        assert_eq!(
-            config.max_sql_index_probe_candidates_for(crate::supervisor::WorkloadClass::Analytical),
-            512
-        );
-        assert_eq!(
-            config.max_total_result_bytes_for(crate::supervisor::WorkloadClass::Operational),
-            1
-        );
-        assert_eq!(
-            config.max_total_result_bytes_for(crate::supervisor::WorkloadClass::Analytical),
-            2
-        );
-
-        let inherited = ExecutorLaunchConfig {
-            analytical_max_total_result_bytes: None,
-            analytical_max_sql_index_probe_candidates: None,
-            ..config
-        };
-        assert_eq!(
-            inherited
-                .max_sql_index_probe_candidates_for(crate::supervisor::WorkloadClass::Analytical),
-            128
-        );
-        assert_eq!(
-            inherited.max_total_result_bytes_for(crate::supervisor::WorkloadClass::Analytical),
-            1
-        );
+        let mut profile = crate::workload_profile::WorkloadProfileLimits::small_analytical();
+        profile.max_total_result_bytes = 200;
+        profile.max_sql_index_probe_candidates = 512;
+        let clamped = config.clamp_profile(&profile);
+        assert_eq!(clamped.max_total_result_bytes, 100);
+        assert_eq!(clamped.max_sql_index_probe_candidates, 256);
     }
 
     #[test]

@@ -558,7 +558,7 @@ static int32_t execute_inner_join_v19_with_page_limit(
     }
     if (index_plan != NULL || prefix_plan != NULL) {
         prdb_sdk_workload_budgets_v1 workload_budgets = {0};
-        uint8_t workload_response[12] = {0};
+        uint8_t workload_response[PRDB_QUERY_WORKLOAD_BUDGETS_WIRE_BYTES] = {0};
         uint64_t workload_response_len = 0;
         status = prdb_sdk_executor_get_workload_budgets_v1(
             host, workload_response, sizeof(workload_response),

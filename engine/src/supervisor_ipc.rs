@@ -192,24 +192,29 @@ impl GatewayAdmissionConfig {
 #[derive(Clone, Debug)]
 pub struct GatewayExecutorConfig {
     pub cgroup_parent: std::path::PathBuf,
+    /// Host-level cgroup v2 ceiling for worker invocations.
     pub resource_limits: crate::linux_sandbox::WorkerResourceLimits,
-    /// Optional analytical profile. When absent, analytical submissions use
-    /// the operational profile for backwards-compatible deployments.
-    pub analytical_resource_limits: Option<crate::linux_sandbox::WorkerResourceLimits>,
     pub launch: crate::executor_launcher::ExecutorLaunchConfig,
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 impl GatewayExecutorConfig {
-    pub fn resource_limits_for(
+    pub fn clamp_resource_limits(
         &self,
-        workload_class: crate::supervisor::WorkloadClass,
+        profile: &crate::workload_profile::WorkloadProfileLimits,
     ) -> crate::linux_sandbox::WorkerResourceLimits {
-        match workload_class {
-            crate::supervisor::WorkloadClass::Operational => self.resource_limits,
-            crate::supervisor::WorkloadClass::Analytical => self
-                .analytical_resource_limits
-                .unwrap_or(self.resource_limits),
+        let requested = profile.worker_resource_limits();
+        crate::linux_sandbox::WorkerResourceLimits {
+            cpu_quota_micros: requested
+                .cpu_quota_micros
+                .min(self.resource_limits.cpu_quota_micros),
+            cpu_period_micros: self.resource_limits.cpu_period_micros,
+            memory_max_bytes: requested
+                .memory_max_bytes
+                .min(self.resource_limits.memory_max_bytes),
+            max_processes: requested
+                .max_processes
+                .min(self.resource_limits.max_processes),
         }
     }
 }
@@ -1517,7 +1522,7 @@ fn execute_interactive_package_service<W: Read + Write>(
                 owner,
                 invocation_id,
                 &executor_config.cgroup_parent,
-                |metadata| executor_config.resource_limits_for(metadata.workload_class),
+                |metadata| executor_config.clamp_resource_limits(&metadata.workload_profile),
                 &executor_config.launch,
                 |_| Ok::<(), &'static str>(()),
             )
@@ -2294,14 +2299,8 @@ mod worker_result_event_tests {
     use std::time::Duration;
 
     #[test]
-    fn workload_class_selects_the_configured_cgroup_profile() {
-        let operational = crate::linux_sandbox::WorkerResourceLimits {
-            cpu_quota_micros: 100_000,
-            cpu_period_micros: 100_000,
-            memory_max_bytes: 64 * 1024 * 1024,
-            max_processes: 16,
-        };
-        let analytical = crate::linux_sandbox::WorkerResourceLimits {
+    fn workload_profile_clamps_to_host_cgroup_ceiling() {
+        let host_ceiling = crate::linux_sandbox::WorkerResourceLimits {
             cpu_quota_micros: 200_000,
             cpu_period_micros: 100_000,
             memory_max_bytes: 512 * 1024 * 1024,
@@ -2309,8 +2308,7 @@ mod worker_result_event_tests {
         };
         let config = super::GatewayExecutorConfig {
             cgroup_parent: std::env::temp_dir(),
-            resource_limits: operational,
-            analytical_resource_limits: Some(analytical),
+            resource_limits: host_ceiling,
             launch: crate::executor_launcher::ExecutorLaunchConfig {
                 executor_path: std::env::current_exe().unwrap(),
                 optimizer_path: std::env::current_exe().unwrap(),
@@ -2319,29 +2317,18 @@ mod worker_result_event_tests {
                 runtime_read_only: Vec::new(),
                 spill_broker: None,
                 max_total_result_bytes: crate::query_abi::MAX_TOTAL_RESULT_BYTES,
-                analytical_max_total_result_bytes: None,
                 max_sql_index_probe_candidates:
                     crate::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
-                analytical_max_sql_index_probe_candidates: None,
                 cleanup_timeout: Duration::from_millis(10),
             },
         };
+        let small = crate::workload_profile::WorkloadProfileLimits::small_operational();
         assert_eq!(
-            config.resource_limits_for(crate::supervisor::WorkloadClass::Operational),
-            operational
+            config.clamp_resource_limits(&small),
+            small.worker_resource_limits()
         );
-        assert_eq!(
-            config.resource_limits_for(crate::supervisor::WorkloadClass::Analytical),
-            analytical
-        );
-        assert_eq!(
-            super::GatewayExecutorConfig {
-                analytical_resource_limits: None,
-                ..config
-            }
-            .resource_limits_for(crate::supervisor::WorkloadClass::Analytical),
-            operational
-        );
+        let large = crate::workload_profile::WorkloadProfileLimits::large_analytical();
+        assert_eq!(config.clamp_resource_limits(&large), host_ceiling);
     }
 
     #[test]
@@ -2404,7 +2391,9 @@ mod worker_result_event_tests {
                     sql_data_bytes: 0,
                     sql_data_sha256: Sha256::digest([]).into(),
                     deadline_ms: 1000,
-                    workload_class: crate::supervisor::WorkloadClass::Operational,
+                    workload_profile_id: crate::workload_profile::SMALL_OPERATIONAL_PROFILE_ID,
+                    workload_profile:
+                        crate::workload_profile::WorkloadProfileLimits::small_operational(),
                 },
             )
             .expect("prepare");
@@ -2445,7 +2434,9 @@ mod worker_result_event_tests {
                     sql_data_bytes: 0,
                     sql_data_sha256: Sha256::digest([]).into(),
                     deadline_ms: 1000,
-                    workload_class: crate::supervisor::WorkloadClass::Operational,
+                    workload_profile_id: crate::workload_profile::SMALL_OPERATIONAL_PROFILE_ID,
+                    workload_profile:
+                        crate::workload_profile::WorkloadProfileLimits::small_operational(),
                 },
             )
             .expect("connection can prepare another invocation");
@@ -2545,7 +2536,6 @@ mod worker_result_event_tests {
                     memory_max_bytes: 64 * 1024 * 1024,
                     max_processes: 16,
                 },
-                analytical_resource_limits: None,
                 launch: crate::executor_launcher::ExecutorLaunchConfig {
                     executor_path: std::env::current_exe().unwrap(),
                     optimizer_path: std::env::current_exe().unwrap(),
@@ -2554,10 +2544,8 @@ mod worker_result_event_tests {
                     runtime_read_only: Vec::new(),
                     spill_broker: None,
                     max_total_result_bytes: crate::query_abi::MAX_TOTAL_RESULT_BYTES,
-                    analytical_max_total_result_bytes: None,
                     max_sql_index_probe_candidates:
                         crate::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
-                    analytical_max_sql_index_probe_candidates: None,
                     cleanup_timeout: Duration::from_millis(100),
                 },
             },
@@ -2596,7 +2584,7 @@ mod worker_result_event_tests {
     #[test]
     fn idle_gateway_service_periodically_reaps_expired_staging() {
         use crate::supervisor::{
-            ChunkKind, PrepareSubmission, StagingLimits, StagingOwner, StagingStore, WorkloadClass,
+            ChunkKind, PrepareSubmission, StagingLimits, StagingOwner, StagingStore,
         };
         use sha2::{Digest, Sha256};
 
@@ -2648,7 +2636,9 @@ mod worker_result_event_tests {
                     sql_data_bytes: 0,
                     sql_data_sha256: Sha256::digest([]).into(),
                     deadline_ms: 30_000,
-                    workload_class: WorkloadClass::Operational,
+                    workload_profile_id: crate::workload_profile::SMALL_OPERATIONAL_PROFILE_ID,
+                    workload_profile:
+                        crate::workload_profile::WorkloadProfileLimits::small_operational(),
                 },
             )
             .expect("prepare staging reservation");
@@ -2684,7 +2674,6 @@ mod worker_result_event_tests {
                     memory_max_bytes: 64 * 1024 * 1024,
                     max_processes: 16,
                 },
-                analytical_resource_limits: None,
                 launch: crate::executor_launcher::ExecutorLaunchConfig {
                     executor_path: std::env::current_exe().expect("current executable"),
                     optimizer_path: std::env::current_exe().expect("current executable"),
@@ -2693,10 +2682,8 @@ mod worker_result_event_tests {
                     runtime_read_only: Vec::new(),
                     spill_broker: None,
                     max_total_result_bytes: crate::query_abi::MAX_TOTAL_RESULT_BYTES,
-                    analytical_max_total_result_bytes: None,
                     max_sql_index_probe_candidates:
                         crate::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
-                    analytical_max_sql_index_probe_candidates: None,
                     cleanup_timeout: Duration::from_millis(100),
                 },
             },

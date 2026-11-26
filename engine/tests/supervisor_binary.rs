@@ -517,7 +517,7 @@ fn supervisor_and_gateway_binaries_commit_a_confined_submission() {
         let artifact_sha256 = Sha256::digest(&artifact);
         let empty_sha256 = Sha256::digest([]);
         let prepare_payload = format!(
-            "{{\"manifest_version\":1,\"manifest\":\"{}\",\"artifact_bytes\":\"{}\",\"artifact_sha256\":\"{}\",\"parameter_bytes\":\"0\",\"parameter_sha256\":\"{}\",\"sql_data_bytes\":\"0\",\"sql_data_sha256\":\"{}\",\"scope_version\":1,\"requested_scope\":\"{}\",\"deadline_ms\":\"30000\",\"workload_class\":\"operational\",\"sdk_library_mode\":\"repository\"}}",
+            "{{\"manifest_version\":1,\"manifest\":\"{}\",\"artifact_bytes\":\"{}\",\"artifact_sha256\":\"{}\",\"parameter_bytes\":\"0\",\"parameter_sha256\":\"{}\",\"sql_data_bytes\":\"0\",\"sql_data_sha256\":\"{}\",\"scope_version\":1,\"requested_scope\":\"{}\",\"deadline_ms\":\"30000\",\"sdk_library_mode\":\"repository\"}}",
             encode_base64(&manifest),
             artifact.len(),
             encode_hex(&artifact_sha256),

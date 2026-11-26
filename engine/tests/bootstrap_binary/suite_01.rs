@@ -1240,13 +1240,41 @@ pub(super) fn v1_source_validator_checks_legacy_ready_images_without_admitting_t
         &fields,
     )
     .expect("encode v1 database record");
+    let v2_only_keys = {
+        use redb::ReadableTable;
+        let read = database.begin_read().expect("read v2-only keys");
+        let table = read.open_table(CATALOG).expect("open catalog");
+        let mut keys = Vec::new();
+        for entry in table.iter().expect("iter catalog") {
+            let (k, _) = entry.expect("entry");
+            let kb = k.value();
+            if kb.starts_with(&18u16.to_be_bytes())
+                || (kb.starts_with(&2u16.to_be_bytes())
+                    && kb.len() == 19
+                    && kb[3..18] == [0x80; 15]
+                    && (4..=7).contains(&kb[18]))
+                || (kb.starts_with(&15u16.to_be_bytes())
+                    && kb.len() == 39
+                    && kb[37..39] == 6u16.to_be_bytes())
+            {
+                keys.push(kb.to_vec());
+            }
+        }
+        keys
+    };
     {
         let write = database.begin_write().expect("begin fixture downgrade");
-        write
-            .open_table(CATALOG)
-            .expect("open catalog for downgrade")
-            .insert(database_key.as_slice(), database_record.as_slice())
-            .expect("write v1 database record");
+        {
+            let mut catalog = write
+                .open_table(CATALOG)
+                .expect("open catalog for downgrade");
+            for key in &v2_only_keys {
+                catalog.remove(key.as_slice()).expect("remove v2-only key");
+            }
+            catalog
+                .insert(database_key.as_slice(), database_record.as_slice())
+                .expect("write v1 database record");
+        }
         write
             .open_table(ENGINE_META)
             .expect("open metadata for downgrade")

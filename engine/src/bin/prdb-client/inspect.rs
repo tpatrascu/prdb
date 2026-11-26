@@ -717,14 +717,10 @@ pub(super) fn runtime_list(
             prdb_engine::client_submit::RuntimeInvocationState::Aborted => "aborted",
         };
         print!(
-            "{{\"invocation_id\":{},\"transaction_id\":{},\"principal_id\":{},\"workload_class\":{},\"state\":{},\"started_at_us\":{},\"age_us\":{},\"deadline_at_us\":{},\"staged_rows\":{},\"staged_value_bytes\":{},\"snapshot_pin_count\":{},\"cancellation_requested\":{},\"cancellation_reason_code\":{}}}",
+            "{{\"invocation_id\":{},\"transaction_id\":{},\"principal_id\":{},\"state\":{},\"started_at_us\":{},\"age_us\":{},\"deadline_at_us\":{},\"staged_rows\":{},\"staged_value_bytes\":{},\"snapshot_pin_count\":{},\"cancellation_requested\":{},\"cancellation_reason_code\":{}}}",
             json_string(&lower_hex(&invocation.invocation_id)),
             json_string(&lower_hex(&invocation.transaction_id)),
             json_string(&lower_hex(&invocation.principal_id)),
-            json_string(match invocation.workload_class {
-                prdb_engine::client_submit::RuntimeWorkloadClass::Operational => "operational",
-                prdb_engine::client_submit::RuntimeWorkloadClass::Analytical => "analytical",
-            }),
             json_string(state),
             invocation
                 .started_at_us
@@ -808,18 +804,16 @@ pub(super) fn runtime_list(
         print!("],\"blockers_truncated\":{}}}", wait.blockers_truncated);
     }
     print!(
-        "],\"fence_waits_truncated\":{},\"gateway_result_bytes_relayed_total\":{},\"gateway_result_bytes_sent_to_clients_total\":{},\"supervisor_queue\":{{\"pending_submissions\":{},\"starting_submissions\":{},\"started_submissions\":{},\"queued_operational_starts\":{},\"queued_analytical_starts\":{},\"oldest_queued_start_wait_us\":{},\"operational_start_wait_buckets\":{:?},\"analytical_start_wait_buckets\":{:?},\"reserved_submission_bytes\":{}}},",
+        "],\"fence_waits_truncated\":{},\"gateway_result_bytes_relayed_total\":{},\"gateway_result_bytes_sent_to_clients_total\":{},\"supervisor_queue\":{{\"pending_submissions\":{},\"starting_submissions\":{},\"started_submissions\":{},\"queued_starts\":{},\"oldest_queued_start_wait_us\":{},\"start_wait_buckets\":{:?},\"reserved_submission_bytes\":{}}},",
         page.fence_waits_truncated,
         page.gateway_result_bytes_relayed_total,
         page.gateway_result_bytes_sent_to_clients_total,
         page.supervisor_queue.pending_submissions,
         page.supervisor_queue.starting_submissions,
         page.supervisor_queue.started_submissions,
-        page.supervisor_queue.queued_operational_starts,
-        page.supervisor_queue.queued_analytical_starts,
+        page.supervisor_queue.queued_starts,
         page.supervisor_queue.oldest_queued_start_wait_us,
-        page.supervisor_queue.operational_start_wait_buckets,
-        page.supervisor_queue.analytical_start_wait_buckets,
+        page.supervisor_queue.start_wait_buckets,
         page.supervisor_queue.reserved_submission_bytes
     );
     match page.next_cursor {

@@ -18,19 +18,13 @@ pub(super) fn storage_manager_admission_requires_a_login_enabled_catalog_user()
         StorageManagerConfig {
             ddl_fence_timeout: Duration::from_millis(100),
             max_active_invocations: 1,
-            max_active_analytical_invocations: 1,
             max_invocation_age: Duration::from_secs(30),
             max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
             max_authorized_index_range_candidates: 128,
-            max_analytical_authorized_index_range_candidates: None,
             max_authorized_index_range_bytes: 16 * 1024 * 1024,
-            max_analytical_authorized_index_range_bytes: None,
-            max_analytical_invocation_scan_work: None,
             max_planner_estimate_requests:
                 prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
-            max_analytical_planner_estimate_requests: None,
             max_planner_estimate_candidates: prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
-            max_analytical_planner_estimate_candidates: None,
             max_statistics_collection_rows: prdb_engine::statistics::MAX_COMMITTED_POPULATION_ROWS
                 as usize,
             max_token_lifecycle_requests_per_minute: 30,
@@ -103,15 +97,10 @@ pub(super) fn authenticated_role_closure_budget_ignores_unreachable_memberships(
         StorageManagerConfig {
             max_invocation_scan_work: 1,
             max_authorized_index_range_candidates: 128,
-            max_analytical_authorized_index_range_candidates: None,
             max_authorized_index_range_bytes: 16 * 1024 * 1024,
-            max_analytical_authorized_index_range_bytes: None,
-            max_analytical_invocation_scan_work: None,
             max_planner_estimate_requests:
                 prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
-            max_analytical_planner_estimate_requests: None,
             max_planner_estimate_candidates: prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
-            max_analytical_planner_estimate_candidates: None,
             max_statistics_collection_rows: prdb_engine::statistics::MAX_COMMITTED_POPULATION_ROWS
                 as usize,
             ..StorageManagerConfig::default()
@@ -156,15 +145,10 @@ pub(super) fn catalog_grant_loading_budget_ignores_unrelated_grants()
         StorageManagerConfig {
             max_invocation_scan_work: 1,
             max_authorized_index_range_candidates: 128,
-            max_analytical_authorized_index_range_candidates: None,
             max_authorized_index_range_bytes: 16 * 1024 * 1024,
-            max_analytical_authorized_index_range_bytes: None,
-            max_analytical_invocation_scan_work: None,
             max_planner_estimate_requests:
                 prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
-            max_analytical_planner_estimate_requests: None,
             max_planner_estimate_candidates: prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
-            max_analytical_planner_estimate_candidates: None,
             max_statistics_collection_rows: prdb_engine::statistics::MAX_COMMITTED_POPULATION_ROWS
                 as usize,
             ..StorageManagerConfig::default()
@@ -209,20 +193,14 @@ pub(super) fn storage_manager_bounds_active_invocation_snapshots_across_clones()
             StorageManagerConfig {
                 ddl_fence_timeout: Duration::from_millis(100),
                 max_active_invocations: 0,
-                max_active_analytical_invocations: 1,
                 max_invocation_age: Duration::from_secs(30),
                 max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
                 max_authorized_index_range_candidates: 128,
-                max_analytical_authorized_index_range_candidates: None,
                 max_authorized_index_range_bytes: 16 * 1024 * 1024,
-                max_analytical_authorized_index_range_bytes: None,
-                max_analytical_invocation_scan_work: None,
                 max_planner_estimate_requests:
                     prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
-                max_analytical_planner_estimate_requests: None,
                 max_planner_estimate_candidates:
                     prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
-                max_analytical_planner_estimate_candidates: None,
                 max_statistics_collection_rows:
                     prdb_engine::statistics::MAX_COMMITTED_POPULATION_ROWS as usize,
                 max_token_lifecycle_requests_per_minute: 30,
@@ -240,20 +218,14 @@ pub(super) fn storage_manager_bounds_active_invocation_snapshots_across_clones()
             StorageManagerConfig {
                 ddl_fence_timeout: Duration::from_millis(100),
                 max_active_invocations: 1,
-                max_active_analytical_invocations: 1,
                 max_invocation_age: Duration::ZERO,
                 max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
                 max_authorized_index_range_candidates: 128,
-                max_analytical_authorized_index_range_candidates: None,
                 max_authorized_index_range_bytes: 16 * 1024 * 1024,
-                max_analytical_authorized_index_range_bytes: None,
-                max_analytical_invocation_scan_work: None,
                 max_planner_estimate_requests:
                     prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
-                max_analytical_planner_estimate_requests: None,
                 max_planner_estimate_candidates:
                     prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
-                max_analytical_planner_estimate_candidates: None,
                 max_statistics_collection_rows:
                     prdb_engine::statistics::MAX_COMMITTED_POPULATION_ROWS as usize,
                 max_token_lifecycle_requests_per_minute: 30,
@@ -271,20 +243,14 @@ pub(super) fn storage_manager_bounds_active_invocation_snapshots_across_clones()
             StorageManagerConfig {
                 ddl_fence_timeout: Duration::from_millis(100),
                 max_active_invocations: 1,
-                max_active_analytical_invocations: 1,
                 max_invocation_age: Duration::from_secs(30),
                 max_invocation_scan_work: 0,
                 max_authorized_index_range_candidates: 128,
-                max_analytical_authorized_index_range_candidates: None,
                 max_authorized_index_range_bytes: 16 * 1024 * 1024,
-                max_analytical_authorized_index_range_bytes: None,
-                max_analytical_invocation_scan_work: None,
                 max_planner_estimate_requests:
                     prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
-                max_analytical_planner_estimate_requests: None,
                 max_planner_estimate_candidates:
                     prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
-                max_analytical_planner_estimate_candidates: None,
                 max_statistics_collection_rows:
                     prdb_engine::statistics::MAX_COMMITTED_POPULATION_ROWS as usize,
                 max_token_lifecycle_requests_per_minute: 30,
@@ -313,21 +279,6 @@ pub(super) fn storage_manager_bounds_active_invocation_snapshots_across_clones()
         StorageManager::with_config(
             &database,
             StorageManagerConfig {
-                max_analytical_authorized_index_range_candidates: Some(0),
-                max_authorized_index_range_bytes: 16 * 1024 * 1024,
-                max_analytical_authorized_index_range_bytes: None,
-                ..StorageManagerConfig::default()
-            },
-        )
-        .err(),
-        Some(StorageManagerInitError::Config(
-            prdb_engine::storage_manager::StorageManagerConfigError::ZeroAuthorizedIndexRangeCandidateLimit,
-        ))
-    );
-    assert_eq!(
-        StorageManager::with_config(
-            &database,
-            StorageManagerConfig {
                 max_authorized_index_range_candidates:
                     prdb_engine::query_abi::MAX_SQL_INDEX_PROBE_CANDIDATES as usize + 1,
                 ..StorageManagerConfig::default()
@@ -344,51 +295,14 @@ pub(super) fn storage_manager_bounds_active_invocation_snapshots_across_clones()
             StorageManagerConfig {
                 ddl_fence_timeout: Duration::from_millis(100),
                 max_active_invocations: 1,
-                max_active_analytical_invocations: 1,
                 max_invocation_age: Duration::from_secs(30),
                 max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
                 max_authorized_index_range_candidates: 128,
-                max_analytical_authorized_index_range_candidates: None,
                 max_authorized_index_range_bytes: 16 * 1024 * 1024,
-                max_analytical_authorized_index_range_bytes: None,
-                max_analytical_invocation_scan_work: Some(0),
                 max_planner_estimate_requests:
                     prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
-                max_analytical_planner_estimate_requests: None,
                 max_planner_estimate_candidates:
                     prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
-                max_analytical_planner_estimate_candidates: None,
-                max_statistics_collection_rows:
-                    prdb_engine::statistics::MAX_COMMITTED_POPULATION_ROWS as usize,
-                max_token_lifecycle_requests_per_minute: 30,
-                max_admin_cancellation_requests_per_minute: 30,
-            },
-        )
-        .err(),
-        Some(StorageManagerInitError::Config(
-            prdb_engine::storage_manager::StorageManagerConfigError::ZeroInvocationScanWorkLimit,
-        ))
-    );
-    assert_eq!(
-        StorageManager::with_config(
-            &database,
-            StorageManagerConfig {
-                ddl_fence_timeout: Duration::from_millis(100),
-                max_active_invocations: 1,
-                max_active_analytical_invocations: 1,
-                max_invocation_age: Duration::from_secs(30),
-                max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
-                max_authorized_index_range_candidates: 128,
-                max_analytical_authorized_index_range_candidates: None,
-                max_authorized_index_range_bytes: 16 * 1024 * 1024,
-                max_analytical_authorized_index_range_bytes: None,
-                max_analytical_invocation_scan_work: None,
-                max_planner_estimate_requests:
-                    prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
-                max_analytical_planner_estimate_requests: None,
-                max_planner_estimate_candidates:
-                    prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
-                max_analytical_planner_estimate_candidates: None,
                 max_statistics_collection_rows:
                     prdb_engine::statistics::MAX_COMMITTED_POPULATION_ROWS as usize,
                 max_token_lifecycle_requests_per_minute: 0,
@@ -406,19 +320,13 @@ pub(super) fn storage_manager_bounds_active_invocation_snapshots_across_clones()
             StorageManagerConfig {
                 ddl_fence_timeout: Duration::from_millis(100),
                 max_active_invocations: 1,
-            max_active_analytical_invocations: 1,
                 max_invocation_age: Duration::from_secs(30),
                 max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
                 max_authorized_index_range_candidates: 128,
-                max_analytical_authorized_index_range_candidates: None,
                 max_authorized_index_range_bytes: 16 * 1024 * 1024,
-                max_analytical_authorized_index_range_bytes: None,
-                max_analytical_invocation_scan_work: None,
                 max_planner_estimate_requests: prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
-                max_analytical_planner_estimate_requests: None,
-            max_planner_estimate_candidates: prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
-            max_analytical_planner_estimate_candidates: None,
-            max_statistics_collection_rows: prdb_engine::statistics::MAX_COMMITTED_POPULATION_ROWS as usize,
+                max_planner_estimate_candidates: prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
+                max_statistics_collection_rows: prdb_engine::statistics::MAX_COMMITTED_POPULATION_ROWS as usize,
                 max_token_lifecycle_requests_per_minute: 30,
                 max_admin_cancellation_requests_per_minute: 0,
             },
@@ -433,19 +341,13 @@ pub(super) fn storage_manager_bounds_active_invocation_snapshots_across_clones()
         StorageManagerConfig {
             ddl_fence_timeout: Duration::from_millis(100),
             max_active_invocations: 1,
-            max_active_analytical_invocations: 1,
             max_invocation_age: Duration::from_secs(30),
             max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
             max_authorized_index_range_candidates: 512,
-            max_analytical_authorized_index_range_candidates: Some(2_048),
             max_authorized_index_range_bytes: 16 * 1024 * 1024,
-            max_analytical_authorized_index_range_bytes: None,
-            max_analytical_invocation_scan_work: None,
             max_planner_estimate_requests:
                 prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
-            max_analytical_planner_estimate_requests: None,
             max_planner_estimate_candidates: prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
-            max_analytical_planner_estimate_candidates: None,
             max_statistics_collection_rows: prdb_engine::statistics::MAX_COMMITTED_POPULATION_ROWS
                 as usize,
             max_token_lifecycle_requests_per_minute: 30,
@@ -454,17 +356,17 @@ pub(super) fn storage_manager_bounds_active_invocation_snapshots_across_clones()
     )?;
     let independent_handle = StorageManager::new(&database, Duration::from_millis(100))?;
     assert_eq!(independent_handle.max_active_invocations(), 1);
+    let op_profile = prdb_engine::workload_profile::WorkloadProfileLimits::small_operational();
+    let large_profile = prdb_engine::workload_profile::WorkloadProfileLimits::large_analytical();
     assert_eq!(
-        storage.max_authorized_index_range_candidates_for(
-            prdb_engine::supervisor::WorkloadClass::Operational
-        ),
-        512
+        storage.max_authorized_index_range_candidates_for_profile(&op_profile),
+        usize::try_from(op_profile.max_sql_index_probe_candidates)
+            .unwrap()
+            .min(512)
     );
     assert_eq!(
-        storage.max_authorized_index_range_candidates_for(
-            prdb_engine::supervisor::WorkloadClass::Analytical
-        ),
-        2_048
+        storage.max_authorized_index_range_candidates_for_profile(&large_profile),
+        512
     );
     let mut first = storage.begin_invocation(id(192), id(9), 9_999, 2, 64)?;
     let cloned_storage = storage.clone();
@@ -493,19 +395,13 @@ pub(super) fn storage_manager_expires_idle_invocations_and_releases_the_snapshot
         StorageManagerConfig {
             ddl_fence_timeout: Duration::from_millis(100),
             max_active_invocations: 1,
-            max_active_analytical_invocations: 1,
             max_invocation_age: Duration::from_millis(1),
             max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
             max_authorized_index_range_candidates: 128,
-            max_analytical_authorized_index_range_candidates: None,
             max_authorized_index_range_bytes: 16 * 1024 * 1024,
-            max_analytical_authorized_index_range_bytes: None,
-            max_analytical_invocation_scan_work: None,
             max_planner_estimate_requests:
                 prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
-            max_analytical_planner_estimate_requests: None,
             max_planner_estimate_candidates: prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
-            max_analytical_planner_estimate_candidates: None,
             max_statistics_collection_rows: prdb_engine::statistics::MAX_COMMITTED_POPULATION_ROWS
                 as usize,
             max_token_lifecycle_requests_per_minute: 30,

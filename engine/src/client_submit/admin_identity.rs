@@ -10,12 +10,52 @@ impl AdminClient {
         self.create_identity("users.create", name, "user_id")
     }
 
+    /// Create a login identity with an explicit workload profile.
+    pub fn create_user_with_profile(
+        &mut self,
+        name: &str,
+        workload_profile: &str,
+    ) -> Result<AdminIdentityResult, ClientSubmitError> {
+        validate_admin_name(name)?;
+        validate_admin_name(workload_profile)?;
+        let (result, identity_id) = self.execute_admin_operation(
+            "users.create",
+            format!("{{\"name\":\"{name}\",\"workload_profile\":\"{workload_profile}\"}}"),
+            Some("user_id"),
+        )?;
+        Ok(AdminIdentityResult {
+            operation_id: result.operation_id,
+            identity_id: identity_id.ok_or(ClientSubmitError::InvalidResponse)?,
+            commit_sequence: result.commit_sequence,
+        })
+    }
+
     /// Create a user that cannot authenticate until a later LOGIN change.
     pub fn create_user_no_login(
         &mut self,
         name: &str,
     ) -> Result<AdminIdentityResult, ClientSubmitError> {
         self.create_identity("users.create_no_login", name, "user_id")
+    }
+
+    /// Create a NOLOGIN user with an explicit workload profile.
+    pub fn create_user_no_login_with_profile(
+        &mut self,
+        name: &str,
+        workload_profile: &str,
+    ) -> Result<AdminIdentityResult, ClientSubmitError> {
+        validate_admin_name(name)?;
+        validate_admin_name(workload_profile)?;
+        let (result, identity_id) = self.execute_admin_operation(
+            "users.create_no_login",
+            format!("{{\"name\":\"{name}\",\"workload_profile\":\"{workload_profile}\"}}"),
+            Some("user_id"),
+        )?;
+        Ok(AdminIdentityResult {
+            operation_id: result.operation_id,
+            identity_id: identity_id.ok_or(ClientSubmitError::InvalidResponse)?,
+            commit_sequence: result.commit_sequence,
+        })
     }
 
     /// Create a role identity.

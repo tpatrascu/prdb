@@ -1079,7 +1079,7 @@ pub(super) fn table_drop_ddl_authority_guards(
                 .try_into()
                 .map_err(|_| CommitError::InvalidCatalog)?;
             let kind = u16::from_be_bytes([index_key[33], index_key[34]]);
-            if !matches!(kind, 1..=5) {
+            if !matches!(kind, 1..=6) {
                 return Err(CommitError::InvalidCatalog);
             }
             let mut catalog_key = 15u16.to_be_bytes().to_vec();

@@ -209,11 +209,12 @@ static INDEX_FIELDS: [FieldDefinition; 10] = [
     field(9, WireType::U32, true),
     field(10, WireType::U64, true),
 ];
-static PRINCIPAL_FIELDS: [FieldDefinition; 4] = [
+static PRINCIPAL_FIELDS: [FieldDefinition; 5] = [
     field(1, WireType::U16, true),
     field(2, WireType::Text, true),
     field(3, WireType::Bool, true),
     field(4, WireType::U64, true),
+    field(5, WireType::Id, false),
 ];
 static MEMBERSHIP_FIELDS: [FieldDefinition; 2] =
     [field(1, WireType::Id, true), field(2, WireType::U64, true)];
@@ -241,6 +242,13 @@ static VERIFIER_FIELDS: [FieldDefinition; 10] = [
     field(9, WireType::Text, true),
     field(10, WireType::U64, true),
 ];
+static WORKLOAD_PROFILE_FIELDS: [FieldDefinition; 5] = [
+    field(1, WireType::Text, true),
+    field(2, WireType::U64, true),
+    field(3, WireType::Bool, true),
+    field(4, WireType::U32, true),
+    field(5, WireType::Bytes, true),
+];
 
 /// Return the v1 field registry for one catalog family.
 pub fn family_schema(family_code: u16) -> Option<FamilySchema<'static>> {
@@ -261,6 +269,7 @@ pub fn family_schema(family_code: u16) -> Option<FamilySchema<'static>> {
         14 | 15 => &NO_FIELDS,
         16 => &VERIFIER_FIELDS,
         17 => &NO_FIELDS,
+        18 => &WORKLOAD_PROFILE_FIELDS,
         _ => return None,
     };
     Some(FamilySchema {
@@ -288,7 +297,7 @@ impl std::fmt::Display for InvalidCatalogRecord {
 impl std::error::Error for InvalidCatalogRecord {}
 
 fn validate_schema(schema: &FamilySchema<'_>) -> Result<(), InvalidCatalogRecord> {
-    if !(1..=17).contains(&schema.family_code) || schema.fields.len() > MAX_CATALOG_FIELDS {
+    if !(1..=18).contains(&schema.family_code) || schema.fields.len() > MAX_CATALOG_FIELDS {
         return Err(InvalidCatalogRecord);
     }
     let mut previous = 0;
@@ -309,7 +318,7 @@ fn validate_key(family_code: u16, logical_key: &[u8]) -> Result<(), InvalidCatal
     let valid_id = |bytes: &[u8]| bytes.len() == 17 && bytes[0] == 1 && bytes[1..] != [0; 16];
     let valid_u16 = |bytes: &[u8]| bytes.len() == 3 && bytes[0] == 1;
     let valid = match family_code {
-        1..=10 | 13 | 16 | 17 => valid_id(components),
+        1..=10 | 13 | 16 | 17 | 18 => valid_id(components),
         11 => components.len() == 34 && valid_id(&components[..17]) && valid_id(&components[17..]),
         12 => {
             components.len() == 57
@@ -335,7 +344,7 @@ fn validate_key(family_code: u16, logical_key: &[u8]) -> Result<(), InvalidCatal
                 && valid_id(&components[..17])
                 && valid_id(&components[17..34])
                 && valid_u16(&components[34..])
-                && (1..=5).contains(&u16::from_be_bytes([components[35], components[36]]))
+                && (1..=6).contains(&u16::from_be_bytes([components[35], components[36]]))
         }
         _ => false,
     };

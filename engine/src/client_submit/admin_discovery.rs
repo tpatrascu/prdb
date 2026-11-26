@@ -576,21 +576,12 @@ impl AdminClient {
             let ResponseValue::Object(mut row) = value else {
                 return Err(ClientSubmitError::InvalidResponse);
             };
-            if row.len() != 13 {
+            if row.len() != 12 {
                 return Err(ClientSubmitError::InvalidResponse);
             }
             let invocation_id = response_id(&row, "invocation_id")?;
             let transaction_id = response_id(&row, "transaction_id")?;
             let principal_id = response_id(&row, "principal_id")?;
-            let workload_class = match row.remove("workload_class") {
-                Some(ResponseValue::String(value)) if value == "operational" => {
-                    RuntimeWorkloadClass::Operational
-                }
-                Some(ResponseValue::String(value)) if value == "analytical" => {
-                    RuntimeWorkloadClass::Analytical
-                }
-                _ => return Err(ClientSubmitError::InvalidResponse),
-            };
             let state = match row.remove("state") {
                 Some(ResponseValue::String(value)) if value == "active" => {
                     RuntimeInvocationState::Active
@@ -647,7 +638,6 @@ impl AdminClient {
                 invocation_id,
                 transaction_id,
                 principal_id,
-                workload_class,
                 state,
                 started_at_us,
                 age_us,
@@ -723,7 +713,7 @@ impl AdminClient {
             response_u64(&mut fields, "gateway_result_bytes_sent_to_clients_total")?
                 .ok_or(ClientSubmitError::InvalidResponse)?;
         let mut supervisor_queue = match fields.remove("supervisor_queue") {
-            Some(ResponseValue::Object(fields)) if fields.len() == 9 => fields,
+            Some(ResponseValue::Object(fields)) if fields.len() == 7 => fields,
             _ => return Err(ClientSubmitError::InvalidResponse),
         };
         let supervisor_queue = crate::supervisor::StagingRuntimeUsage {
@@ -733,31 +723,14 @@ impl AdminClient {
                 .ok_or(ClientSubmitError::InvalidResponse)?,
             started_submissions: response_u64(&mut supervisor_queue, "started_submissions")?
                 .ok_or(ClientSubmitError::InvalidResponse)?,
-            queued_operational_starts: response_u64(
-                &mut supervisor_queue,
-                "queued_operational_starts",
-            )?
-            .ok_or(ClientSubmitError::InvalidResponse)?,
-            queued_analytical_starts: response_u64(
-                &mut supervisor_queue,
-                "queued_analytical_starts",
-            )?
-            .ok_or(ClientSubmitError::InvalidResponse)?,
+            queued_starts: response_u64(&mut supervisor_queue, "queued_starts")?
+                .ok_or(ClientSubmitError::InvalidResponse)?,
             oldest_queued_start_wait_us: response_u64(
                 &mut supervisor_queue,
                 "oldest_queued_start_wait_us",
             )?
             .ok_or(ClientSubmitError::InvalidResponse)?,
-            operational_start_wait_buckets: response_u64_array(
-                &mut supervisor_queue,
-                "operational_start_wait_buckets",
-                6,
-            )?,
-            analytical_start_wait_buckets: response_u64_array(
-                &mut supervisor_queue,
-                "analytical_start_wait_buckets",
-                6,
-            )?,
+            start_wait_buckets: response_u64_array(&mut supervisor_queue, "start_wait_buckets", 6)?,
             reserved_submission_bytes: response_u64(
                 &mut supervisor_queue,
                 "reserved_submission_bytes",

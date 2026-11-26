@@ -735,7 +735,7 @@ pub fn run_sandboxed_v3_sql_error_fixture(
     };
     use prdb_engine::supervisor::{
         ChunkKind, PrepareSubmission, StagingLimits, StagingStore, SubmissionMetadata,
-        SubmissionMetadataValidator, WorkloadClass,
+        SubmissionMetadataValidator,
     };
     use prdb_engine::supervisor_ipc::{
         GatewayAdmissionConfig, GatewayExecutorConfig, GatewayTerminalDecision,
@@ -916,7 +916,9 @@ pub fn run_sandboxed_v3_sql_error_fixture(
             sql_data_bytes: 0,
             sql_data_sha256: Sha256::digest([]).into(),
             deadline_ms: 30_000,
-            workload_class: WorkloadClass::Operational,
+            workload_profile_id: prdb_engine::workload_profile::SMALL_OPERATIONAL_PROFILE_ID,
+            workload_profile:
+                prdb_engine::workload_profile::WorkloadProfileLimits::small_operational(),
         },
     )?;
     let mut artifact_offset = 0;
@@ -949,7 +951,6 @@ pub fn run_sandboxed_v3_sql_error_fixture(
             memory_max_bytes: 256 * 1024 * 1024,
             max_processes: 32,
         },
-        analytical_resource_limits: None,
         launch: prdb_engine::executor_launcher::ExecutorLaunchConfig {
             executor_path: PathBuf::from(env!("CARGO_BIN_EXE_prdb-executor")),
             optimizer_path: PathBuf::from(env!("CARGO_BIN_EXE_prdb-optimizer")),
@@ -958,10 +959,8 @@ pub fn run_sandboxed_v3_sql_error_fixture(
             runtime_read_only: required_paths("PRDB_TEST_RUNTIME_READ_ONLY")?,
             spill_broker: None,
             max_total_result_bytes: prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
-            analytical_max_total_result_bytes: None,
             max_sql_index_probe_candidates:
                 prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
-            analytical_max_sql_index_probe_candidates: None,
             cleanup_timeout: Duration::from_secs(2),
         },
     };
@@ -1144,7 +1143,9 @@ pub fn run_optimizer_predicate_estimate_termination_case(
             max_rows: 2,
             max_bytes: 64,
             deadline: Some(worker_deadline),
-            workload_class: prdb_engine::supervisor::WorkloadClass::Analytical,
+            workload_profile: Some(
+                prdb_engine::workload_profile::WorkloadProfileLimits::large_analytical(),
+            ),
         },
         &secret,
     )?;

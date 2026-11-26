@@ -4,7 +4,6 @@ use prdb_engine::client_protocol::ClientCredentials;
 use prdb_engine::client_submit::MetadataClient;
 use prdb_engine::client_submit::{ClientResultEvent, SubmissionClient, TerminalOutcome};
 use prdb_engine::submission_scope::RequestedScopeBuilder;
-use prdb_engine::supervisor::WorkloadClass;
 use prdb_engine::tuple::ScalarType;
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -301,12 +300,7 @@ pub(super) fn submit(
         .map(|value| parse_number(value, "--deadline-ms"))
         .transpose()?
         .unwrap_or(30_000u64);
-    let workload = match fields.remove("--workload") {
-        None => WorkloadClass::Operational,
-        Some(value) if value == "operational" => WorkloadClass::Operational,
-        Some(value) if value == "analytical" => WorkloadClass::Analytical,
-        Some(_) => return Err("--workload must be operational or analytical".to_owned()),
-    };
+    let _ = fields.remove("--workload");
     reject_unknown(fields)?;
 
     let mut parameters = read_parameters(parameters_path.as_ref())?;
@@ -321,7 +315,6 @@ pub(super) fn submit(
         &mut parameters,
         sql_data.as_deref(),
         deadline_ms,
-        workload,
         false,
     )
 }
@@ -335,7 +328,6 @@ pub(super) fn submit_package_and_stream_with_profile(
     parameters: &mut [u8],
     sql_data: Option<&[u8]>,
     deadline_ms: u64,
-    workload: WorkloadClass,
     _repository_profile: bool,
 ) -> Result<(), String> {
     let result = (|| {
@@ -347,14 +339,10 @@ pub(super) fn submit_package_and_stream_with_profile(
         )
         .map_err(|error| error.to_string())?;
         let invocation_id = match sql_data {
-            Some(sql_data) => client.upload_and_seal_with_sql_data(
-                package,
-                parameters,
-                sql_data,
-                deadline_ms,
-                workload,
-            ),
-            None => client.upload_and_seal(package, parameters, deadline_ms, workload),
+            Some(sql_data) => {
+                client.upload_and_seal_with_sql_data(package, parameters, sql_data, deadline_ms)
+            }
+            None => client.upload_and_seal(package, parameters, deadline_ms),
         }
         .map_err(|error| error.to_string())?;
         eprintln!("prepared invocation {}", lower_hex(&invocation_id));

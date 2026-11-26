@@ -55,6 +55,7 @@ mod worker {
         spill_fd: i32,
         max_total_result_bytes: u64,
         max_sql_index_probe_candidates: u32,
+        profile_fd: Option<i32>,
     }
 
     pub fn main() {
@@ -88,7 +89,7 @@ mod worker {
     }
 
     fn parse_args(values: &[std::ffi::OsString]) -> Result<WorkerArgs, String> {
-        if values.len() != 20
+        if (values.len() != 20 && values.len() != 22)
             || values[0] != "--library"
             || values[2] != "--parameters-fd"
             || values[4] != "--sql-data-fd"
@@ -99,8 +100,9 @@ mod worker {
             || values[14] != "--spill-fd"
             || values[16] != "--max-total-result-bytes"
             || values[18] != "--max-sql-index-probe-candidates"
+            || (values.len() == 22 && values[20] != "--profile-fd")
         {
-            return Err("usage: prdb-executor --library ABSOLUTE_PATH --parameters-fd FD --sql-data-fd FD --planner-fd FD --executor-fd FD --optimizer-fd FD --result-fd FD --spill-fd FD --max-total-result-bytes N --max-sql-index-probe-candidates N (or --self-check)".to_owned());
+            return Err("usage: prdb-executor --library ABSOLUTE_PATH --parameters-fd FD --sql-data-fd FD --planner-fd FD --executor-fd FD --optimizer-fd FD --result-fd FD --spill-fd FD --max-total-result-bytes N --max-sql-index-probe-candidates N [--profile-fd FD] (or --self-check)".to_owned());
         }
         let library = PathBuf::from(&values[1]);
         if !library.is_absolute() {
@@ -170,6 +172,19 @@ mod worker {
         {
             return Err("worker descriptors must be greater than stderr".to_owned());
         }
+        let profile_fd = if values.len() == 22 {
+            let fd = values[21]
+                .to_str()
+                .ok_or_else(|| "profile descriptor is not UTF-8".to_owned())?
+                .parse::<i32>()
+                .map_err(|_| "invalid profile descriptor".to_owned())?;
+            if fd < 3 {
+                return Err("worker descriptors must be greater than stderr".to_owned());
+            }
+            Some(fd)
+        } else {
+            None
+        };
         let mut descriptors = vec![
             parameters_fd,
             sql_data_fd,
@@ -180,6 +195,9 @@ mod worker {
         ];
         if spill_fd >= 3 {
             descriptors.push(spill_fd);
+        }
+        if let Some(fd) = profile_fd {
+            descriptors.push(fd);
         }
         if descriptors
             .iter()
@@ -199,6 +217,7 @@ mod worker {
             spill_fd,
             max_total_result_bytes,
             max_sql_index_probe_candidates,
+            profile_fd,
         })
     }
 
@@ -313,15 +332,30 @@ mod worker {
         // this symbol as QueryMainV1. A bad function pointer terminates worker.
         let entry: QueryMainV1 = unsafe { std::mem::transmute(entry_address) };
 
+        let profile = if let Some(fd) = args.profile_fd {
+            let bytes = read_bounded_fd(
+                fd,
+                prdb_engine::workload_profile::WORKLOAD_PROFILE_PAYLOAD_BYTES as u64,
+                "workload profile exceeds limit",
+            )?;
+            prdb_engine::workload_profile::WorkloadProfileLimits::decode(&bytes).map_err(|e| {
+                io::Error::new(io::ErrorKind::InvalidData, format!("invalid profile: {e}"))
+            })?
+        } else {
+            let mut p = prdb_engine::workload_profile::WorkloadProfileLimits::small_operational();
+            p.max_total_result_bytes = args.max_total_result_bytes;
+            p.max_sql_index_probe_candidates = args.max_sql_index_probe_candidates;
+            p
+        };
         let parameters = read_bounded_fd(
             args.parameters_fd,
-            prdb_engine::query_abi::MAX_PARAMETER_BYTES,
-            "invocation parameters exceed the ABI limit",
+            profile.max_parameter_bytes,
+            "invocation parameters exceed the profile limit",
         )?;
         let sql_data = read_bounded_fd(
             args.sql_data_fd,
-            prdb_engine::query_abi::MAX_SQL_DATA_BYTES,
-            "invocation SQL data exceeds the ABI limit",
+            profile.max_sql_data_bytes,
+            "invocation SQL data exceeds the profile limit",
         )?;
         let invocation = BorrowedInvocationV1::new(&parameters, &sql_data).map_err(|error| {
             io::Error::new(
@@ -336,8 +370,7 @@ mod worker {
                 args.optimizer_fd,
                 args.result_fd,
                 (args.spill_fd >= 3).then_some(args.spill_fd),
-                args.max_total_result_bytes,
-                args.max_sql_index_probe_candidates,
+                profile,
             )
         };
         // Keep callback state alive until the worker's immediate `_exit`, even
@@ -383,24 +416,36 @@ mod worker {
         role: ServiceRole,
         stream: Mutex<UnixStream>,
         next_request_id: AtomicU64,
+        max_requests: u64,
+        max_request_bytes: usize,
+        max_response_bytes: usize,
     }
 
     impl IpcChannel {
-        unsafe fn from_raw_fd(fd: i32, role: ServiceRole) -> Self {
+        unsafe fn from_raw_fd(
+            fd: i32,
+            role: ServiceRole,
+            max_requests: u64,
+            max_request_bytes: usize,
+            max_response_bytes: usize,
+        ) -> Self {
             // SAFETY: caller transfers one unique, open Unix socket descriptor.
             let stream = unsafe { UnixStream::from_raw_fd(fd) };
             Self {
                 role,
                 stream: Mutex::new(stream),
                 next_request_id: AtomicU64::new(1),
+                max_requests,
+                max_request_bytes,
+                max_response_bytes,
             }
         }
 
         fn request(&self, operation_code: u16, payload: Vec<u8>) -> io::Result<Vec<u8>> {
-            if payload.len() > MAX_IPC_REQUEST_BYTES as usize {
+            if payload.len() > self.max_request_bytes {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "query IPC request exceeds the ABI limit",
+                    "query IPC request exceeds the profile limit",
                 ));
             }
             let operation = Operation::from_code(operation_code).map_err(|error| {
@@ -411,8 +456,17 @@ mod worker {
             })?;
             let request_id = self
                 .next_request_id
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-                .map_err(|_| io::Error::other("query IPC request ID exhausted"))?;
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| {
+                    (id <= self.max_requests)
+                        .then(|| id.checked_add(1))
+                        .flatten()
+                })
+                .map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "query IPC request count exceeds profile limit",
+                    )
+                })?;
             let mut stream = self
                 .stream
                 .lock()
@@ -435,10 +489,10 @@ mod worker {
                     "query IPC response does not match its request",
                 ));
             }
-            if response.payload.len() > MAX_IPC_REQUEST_BYTES as usize {
+            if response.payload.len() > self.max_response_bytes {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "query IPC response exceeds the ABI limit",
+                    "query IPC response exceeds the profile limit",
                 ));
             }
             Ok(response.payload)
@@ -453,8 +507,7 @@ mod worker {
         spill: Option<Mutex<UnixStream>>,
         next_spill_request_id: AtomicU64,
         total_result_bytes: AtomicU64,
-        max_total_result_bytes: u64,
-        max_sql_index_probe_candidates: u32,
+        profile: prdb_engine::workload_profile::WorkloadProfileLimits,
         statement_failed: AtomicBool,
     }
 
@@ -465,17 +518,43 @@ mod worker {
             optimizer_fd: i32,
             result_fd: i32,
             spill_fd: Option<i32>,
-            max_total_result_bytes: u64,
-            max_sql_index_probe_candidates: u32,
+            profile: prdb_engine::workload_profile::WorkloadProfileLimits,
         ) -> Self {
+            let max_req_bytes =
+                (profile.max_ipc_request_bytes as usize).min(MAX_IPC_REQUEST_BYTES as usize);
+            let max_resp_bytes =
+                (profile.max_ipc_response_bytes as usize).min(MAX_IPC_RESPONSE_BYTES as usize);
             // SAFETY: the trusted launcher passes distinct, open socket fds and
             // transfers ownership to this invocation context. Spill is optional.
-            let planner = unsafe { IpcChannel::from_raw_fd(planner_fd, ServiceRole::Planner) };
+            let planner = unsafe {
+                IpcChannel::from_raw_fd(
+                    planner_fd,
+                    ServiceRole::Planner,
+                    profile.max_planner_requests as u64,
+                    max_req_bytes,
+                    max_resp_bytes,
+                )
+            };
             // SAFETY: same descriptor ownership contract as the planner fd.
-            let executor = unsafe { IpcChannel::from_raw_fd(executor_fd, ServiceRole::Executor) };
+            let executor = unsafe {
+                IpcChannel::from_raw_fd(
+                    executor_fd,
+                    ServiceRole::Executor,
+                    profile.max_executor_requests as u64,
+                    max_req_bytes,
+                    max_resp_bytes,
+                )
+            };
             // SAFETY: the optimizer submission fd is a distinct connected Unix stream.
-            let optimizer =
-                unsafe { IpcChannel::from_raw_fd(optimizer_fd, ServiceRole::OptimizerSubmission) };
+            let optimizer = unsafe {
+                IpcChannel::from_raw_fd(
+                    optimizer_fd,
+                    ServiceRole::OptimizerSubmission,
+                    profile.max_optimizer_requests as u64,
+                    max_req_bytes,
+                    max_resp_bytes,
+                )
+            };
             // SAFETY: the result fd is a distinct connected Unix stream.
             let result = unsafe { UnixStream::from_raw_fd(result_fd) };
             // SAFETY: the launcher transfers this dedicated worker channel.
@@ -491,8 +570,7 @@ mod worker {
                 spill,
                 next_spill_request_id: AtomicU64::new(1),
                 total_result_bytes: AtomicU64::new(0),
-                max_total_result_bytes,
-                max_sql_index_probe_candidates,
+                profile,
                 statement_failed: AtomicBool::new(false),
             }
         }
@@ -526,12 +604,26 @@ mod worker {
             }
             let context = &*context.cast::<CallbackContext>();
             *response_len = 0;
+            let max_req = usize::try_from(
+                context
+                    .profile
+                    .max_ipc_request_bytes
+                    .min(MAX_IPC_REQUEST_BYTES),
+            )
+            .unwrap_or(usize::MAX);
+            let max_resp = usize::try_from(
+                context
+                    .profile
+                    .max_ipc_response_bytes
+                    .min(MAX_IPC_RESPONSE_BYTES),
+            )
+            .unwrap_or(usize::MAX);
             let request_len = match usize::try_from(request_len) {
-                Ok(value) if value <= MAX_IPC_REQUEST_BYTES as usize => value,
+                Ok(value) if value <= max_req => value,
                 _ => return spill_callback_failure(context, CALLBACK_LIMIT_EXCEEDED),
             };
             let response_capacity = match usize::try_from(response_capacity) {
-                Ok(value) if value <= MAX_IPC_RESPONSE_BYTES as usize => value,
+                Ok(value) if value <= max_resp => value,
                 _ => return spill_callback_failure(context, CALLBACK_LIMIT_EXCEEDED),
             };
             if (request_len > 0 && request.is_null())
@@ -644,24 +736,69 @@ mod worker {
     ) -> i32 {
         if operation == prdb_engine::query_abi::QUERY_HOST_OP_GET_WORKLOAD_BUDGETS {
             return std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+                const WIRE_BYTES: usize = 164;
                 if context.is_null() || response_len.is_null() || request_len != 0 {
                     return CALLBACK_INVALID_ARGUMENT;
                 }
                 let context = &*context.cast::<CallbackContext>();
                 *response_len = 0;
-                if response_capacity < 12 || response.is_null() {
+                if response_capacity < WIRE_BYTES as u64 || response.is_null() {
                     return CALLBACK_RESPONSE_TOO_SMALL;
                 }
-                let body = std::slice::from_raw_parts_mut(response, 12);
+                let p = &context.profile;
+                let body = std::slice::from_raw_parts_mut(response, WIRE_BYTES);
                 body[..4].copy_from_slice(
                     prdb_engine::query_abi::QUERY_WORKLOAD_BUDGETS_MAGIC.as_bytes(),
                 );
                 body[4..6].copy_from_slice(
                     &prdb_engine::query_abi::QUERY_WORKLOAD_BUDGETS_VERSION.to_be_bytes(),
                 );
-                body[6..8].copy_from_slice(&12u16.to_be_bytes());
-                body[8..12].copy_from_slice(&context.max_sql_index_probe_candidates.to_be_bytes());
-                *response_len = 12;
+                body[6..8].copy_from_slice(&(WIRE_BYTES as u16).to_be_bytes());
+                let u32_fields = [
+                    p.max_sql_index_probe_candidates,
+                    p.max_executor_requests,
+                    p.max_planner_requests,
+                    p.max_optimizer_requests,
+                    p.sql_max_query_bytes,
+                    p.sql_max_projection_columns,
+                    p.sql_max_predicate_nodes,
+                    p.sql_max_expression_depth,
+                    p.sql_max_group_keys,
+                    p.sql_max_join_keys,
+                    p.sql_max_order_keys,
+                    p.sql_max_in_values,
+                    p.sql_max_limit,
+                    p.sql_batch_max_statements,
+                    p.sql_exec_max_scan_pages,
+                    p.sql_exec_max_mutation_targets,
+                    p.sql_in_mem_max_rows,
+                    p.sql_in_mem_join_max_pairs,
+                    p.sql_spill_sort_max_row_bytes,
+                    p.sql_spill_sort_max_workspace_bytes,
+                    p.sql_spill_join_max_record_bytes,
+                    p.sql_spill_join_max_workspace_bytes,
+                    p.optimizer_max_plan_bytes,
+                ];
+                let mut offset = 8usize;
+                for val in u32_fields {
+                    body[offset..offset + 4].copy_from_slice(&val.to_be_bytes());
+                    offset += 4;
+                }
+                let u64_fields = [
+                    p.max_parameter_bytes,
+                    p.max_sql_data_bytes,
+                    p.max_ipc_request_bytes,
+                    p.max_ipc_response_bytes,
+                    p.max_result_chunk_bytes,
+                    p.max_total_result_bytes,
+                    p.sql_dispatch_max_heap_bytes,
+                    p.sql_exec_max_materialized_bytes,
+                ];
+                for val in u64_fields {
+                    body[offset..offset + 8].copy_from_slice(&val.to_be_bytes());
+                    offset += 8;
+                }
+                *response_len = WIRE_BYTES as u64;
                 CALLBACK_OK
             }))
             .unwrap_or(CALLBACK_INTERNAL_ERROR);
@@ -814,7 +951,14 @@ mod worker {
             if context.is_null() || (bytes_len > 0 && bytes.is_null()) {
                 return CALLBACK_INVALID_ARGUMENT;
             }
-            if bytes_len > MAX_RESULT_CHUNK_BYTES {
+            // SAFETY: context is host-owned and lives for the entry-point call.
+            let context = unsafe { &*context.cast::<CallbackContext>() };
+            if bytes_len
+                > context
+                    .profile
+                    .max_result_chunk_bytes
+                    .min(MAX_RESULT_CHUNK_BYTES)
+            {
                 return CALLBACK_LIMIT_EXCEEDED;
             }
             if bytes_len == 0 {
@@ -822,15 +966,13 @@ mod worker {
             }
             // SAFETY: ABI callers must provide a readable buffer for bytes_len.
             let output = unsafe { std::slice::from_raw_parts(bytes, bytes_len as usize) };
-            // SAFETY: context is host-owned and lives for the entry-point call.
-            let context = unsafe { &*context.cast::<CallbackContext>() };
             let next_total = context.total_result_bytes.fetch_update(
                 Ordering::Relaxed,
                 Ordering::Relaxed,
                 |total| {
                     total
                         .checked_add(bytes_len)
-                        .filter(|total| *total <= context.max_total_result_bytes)
+                        .filter(|total| *total <= context.profile.max_total_result_bytes)
                 },
             );
             if next_total.is_err() {
@@ -1033,8 +1175,7 @@ mod worker {
                     optimizer.into_raw_fd(),
                     result.into_raw_fd(),
                     Some(spill.into_raw_fd()),
-                    prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
-                    prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
+                    prdb_engine::workload_profile::WorkloadProfileLimits::small_operational(),
                 )
             }
         }
@@ -1053,8 +1194,7 @@ mod worker {
                     optimizer.into_raw_fd(),
                     result.into_raw_fd(),
                     Some(spill.into_raw_fd()),
-                    prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
-                    prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
+                    prdb_engine::workload_profile::WorkloadProfileLimits::small_operational(),
                 )
             };
             (context, spill_peer)
@@ -1130,8 +1270,9 @@ mod worker {
 
         #[test]
         fn v6_spill_callback_roundtrips_through_the_trusted_broker() {
-            use prdb_engine::spill::{SpillBroker, SpillConfig, SpillPackage};
-            use prdb_engine::supervisor::WorkloadClass;
+            use prdb_engine::spill::{
+                SpillBroker, SpillConfig, SpillInvocationLimits, SpillPackage,
+            };
             use std::os::unix::fs::PermissionsExt;
             use std::time::{Duration, Instant};
 
@@ -1159,7 +1300,13 @@ mod worker {
             broker
                 .open_package(
                     package,
-                    WorkloadClass::Analytical,
+                    Some(SpillInvocationLimits {
+                        max_bytes: 8192,
+                        max_io_bytes: 32768,
+                        max_streams: 4,
+                        max_operations: 32,
+                        max_response_bytes: 4096,
+                    }),
                     Instant::now() + Duration::from_secs(10),
                 )
                 .unwrap();
@@ -1474,6 +1621,9 @@ mod worker {
             let (optimizer, _optimizer_peer) = UnixStream::pair().unwrap();
             let (result, _result_peer) = UnixStream::pair().unwrap();
             let (spill, _spill_peer) = UnixStream::pair().unwrap();
+            let mut profile =
+                prdb_engine::workload_profile::WorkloadProfileLimits::small_operational();
+            profile.max_sql_index_probe_candidates = 512;
             // SAFETY: each stream contributes one distinct owned endpoint.
             let context = unsafe {
                 CallbackContext::from_raw_fds(
@@ -1482,12 +1632,11 @@ mod worker {
                     optimizer.into_raw_fd(),
                     result.into_raw_fd(),
                     Some(spill.into_raw_fd()),
-                    prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
-                    512,
+                    profile,
                 )
             };
             let context_ptr = (&context as *const CallbackContext).cast_mut().cast();
-            let mut response = [0u8; 12];
+            let mut response = [0u8; 164];
             let mut response_len = 0;
             // SAFETY: the trusted context and response buffer remain live.
             let status = unsafe {
@@ -1502,8 +1651,8 @@ mod worker {
                 )
             };
             assert_eq!(status, CALLBACK_OK);
-            assert_eq!(response_len, 12);
-            assert_eq!(&response[..8], b"PQB1\0\x01\0\x0c");
+            assert_eq!(response_len, 164);
+            assert_eq!(&response[..8], b"PQB1\0\x01\0\xa4");
             assert_eq!(u32::from_be_bytes(response[8..12].try_into().unwrap()), 512);
             executor_peer
                 .set_nonblocking(true)
@@ -1557,7 +1706,7 @@ mod worker {
             let (executor, _executor_peer) = UnixStream::pair().unwrap();
             let (result, mut result_peer) = UnixStream::pair().unwrap();
             let mut context = callback_context(planner, executor, result);
-            context.max_total_result_bytes = elevated_limit;
+            context.profile.max_total_result_bytes = elevated_limit;
             let context_ptr = (&context as *const CallbackContext).cast_mut().cast();
             let reader = std::thread::spawn(move || {
                 let mut received = 0u64;

@@ -1273,12 +1273,25 @@ impl ClientConnectionSession {
                             .into_bytes(),
                         )
             }
-            PendingAdminAction::CreateUser { name } => {
+            PendingAdminAction::CreateUser {
+                name,
+                workload_profile,
+            } => {
+                let profile_id = match workload_profile {
+                    Some(profile_name) => {
+                        storage
+                            .resolve_workload_profile_by_name(&profile_name)
+                            .map_err(ClientSessionError::IdentityLifecycle)?
+                            .profile_id
+                    }
+                    None => crate::workload_profile::SMALL_OPERATIONAL_PROFILE_ID,
+                };
                 let created = storage
-                    .create_user(
+                    .create_user_with_profile(
                         operation_id,
                         actor_id,
                         &name,
+                        profile_id,
                         retention_deadline_us,
                         crate::audit::AuditEvent {
                             event_id,
@@ -1302,12 +1315,25 @@ impl ClientConnectionSession {
                             .into_bytes(),
                         )
             }
-            PendingAdminAction::CreateUserNoLogin { name } => {
+            PendingAdminAction::CreateUserNoLogin {
+                name,
+                workload_profile,
+            } => {
+                let profile_id = match workload_profile {
+                    Some(profile_name) => {
+                        storage
+                            .resolve_workload_profile_by_name(&profile_name)
+                            .map_err(ClientSessionError::IdentityLifecycle)?
+                            .profile_id
+                    }
+                    None => crate::workload_profile::SMALL_OPERATIONAL_PROFILE_ID,
+                };
                 let created = storage
-                    .create_user_no_login(
+                    .create_user_no_login_with_profile(
                         operation_id,
                         actor_id,
                         &name,
+                        profile_id,
                         retention_deadline_us,
                         crate::audit::AuditEvent {
                             event_id,
@@ -1330,6 +1356,190 @@ impl ClientConnectionSession {
                             )
                             .into_bytes(),
                         )
+            }
+            PendingAdminAction::SetUserWorkloadProfile {
+                user_id,
+                profile_name,
+            } => {
+                let profile_id = storage
+                    .resolve_workload_profile_by_name(&profile_name)
+                    .map_err(ClientSessionError::IdentityLifecycle)?
+                    .profile_id;
+                let commit_sequence = storage
+                    .set_user_workload_profile(
+                        operation_id,
+                        actor_id,
+                        user_id,
+                        profile_id,
+                        retention_deadline_us,
+                        crate::audit::AuditEvent {
+                            event_id,
+                            actor_id: Some(actor_id),
+                            correlation_id: operation_id,
+                            occurred_at_us: now_us,
+                            action: crate::audit::AuditAction::Ddl,
+                            result: crate::audit::AuditResult::Succeeded,
+                            target_ids: Vec::new(),
+                        },
+                    )
+                    .map_err(ClientSessionError::IdentityLifecycle)?;
+                self.json_response(
+                    request.request_id,
+                    format!(
+                        "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"commit_sequence\":\"{}\"}}",
+                        encode_lower_hex_id(operation_id),
+                        commit_sequence,
+                    )
+                    .into_bytes(),
+                )
+            }
+            PendingAdminAction::CreateWorkloadProfile {
+                name,
+                base_profile,
+                settings,
+            } => {
+                let mut limits = match base_profile {
+                    Some(base) => {
+                        storage
+                            .resolve_workload_profile_by_name(&base)
+                            .map_err(ClientSessionError::IdentityLifecycle)?
+                            .limits
+                    }
+                    None => crate::workload_profile::WorkloadProfileLimits::small_operational(),
+                };
+                for (k, v) in settings {
+                    limits.set_field(&k, v).map_err(|_| {
+                        ClientSessionError::IdentityLifecycle(
+                            crate::storage_manager::IdentityLifecycleError::InvalidRequest,
+                        )
+                    })?;
+                }
+                let (profile_id, commit_sequence) = storage
+                    .create_workload_profile(
+                        operation_id,
+                        actor_id,
+                        &name,
+                        limits,
+                        retention_deadline_us,
+                        crate::audit::AuditEvent {
+                            event_id,
+                            actor_id: Some(actor_id),
+                            correlation_id: operation_id,
+                            occurred_at_us: now_us,
+                            action: crate::audit::AuditAction::Ddl,
+                            result: crate::audit::AuditResult::Succeeded,
+                            target_ids: Vec::new(),
+                        },
+                    )
+                    .map_err(ClientSessionError::IdentityLifecycle)?;
+                self.json_response(
+                    request.request_id,
+                    format!(
+                        "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"profile_id\":\"{}\",\"commit_sequence\":\"{}\"}}",
+                        encode_lower_hex_id(operation_id),
+                        encode_lower_hex_id(profile_id),
+                        commit_sequence,
+                    )
+                    .into_bytes(),
+                )
+            }
+            PendingAdminAction::AlterWorkloadProfile { name, settings } => {
+                let profile_id = storage
+                    .resolve_workload_profile_by_name(&name)
+                    .map_err(ClientSessionError::IdentityLifecycle)?
+                    .profile_id;
+                let commit_sequence = storage
+                    .alter_workload_profile(
+                        operation_id,
+                        actor_id,
+                        profile_id,
+                        &settings,
+                        retention_deadline_us,
+                        crate::audit::AuditEvent {
+                            event_id,
+                            actor_id: Some(actor_id),
+                            correlation_id: operation_id,
+                            occurred_at_us: now_us,
+                            action: crate::audit::AuditAction::Ddl,
+                            result: crate::audit::AuditResult::Succeeded,
+                            target_ids: Vec::new(),
+                        },
+                    )
+                    .map_err(ClientSessionError::IdentityLifecycle)?;
+                self.json_response(
+                    request.request_id,
+                    format!(
+                        "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"commit_sequence\":\"{}\"}}",
+                        encode_lower_hex_id(operation_id),
+                        commit_sequence,
+                    )
+                    .into_bytes(),
+                )
+            }
+            PendingAdminAction::RenameWorkloadProfile { old_name, new_name } => {
+                let profile_id = storage
+                    .resolve_workload_profile_by_name(&old_name)
+                    .map_err(ClientSessionError::IdentityLifecycle)?
+                    .profile_id;
+                let commit_sequence = storage
+                    .rename_workload_profile(
+                        operation_id,
+                        actor_id,
+                        profile_id,
+                        &new_name,
+                        retention_deadline_us,
+                        crate::audit::AuditEvent {
+                            event_id,
+                            actor_id: Some(actor_id),
+                            correlation_id: operation_id,
+                            occurred_at_us: now_us,
+                            action: crate::audit::AuditAction::Ddl,
+                            result: crate::audit::AuditResult::Succeeded,
+                            target_ids: Vec::new(),
+                        },
+                    )
+                    .map_err(ClientSessionError::IdentityLifecycle)?;
+                self.json_response(
+                    request.request_id,
+                    format!(
+                        "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"commit_sequence\":\"{}\"}}",
+                        encode_lower_hex_id(operation_id),
+                        commit_sequence,
+                    )
+                    .into_bytes(),
+                )
+            }
+            PendingAdminAction::DropWorkloadProfile { name } => {
+                let profile_id = storage
+                    .resolve_workload_profile_by_name(&name)
+                    .map_err(ClientSessionError::IdentityLifecycle)?
+                    .profile_id;
+                let commit_sequence = storage
+                    .drop_workload_profile(
+                        operation_id,
+                        actor_id,
+                        profile_id,
+                        retention_deadline_us,
+                        crate::audit::AuditEvent {
+                            event_id,
+                            actor_id: Some(actor_id),
+                            correlation_id: operation_id,
+                            occurred_at_us: now_us,
+                            action: crate::audit::AuditAction::Ddl,
+                            result: crate::audit::AuditResult::Succeeded,
+                            target_ids: Vec::new(),
+                        },
+                    )
+                    .map_err(ClientSessionError::IdentityLifecycle)?;
+                self.json_response(
+                    request.request_id,
+                    format!(
+                        "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"commit_sequence\":\"{}\"}}",
+                        encode_lower_hex_id(operation_id),
+                        commit_sequence,
+                    )
+                    .into_bytes(),
+                )
             }
             PendingAdminAction::Revoke { token_id } => {
                 let sequence = storage

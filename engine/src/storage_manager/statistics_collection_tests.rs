@@ -1,7 +1,4 @@
-use super::{
-    DEFAULT_ESTIMATE_CANDIDATES, DEFAULT_PLANNER_ESTIMATE_REQUESTS, StorageManager,
-    StorageManagerConfig,
-};
+use super::{DEFAULT_PLANNER_ESTIMATE_REQUESTS, StorageManager, StorageManagerConfig};
 use crate::catalog::{CatalogField, WireType, encode_envelope, family_schema};
 use crate::metadata::{EngineMetadata, Lifecycle};
 use crate::schema::{CATALOG, ENGINE_META, ROWS, STATS, create_tables};
@@ -13,111 +10,64 @@ use redb::{Database, ReadableDatabase};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[test]
-fn invocation_work_budgets_are_class_scoped_and_inherit_by_default() {
+fn invocation_work_budgets_clamp_profile_against_host_ceilings() {
     let defaults = StorageManagerConfig::default();
+    let small = crate::workload_profile::WorkloadProfileLimits::small_operational();
+    let large = crate::workload_profile::WorkloadProfileLimits::large_analytical();
+
     assert_eq!(
-        defaults.max_planner_estimate_requests_for(crate::supervisor::WorkloadClass::Operational),
+        defaults.max_planner_estimate_requests_for_profile(&small),
+        16
+    );
+    assert_eq!(
+        defaults.max_planner_estimate_requests_for_profile(&large),
         DEFAULT_PLANNER_ESTIMATE_REQUESTS
     );
     assert_eq!(
-        defaults.max_planner_estimate_requests_for(crate::supervisor::WorkloadClass::Analytical),
-        DEFAULT_PLANNER_ESTIMATE_REQUESTS
+        defaults.max_invocation_scan_work_for_profile(&small),
+        16_384
     );
     assert_eq!(
-        defaults.max_planner_estimate_candidates_for(crate::supervisor::WorkloadClass::Operational),
-        DEFAULT_ESTIMATE_CANDIDATES
-    );
-    assert_eq!(
-        defaults.max_planner_estimate_candidates_for(crate::supervisor::WorkloadClass::Analytical),
-        DEFAULT_ESTIMATE_CANDIDATES
-    );
-    assert_eq!(
-        defaults.max_invocation_scan_work_for(crate::supervisor::WorkloadClass::Operational),
+        defaults.max_invocation_scan_work_for_profile(&large),
         crate::transaction::MAX_INVOCATION_SCAN_WORK
     );
     assert_eq!(
-        defaults.max_invocation_scan_work_for(crate::supervisor::WorkloadClass::Analytical),
-        crate::transaction::MAX_INVOCATION_SCAN_WORK
+        defaults.max_authorized_index_range_candidates_for_profile(&small),
+        128
     );
     assert_eq!(
-        defaults.max_authorized_index_range_candidates_for(
-            crate::supervisor::WorkloadClass::Operational
-        ),
-        crate::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES as usize
+        defaults.max_authorized_index_range_bytes_for_profile(&small),
+        1024 * 1024
     );
-    assert_eq!(
-        defaults.max_authorized_index_range_candidates_for(
-            crate::supervisor::WorkloadClass::Analytical
-        ),
-        crate::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES as usize
-    );
-    assert_eq!(
-        defaults
-            .max_authorized_index_range_bytes_for(crate::supervisor::WorkloadClass::Operational),
-        crate::transaction::MAX_AUTHORIZED_INDEX_RANGE_BYTES
-    );
-    assert_eq!(
-        defaults.max_authorized_index_range_bytes_for(crate::supervisor::WorkloadClass::Analytical),
-        crate::transaction::MAX_AUTHORIZED_INDEX_RANGE_BYTES
-    );
+
     let elevated = StorageManagerConfig {
-        max_planner_estimate_requests: 32,
-        max_analytical_planner_estimate_requests: Some(1024),
-        max_planner_estimate_candidates: 1024,
-        max_analytical_planner_estimate_candidates: Some(65_536),
-        max_invocation_scan_work: 65_536,
-        max_analytical_invocation_scan_work: Some(1_048_576),
-        max_authorized_index_range_candidates: 512,
-        max_analytical_authorized_index_range_candidates: Some(2_048),
-        max_authorized_index_range_bytes: 64 * 1024 * 1024,
-        max_analytical_authorized_index_range_bytes: Some(512 * 1024 * 1024),
+        max_planner_estimate_requests: 1024,
+        max_planner_estimate_candidates: 65_536,
+        max_invocation_scan_work: 1_048_576,
+        max_authorized_index_range_candidates: 2_048,
+        max_authorized_index_range_bytes: 512 * 1024 * 1024,
         max_statistics_collection_rows: 65_536,
         ..defaults
     };
     assert_eq!(
-        elevated.max_planner_estimate_requests_for(crate::supervisor::WorkloadClass::Operational),
-        32
-    );
-    assert_eq!(
-        elevated.max_planner_estimate_requests_for(crate::supervisor::WorkloadClass::Analytical),
+        elevated.max_planner_estimate_requests_for_profile(&large),
         1024
     );
     assert_eq!(
-        elevated.max_planner_estimate_candidates_for(crate::supervisor::WorkloadClass::Operational),
-        1024
-    );
-    assert_eq!(
-        elevated.max_planner_estimate_candidates_for(crate::supervisor::WorkloadClass::Analytical),
+        elevated.max_planner_estimate_candidates_for_profile(&large),
         65_536
     );
     assert_eq!(
-        elevated.max_invocation_scan_work_for(crate::supervisor::WorkloadClass::Operational),
-        65_536
-    );
-    assert_eq!(
-        elevated.max_invocation_scan_work_for(crate::supervisor::WorkloadClass::Analytical),
+        elevated.max_invocation_scan_work_for_profile(&large),
         1_048_576
     );
     assert_eq!(
-        elevated.max_authorized_index_range_candidates_for(
-            crate::supervisor::WorkloadClass::Operational
-        ),
-        512
-    );
-    assert_eq!(
-        elevated.max_authorized_index_range_candidates_for(
-            crate::supervisor::WorkloadClass::Analytical
-        ),
+        elevated.max_authorized_index_range_candidates_for_profile(&large),
         2_048
     );
     assert_eq!(
-        elevated
-            .max_authorized_index_range_bytes_for(crate::supervisor::WorkloadClass::Operational),
-        64 * 1024 * 1024
-    );
-    assert_eq!(
-        elevated.max_authorized_index_range_bytes_for(crate::supervisor::WorkloadClass::Analytical),
-        512 * 1024 * 1024
+        elevated.max_authorized_index_range_bytes_for_profile(&large),
+        256 * 1024 * 1024
     );
     assert_eq!(elevated.max_statistics_collection_rows, 65_536);
 }

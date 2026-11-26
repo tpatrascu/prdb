@@ -10,6 +10,7 @@ mod ddl_identity_grants;
 mod ddl_index;
 mod ddl_policies;
 mod ddl_schema_table;
+mod ddl_workload_profiles;
 mod discovery;
 mod interactive_txn;
 mod invocation_status;
@@ -62,35 +63,17 @@ use std::time::Duration;
 pub struct StorageManagerConfig {
     pub ddl_fence_timeout: Duration,
     pub max_active_invocations: usize,
-    pub max_active_analytical_invocations: usize,
     pub max_invocation_age: Duration,
-    /// Maximum catalog records and row candidates scanned in one invocation.
+    /// Host-wide maximum catalog records and row candidates scanned in one invocation.
     pub max_invocation_scan_work: usize,
-    /// Optional Analytical invocation scan-work allowance; omission inherits
-    /// the Operational value.
-    pub max_analytical_invocation_scan_work: Option<usize>,
-    /// Maximum authorized candidates returned by one Operational index-range
-    /// scan. The supervisor sets this from the same trusted SQL candidate
-    /// profile passed to the executor.
+    /// Host-wide maximum authorized candidates returned by one index-range scan.
     pub max_authorized_index_range_candidates: usize,
-    /// Optional Analytical per-range candidate limit.
-    pub max_analytical_authorized_index_range_candidates: Option<usize>,
-    /// Cumulative encoded-key and authorized-row byte allowance for one
-    /// Operational index-range lookup. This is separate from the per-frame
-    /// IPC payload envelope.
+    /// Host-wide maximum cumulative encoded-key and authorized-row bytes for one index-range lookup.
     pub max_authorized_index_range_bytes: usize,
-    /// Optional Analytical index-range byte allowance; omission inherits the
-    /// Operational value.
-    pub max_analytical_authorized_index_range_bytes: Option<usize>,
-    /// Cumulative storage-estimate allowance for Operational planner sessions.
+    /// Host-wide cumulative storage-estimate allowance for planner sessions.
     pub max_planner_estimate_requests: usize,
-    /// Optional Analytical planner-estimate allowance; omission inherits the
-    /// Operational value.
-    pub max_analytical_planner_estimate_requests: Option<usize>,
-    /// Maximum row candidates inspected by each Operational planner estimate.
+    /// Host-wide maximum row candidates inspected by each planner estimate.
     pub max_planner_estimate_candidates: usize,
-    /// Optional Analytical per-estimate candidate limit.
-    pub max_analytical_planner_estimate_candidates: Option<usize>,
     /// Maximum committed row keys inspected by one statistics maintenance pass.
     pub max_statistics_collection_rows: usize,
     pub max_token_lifecycle_requests_per_minute: usize,
@@ -98,66 +81,44 @@ pub struct StorageManagerConfig {
 }
 
 impl StorageManagerConfig {
-    pub fn max_authorized_index_range_candidates_for(
+    pub fn max_invocation_scan_work_for_profile(
         &self,
-        workload_class: crate::supervisor::WorkloadClass,
+        profile: &crate::workload_profile::WorkloadProfileLimits,
     ) -> usize {
-        match workload_class {
-            crate::supervisor::WorkloadClass::Operational => {
-                self.max_authorized_index_range_candidates
-            }
-            crate::supervisor::WorkloadClass::Analytical => self
-                .max_analytical_authorized_index_range_candidates
-                .unwrap_or(self.max_authorized_index_range_candidates),
-        }
+        usize::try_from(profile.max_invocation_scan_work)
+            .unwrap_or(usize::MAX)
+            .min(self.max_invocation_scan_work)
     }
 
-    pub fn max_authorized_index_range_bytes_for(
+    pub fn max_authorized_index_range_candidates_for_profile(
         &self,
-        workload_class: crate::supervisor::WorkloadClass,
+        profile: &crate::workload_profile::WorkloadProfileLimits,
     ) -> usize {
-        match workload_class {
-            crate::supervisor::WorkloadClass::Operational => self.max_authorized_index_range_bytes,
-            crate::supervisor::WorkloadClass::Analytical => self
-                .max_analytical_authorized_index_range_bytes
-                .unwrap_or(self.max_authorized_index_range_bytes),
-        }
+        (profile.max_sql_index_probe_candidates as usize)
+            .min(self.max_authorized_index_range_candidates)
     }
 
-    pub fn max_invocation_scan_work_for(
+    pub fn max_authorized_index_range_bytes_for_profile(
         &self,
-        workload_class: crate::supervisor::WorkloadClass,
+        profile: &crate::workload_profile::WorkloadProfileLimits,
     ) -> usize {
-        match workload_class {
-            crate::supervisor::WorkloadClass::Operational => self.max_invocation_scan_work,
-            crate::supervisor::WorkloadClass::Analytical => self
-                .max_analytical_invocation_scan_work
-                .unwrap_or(self.max_invocation_scan_work),
-        }
+        usize::try_from(profile.max_authorized_index_range_bytes)
+            .unwrap_or(usize::MAX)
+            .min(self.max_authorized_index_range_bytes)
     }
 
-    pub fn max_planner_estimate_requests_for(
+    pub fn max_planner_estimate_requests_for_profile(
         &self,
-        workload_class: crate::supervisor::WorkloadClass,
+        profile: &crate::workload_profile::WorkloadProfileLimits,
     ) -> usize {
-        match workload_class {
-            crate::supervisor::WorkloadClass::Operational => self.max_planner_estimate_requests,
-            crate::supervisor::WorkloadClass::Analytical => self
-                .max_analytical_planner_estimate_requests
-                .unwrap_or(self.max_planner_estimate_requests),
-        }
+        (profile.max_planner_estimate_requests as usize).min(self.max_planner_estimate_requests)
     }
 
-    pub fn max_planner_estimate_candidates_for(
+    pub fn max_planner_estimate_candidates_for_profile(
         &self,
-        workload_class: crate::supervisor::WorkloadClass,
+        profile: &crate::workload_profile::WorkloadProfileLimits,
     ) -> usize {
-        match workload_class {
-            crate::supervisor::WorkloadClass::Operational => self.max_planner_estimate_candidates,
-            crate::supervisor::WorkloadClass::Analytical => self
-                .max_analytical_planner_estimate_candidates
-                .unwrap_or(self.max_planner_estimate_candidates),
-        }
+        (profile.max_planner_estimate_candidates as usize).min(self.max_planner_estimate_candidates)
     }
 }
 
@@ -166,19 +127,13 @@ impl Default for StorageManagerConfig {
         Self {
             ddl_fence_timeout: Duration::from_secs(5),
             max_active_invocations: 128,
-            max_active_analytical_invocations: 8,
             max_invocation_age: Duration::from_secs(15 * 60),
             max_invocation_scan_work: crate::transaction::MAX_INVOCATION_SCAN_WORK,
-            max_analytical_invocation_scan_work: None,
             max_authorized_index_range_candidates:
                 crate::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES as usize,
-            max_analytical_authorized_index_range_candidates: None,
             max_authorized_index_range_bytes: crate::transaction::MAX_AUTHORIZED_INDEX_RANGE_BYTES,
-            max_analytical_authorized_index_range_bytes: None,
             max_planner_estimate_requests: DEFAULT_PLANNER_ESTIMATE_REQUESTS,
-            max_analytical_planner_estimate_requests: None,
             max_planner_estimate_candidates: DEFAULT_ESTIMATE_CANDIDATES,
-            max_analytical_planner_estimate_candidates: None,
             max_statistics_collection_rows: MAX_COMMITTED_POPULATION_ROWS as usize,
             max_token_lifecycle_requests_per_minute: 30,
             max_admin_cancellation_requests_per_minute: 30,
@@ -189,7 +144,6 @@ impl Default for StorageManagerConfig {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StorageManagerConfigError {
     ZeroActiveInvocationLimit,
-    ZeroAnalyticalInvocationLimit,
     ZeroInvocationAge,
     ZeroInvocationScanWorkLimit,
     ZeroAuthorizedIndexRangeCandidateLimit,
@@ -234,22 +188,16 @@ pub struct StorageManager<'db> {
     pub(in crate::storage_manager) database: &'db Database,
     pub(in crate::storage_manager) ddl_fences: DdlFenceCoordinator,
     pub(in crate::storage_manager) max_active_invocations: usize,
-    pub(in crate::storage_manager) max_active_analytical_invocations: usize,
     pub(in crate::storage_manager) admissions: Arc<InvocationAdmissionState>,
     pub(in crate::storage_manager) token_requests: Arc<TokenRequestLimiter>,
     pub(in crate::storage_manager) admin_cancellation_requests: Arc<TokenRequestLimiter>,
     pub(in crate::storage_manager) authentication_failure_audits: Arc<TokenRequestLimiter>,
     pub(in crate::storage_manager) max_invocation_age: Duration,
     pub(in crate::storage_manager) max_invocation_scan_work: usize,
-    pub(in crate::storage_manager) max_analytical_invocation_scan_work: Option<usize>,
     pub(in crate::storage_manager) max_authorized_index_range_candidates: usize,
-    pub(in crate::storage_manager) max_analytical_authorized_index_range_candidates: Option<usize>,
     pub(in crate::storage_manager) max_authorized_index_range_bytes: usize,
-    pub(in crate::storage_manager) max_analytical_authorized_index_range_bytes: Option<usize>,
     pub(in crate::storage_manager) max_planner_estimate_requests: usize,
-    pub(in crate::storage_manager) max_analytical_planner_estimate_requests: Option<usize>,
     pub(in crate::storage_manager) max_planner_estimate_candidates: usize,
-    pub(in crate::storage_manager) max_analytical_planner_estimate_candidates: Option<usize>,
     pub(in crate::storage_manager) interactive_transactions: InteractiveTransactionMap<'db>,
     pub(in crate::storage_manager) interactive_begin_requests: InteractiveBeginRequestMap,
 }
@@ -313,11 +261,6 @@ impl<'db> StorageManager<'db> {
                 StorageManagerConfigError::ZeroActiveInvocationLimit,
             ));
         }
-        if config.max_active_analytical_invocations == 0 {
-            return Err(StorageManagerInitError::Config(
-                StorageManagerConfigError::ZeroAnalyticalInvocationLimit,
-            ));
-        }
         if config.max_invocation_age.is_zero() {
             return Err(StorageManagerInitError::Config(
                 StorageManagerConfigError::ZeroInvocationAge,
@@ -328,65 +271,39 @@ impl<'db> StorageManager<'db> {
                 StorageManagerConfigError::ZeroInvocationScanWorkLimit,
             ));
         }
-        if config.max_analytical_invocation_scan_work == Some(0) {
-            return Err(StorageManagerInitError::Config(
-                StorageManagerConfigError::ZeroInvocationScanWorkLimit,
-            ));
-        }
-        if config.max_authorized_index_range_candidates == 0
-            || config.max_analytical_authorized_index_range_candidates == Some(0)
-        {
+        if config.max_authorized_index_range_candidates == 0 {
             return Err(StorageManagerInitError::Config(
                 StorageManagerConfigError::ZeroAuthorizedIndexRangeCandidateLimit,
             ));
         }
         if config.max_authorized_index_range_candidates
             > crate::query_abi::MAX_SQL_INDEX_PROBE_CANDIDATES as usize
-            || config
-                .max_analytical_authorized_index_range_candidates
-                .is_some_and(|value| {
-                    value > crate::query_abi::MAX_SQL_INDEX_PROBE_CANDIDATES as usize
-                })
         {
             return Err(StorageManagerInitError::Config(
                 StorageManagerConfigError::AuthorizedIndexRangeCandidateLimitTooLarge,
             ));
         }
-        if config.max_authorized_index_range_bytes == 0
-            || config.max_analytical_authorized_index_range_bytes == Some(0)
-        {
+        if config.max_authorized_index_range_bytes == 0 {
             return Err(StorageManagerInitError::Config(
                 StorageManagerConfigError::ZeroAuthorizedIndexRangeByteLimit,
             ));
         }
-        if config.max_planner_estimate_requests == 0
-            || config.max_analytical_planner_estimate_requests == Some(0)
-        {
+        if config.max_planner_estimate_requests == 0 {
             return Err(StorageManagerInitError::Config(
                 StorageManagerConfigError::ZeroPlannerEstimateRequestLimit,
             ));
         }
-        if config.max_planner_estimate_requests > MAX_PLANNER_ESTIMATE_REQUESTS
-            || config
-                .max_analytical_planner_estimate_requests
-                .is_some_and(|value| value > MAX_PLANNER_ESTIMATE_REQUESTS)
-        {
+        if config.max_planner_estimate_requests > MAX_PLANNER_ESTIMATE_REQUESTS {
             return Err(StorageManagerInitError::Config(
                 StorageManagerConfigError::PlannerEstimateRequestLimitTooLarge,
             ));
         }
-        if config.max_planner_estimate_candidates == 0
-            || config.max_analytical_planner_estimate_candidates == Some(0)
-        {
+        if config.max_planner_estimate_candidates == 0 {
             return Err(StorageManagerInitError::Config(
                 StorageManagerConfigError::ZeroPlannerEstimateCandidateLimit,
             ));
         }
-        if config.max_planner_estimate_candidates > MAX_CONFIGURABLE_ESTIMATE_CANDIDATES
-            || config
-                .max_analytical_planner_estimate_candidates
-                .is_some_and(|value| value > MAX_CONFIGURABLE_ESTIMATE_CANDIDATES)
-        {
+        if config.max_planner_estimate_candidates > MAX_CONFIGURABLE_ESTIMATE_CANDIDATES {
             return Err(StorageManagerInitError::Config(
                 StorageManagerConfigError::PlannerEstimateCandidateLimitTooLarge,
             ));
@@ -430,33 +347,22 @@ impl<'db> StorageManager<'db> {
         let admissions = shared_invocation_registry(
             database,
             config.max_active_invocations,
-            config.max_active_analytical_invocations,
             config.max_statistics_collection_rows,
         );
         Ok(Self {
             database,
             ddl_fences: DdlFenceCoordinator::new(DdlFenceManager::new(), config.ddl_fence_timeout),
             max_active_invocations: config.max_active_invocations,
-            max_active_analytical_invocations: config.max_active_analytical_invocations,
             admissions,
             token_requests,
             admin_cancellation_requests,
             authentication_failure_audits,
             max_invocation_age: config.max_invocation_age,
             max_invocation_scan_work: config.max_invocation_scan_work,
-            max_analytical_invocation_scan_work: config.max_analytical_invocation_scan_work,
             max_authorized_index_range_candidates: config.max_authorized_index_range_candidates,
-            max_analytical_authorized_index_range_candidates: config
-                .max_analytical_authorized_index_range_candidates,
             max_authorized_index_range_bytes: config.max_authorized_index_range_bytes,
-            max_analytical_authorized_index_range_bytes: config
-                .max_analytical_authorized_index_range_bytes,
             max_planner_estimate_requests: config.max_planner_estimate_requests,
-            max_analytical_planner_estimate_requests: config
-                .max_analytical_planner_estimate_requests,
             max_planner_estimate_candidates: config.max_planner_estimate_candidates,
-            max_analytical_planner_estimate_candidates: config
-                .max_analytical_planner_estimate_candidates,
             interactive_transactions: Arc::new(Mutex::new(HashMap::new())),
             interactive_begin_requests: Arc::new(Mutex::new(HashMap::new())),
         })
@@ -468,12 +374,6 @@ impl<'db> StorageManager<'db> {
             .min(self.admissions.limit.load(Ordering::Acquire))
     }
 
-    /// The effective analytical snapshot cap shared by live manager handles.
-    pub fn max_active_analytical_invocations(&self) -> usize {
-        self.max_active_analytical_invocations
-            .min(self.admissions.analytical_limit.load(Ordering::Acquire))
-    }
-
     pub fn max_invocation_age(&self) -> Duration {
         self.max_invocation_age
     }
@@ -482,66 +382,44 @@ impl<'db> StorageManager<'db> {
         self.max_invocation_scan_work
     }
 
-    pub fn max_invocation_scan_work_for(
+    pub fn max_invocation_scan_work_for_profile(
         &self,
-        workload_class: crate::supervisor::WorkloadClass,
+        profile: &crate::workload_profile::WorkloadProfileLimits,
     ) -> usize {
-        match workload_class {
-            crate::supervisor::WorkloadClass::Operational => self.max_invocation_scan_work,
-            crate::supervisor::WorkloadClass::Analytical => self
-                .max_analytical_invocation_scan_work
-                .unwrap_or(self.max_invocation_scan_work),
-        }
+        usize::try_from(profile.max_invocation_scan_work)
+            .unwrap_or(usize::MAX)
+            .min(self.max_invocation_scan_work)
     }
 
-    pub fn max_authorized_index_range_candidates_for(
+    pub fn max_authorized_index_range_candidates_for_profile(
         &self,
-        workload_class: crate::supervisor::WorkloadClass,
+        profile: &crate::workload_profile::WorkloadProfileLimits,
     ) -> usize {
-        match workload_class {
-            crate::supervisor::WorkloadClass::Operational => {
-                self.max_authorized_index_range_candidates
-            }
-            crate::supervisor::WorkloadClass::Analytical => self
-                .max_analytical_authorized_index_range_candidates
-                .unwrap_or(self.max_authorized_index_range_candidates),
-        }
+        (profile.max_sql_index_probe_candidates as usize)
+            .min(self.max_authorized_index_range_candidates)
     }
 
-    pub fn max_authorized_index_range_bytes_for(
+    pub fn max_authorized_index_range_bytes_for_profile(
         &self,
-        workload_class: crate::supervisor::WorkloadClass,
+        profile: &crate::workload_profile::WorkloadProfileLimits,
     ) -> usize {
-        match workload_class {
-            crate::supervisor::WorkloadClass::Operational => self.max_authorized_index_range_bytes,
-            crate::supervisor::WorkloadClass::Analytical => self
-                .max_analytical_authorized_index_range_bytes
-                .unwrap_or(self.max_authorized_index_range_bytes),
-        }
+        usize::try_from(profile.max_authorized_index_range_bytes)
+            .unwrap_or(usize::MAX)
+            .min(self.max_authorized_index_range_bytes)
     }
 
-    pub fn max_planner_estimate_requests_for(
+    pub fn max_planner_estimate_requests_for_profile(
         &self,
-        workload_class: crate::supervisor::WorkloadClass,
+        profile: &crate::workload_profile::WorkloadProfileLimits,
     ) -> usize {
-        match workload_class {
-            crate::supervisor::WorkloadClass::Operational => self.max_planner_estimate_requests,
-            crate::supervisor::WorkloadClass::Analytical => self
-                .max_analytical_planner_estimate_requests
-                .unwrap_or(self.max_planner_estimate_requests),
-        }
+        (profile.max_planner_estimate_requests as usize).min(self.max_planner_estimate_requests)
     }
 
-    pub fn max_planner_estimate_candidates_for(
+    pub fn max_planner_estimate_candidates_for_profile(
         &self,
-        workload_class: crate::supervisor::WorkloadClass,
+        profile: &crate::workload_profile::WorkloadProfileLimits,
     ) -> usize {
-        match workload_class {
-            crate::supervisor::WorkloadClass::Operational => self.max_planner_estimate_candidates,
-            crate::supervisor::WorkloadClass::Analytical => self
-                .max_analytical_planner_estimate_candidates
-                .unwrap_or(self.max_planner_estimate_candidates),
-        }
+        (profile.max_planner_estimate_candidates as usize).min(self.max_planner_estimate_candidates)
     }
 
     /// Whether a managed invocation hit an ambiguous redb commit error and

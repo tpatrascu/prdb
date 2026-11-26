@@ -17,7 +17,6 @@ use prdb_engine::storage_manager::{
     TableColumnDefinition, TokenIssueRequest,
 };
 use prdb_engine::submission_manifest::{encode_manifest_v1, manifest_v1_from_elf};
-use prdb_engine::supervisor::WorkloadClass;
 use prdb_engine::tuple::ScalarType;
 use sha2::{Digest, Sha256};
 use std::io::{BufRead, BufReader};
@@ -522,8 +521,7 @@ pub(super) fn authenticated_metadata_and_admin_lifecycle_cross_gateway_and_super
         let mut query =
             SubmissionClient::connect_authenticated(address, restricted_token, &mut query_secret)?;
         assert_eq!(query_secret, [0; 32]);
-        let invocation_id =
-            query.upload_and_seal(package, &[], 30_000, WorkloadClass::Operational)?;
+        let invocation_id = query.upload_and_seal(package, &[], 30_000)?;
         let receipt_path = root.join("restricted-metadata.receipt");
         let (results, terminal_outcome) = {
             let mut started = query.start(invocation_id, &receipt_path)?;

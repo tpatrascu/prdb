@@ -965,7 +965,7 @@ mod tests {
     };
     use crate::supervisor::{
         ChunkKind, PrepareSubmission, StagingError, StagingLimits, StagingOwner, StagingStore,
-        SubmissionMetadata, SubmissionMetadataValidator, WorkloadClass,
+        SubmissionMetadata, SubmissionMetadataValidator,
     };
     use sha2::{Digest, Sha256};
     use std::collections::HashSet;
@@ -1113,7 +1113,8 @@ mod tests {
             scope_version: 1,
             requested_scope: requested_scope(),
             deadline_ms: 30_000,
-            workload_class: WorkloadClass::Operational,
+            workload_profile_id: crate::workload_profile::SMALL_OPERATIONAL_PROFILE_ID,
+            workload_profile: crate::workload_profile::WorkloadProfileLimits::small_operational(),
         }
     }
 
@@ -1507,7 +1508,9 @@ mod tests {
                     sql_data_bytes: 0,
                     sql_data_sha256: Sha256::digest([]).into(),
                     deadline_ms: 30_000,
-                    workload_class: WorkloadClass::Operational,
+                    workload_profile_id: crate::workload_profile::SMALL_OPERATIONAL_PROFILE_ID,
+                    workload_profile:
+                        crate::workload_profile::WorkloadProfileLimits::small_operational(),
                 },
             )
             .unwrap();

@@ -423,7 +423,7 @@ pub(super) fn validate_final_dependency_edges(
 
     let table = transaction.open_table(CATALOG).map_err(storage_error)?;
     let mut graph = DependencyCatalogGraph::default();
-    for family_code in [1u16, 2, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] {
+    for family_code in [1u16, 2, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18] {
         let prefix = family_code.to_be_bytes();
         let mut family_count = 0usize;
         for entry in table.range(prefix.as_slice()..).map_err(storage_error)? {
@@ -727,7 +727,7 @@ pub(super) fn validate_final_typed_object_mappings(
     transaction: &WriteTransaction,
     catalog_writes: &[CatalogWrite],
 ) -> Result<(), CommitError> {
-    const TYPED_FAMILIES: [u16; 9] = [3, 4, 5, 6, 7, 8, 9, 10, 13];
+    const TYPED_FAMILIES: [u16; 10] = [3, 4, 5, 6, 7, 8, 9, 10, 13, 18];
     let is_relevant_family = |family: u16| family == 2 || TYPED_FAMILIES.contains(&family);
     if !catalog_writes.iter().any(|write| {
         write.key.len() >= 2 && is_relevant_family(u16::from_be_bytes([write.key[0], write.key[1]]))
@@ -781,6 +781,7 @@ pub(super) fn validate_final_typed_object_mappings(
                 7 => 9,
                 8 | 9 => 10,
                 10 => 13,
+                11 => 18,
                 _ => return Err(CommitError::InvalidCatalog),
             };
             let typed_key = id_catalog_key(typed_family, object_id);
@@ -817,6 +818,7 @@ pub(super) fn validate_final_typed_object_mappings(
                     }
                 }
                 13 => 10,
+                18 => 11,
                 _ => unreachable!(),
             };
             if object_kind != Some(expected_kind) {
@@ -825,6 +827,7 @@ pub(super) fn validate_final_typed_object_mappings(
             let name_tag = match family {
                 6 => Some(3),
                 10 => Some(2),
+                18 => Some(1),
                 _ => None,
             };
             if let Some(name_tag) = name_tag {
@@ -1055,7 +1058,7 @@ pub(super) fn collect_dependency_catalog_record(
                     .try_into()
                     .map_err(|_| CommitError::InvalidCatalog)?,
             );
-            if !(1..=10).contains(&object_kind)
+            if !(1..=11).contains(&object_kind)
                 || graph.object_parents.insert(object_id, parent_id).is_some()
                 || graph.object_kinds.insert(object_id, object_kind).is_some()
             {
@@ -1425,10 +1428,21 @@ pub(super) fn collect_dependency_catalog_record(
                     .try_into()
                     .map_err(|_| CommitError::InvalidCatalog)?,
             );
-            if !matches!(kind, 1..=5) {
+            if !matches!(kind, 1..=6) {
                 return Err(CommitError::InvalidCatalog);
             }
             graph.dependencies.push((dependent_id, referenced_id, kind));
+        }
+        18 => {
+            if key.len() != 19 {
+                return Err(CommitError::InvalidCatalog);
+            }
+            let profile_id: [u8; 16] = key[3..19]
+                .try_into()
+                .map_err(|_| CommitError::InvalidCatalog)?;
+            if graph.typed_object_kinds.insert(profile_id, 11).is_some() {
+                return Err(CommitError::InvalidCatalog);
+            }
         }
         _ => return Err(CommitError::InvalidCatalog),
     }

@@ -35,11 +35,10 @@ fn owner_invocation_cursor_round_trips_canonically() {
 }
 
 #[test]
-fn analytical_admission_cap_preserves_operational_capacity() {
+fn admission_cap_enforces_global_limit() {
     let state = std::sync::Arc::new(InvocationAdmissionState {
         database_key: 0,
-        limit: std::sync::atomic::AtomicUsize::new(3),
-        analytical_limit: std::sync::atomic::AtomicUsize::new(1),
+        limit: std::sync::atomic::AtomicUsize::new(2),
         statistics_collection_limit: std::sync::atomic::AtomicUsize::new(
             crate::statistics::MAX_COMMITTED_POPULATION_ROWS as usize,
         ),
@@ -62,37 +61,19 @@ fn analytical_admission_cap_preserves_operational_capacity() {
         }),
         changed: std::sync::Condvar::new(),
     });
-    let analytical = state
-        .acquire(
-            [0x71; 16],
-            [0x81; 16],
-            crate::supervisor::WorkloadClass::Analytical,
-            1_000,
-            Duration::from_secs(60),
-        )
-        .expect("first analytical invocation should be admitted");
+    let first = state
+        .acquire([0x71; 16], [0x81; 16], 1_000, Duration::from_secs(60))
+        .expect("first invocation should be admitted");
+    let second = state
+        .acquire([0x72; 16], [0x82; 16], 1_001, Duration::from_secs(60))
+        .expect("second invocation should be admitted");
     assert_eq!(
         state
-            .acquire(
-                [0x72; 16],
-                [0x82; 16],
-                crate::supervisor::WorkloadClass::Analytical,
-                1_001,
-                Duration::from_secs(60),
-            )
+            .acquire([0x73; 16], [0x83; 16], 1_002, Duration::from_secs(60))
             .err(),
         Some(AdmissionError::Limit)
     );
-    let operational = state
-        .acquire(
-            [0x73; 16],
-            [0x83; 16],
-            crate::supervisor::WorkloadClass::Operational,
-            1_002,
-            Duration::from_secs(60),
-        )
-        .expect("operational invocation should use reserved global capacity");
-    drop((analytical, operational));
+    drop((first, second));
 }
 
 #[test]
@@ -100,7 +81,6 @@ fn admission_conflict_cancellation_and_policy_counters_saturate_at_u64_max() {
     let state = std::sync::Arc::new(InvocationAdmissionState {
         database_key: 0,
         limit: std::sync::atomic::AtomicUsize::new(1),
-        analytical_limit: std::sync::atomic::AtomicUsize::new(1),
         statistics_collection_limit: std::sync::atomic::AtomicUsize::new(
             crate::statistics::MAX_COMMITTED_POPULATION_ROWS as usize,
         ),
@@ -124,13 +104,7 @@ fn admission_conflict_cancellation_and_policy_counters_saturate_at_u64_max() {
         changed: std::sync::Condvar::new(),
     });
     let permit = state
-        .acquire(
-            [0x74; 16],
-            [0x84; 16],
-            crate::supervisor::WorkloadClass::Operational,
-            1_003,
-            Duration::from_secs(60),
-        )
+        .acquire([0x74; 16], [0x84; 16], 1_003, Duration::from_secs(60))
         .expect("admission should succeed at a saturated counter");
     permit.record_conflict();
     state.live.lock().unwrap().record_admin_cancellation();
@@ -345,13 +319,7 @@ fn cancellation_after_committing_transition_is_too_late() -> Result<(), Box<dyn 
     let principal_id = [0x74; 16];
     let permit = storage
         .admissions
-        .acquire(
-            invocation_id,
-            principal_id,
-            crate::supervisor::WorkloadClass::Operational,
-            1_000,
-            Duration::from_secs(60),
-        )
+        .acquire(invocation_id, principal_id, 1_000, Duration::from_secs(60))
         .map_err(|error| std::io::Error::other(format!("unexpected admission error: {error:?}")))?;
     let (transition_sender, transition_receiver) = mpsc::sync_channel(0);
     let (resume_sender, resume_receiver) = mpsc::sync_channel(0);

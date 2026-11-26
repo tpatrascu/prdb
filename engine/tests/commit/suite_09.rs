@@ -1715,19 +1715,13 @@ pub(super) fn storage_manager_routes_invocations_and_catalog_commits_through_sha
         StorageManagerConfig {
             ddl_fence_timeout: Duration::from_millis(100),
             max_active_invocations: 128,
-            max_active_analytical_invocations: 8,
             max_invocation_age: Duration::from_secs(15 * 60),
             max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
             max_authorized_index_range_candidates: 128,
-            max_analytical_authorized_index_range_candidates: None,
             max_authorized_index_range_bytes: 16 * 1024 * 1024,
-            max_analytical_authorized_index_range_bytes: None,
-            max_analytical_invocation_scan_work: None,
             max_planner_estimate_requests:
                 prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
-            max_analytical_planner_estimate_requests: None,
             max_planner_estimate_candidates: prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
-            max_analytical_planner_estimate_candidates: None,
             max_statistics_collection_rows: prdb_engine::statistics::MAX_COMMITTED_POPULATION_ROWS
                 as usize,
             max_token_lifecycle_requests_per_minute: 30,

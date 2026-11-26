@@ -110,7 +110,6 @@ pub struct AdministrativeInvocationStatus {
     pub invocation_id: [u8; 16],
     pub transaction_id: [u8; 16],
     pub principal_id: [u8; 16],
-    pub workload_class: crate::supervisor::WorkloadClass,
     pub status: InvocationStatus,
     pub age_us: u64,
     pub staged_rows: usize,

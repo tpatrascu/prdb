@@ -1614,7 +1614,7 @@ int32_t prdb_sdk_sql_run_statement_optimizer_v1(
     prdb_sdk_sql_parameter_metadata_v1 *metadata = NULL;
     prdb_sdk_workload_budgets_v1 workload_budgets = {0};
     prdb_host_api_v1 executor_host = {0};
-    uint8_t workload_response[12] = {0};
+    uint8_t workload_response[PRDB_QUERY_WORKLOAD_BUDGETS_WIRE_BYTES] = {0};
     uint64_t workload_response_len = 0;
     uint8_t *request = NULL;
     uint8_t *optimizer_response = NULL;

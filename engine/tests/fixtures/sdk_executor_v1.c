@@ -509,9 +509,9 @@ int main(void) {
     }
     {
         const uint8_t empty_request[] = {0};
-        const uint8_t budget_reply[12] = {
+        uint8_t budget_reply[PRDB_QUERY_WORKLOAD_BUDGETS_WIRE_BYTES] = {
             'P', 'Q', 'B', '1', 0, PRDB_QUERY_WORKLOAD_BUDGETS_VERSION,
-            0, 12, 0, 0, 1, 0};
+            0, PRDB_QUERY_WORKLOAD_BUDGETS_WIRE_BYTES, 0, 0, 1, 0};
         prdb_sdk_workload_budgets_v1 budgets = {0};
         mock.expected_operation = PRDB_SDK_EXECUTOR_OP_GET_WORKLOAD_BUDGETS;
         mock.expected_request = empty_request;

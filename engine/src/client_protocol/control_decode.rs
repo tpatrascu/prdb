@@ -118,11 +118,7 @@ pub fn decode_client_prepare_for_protocol(
         .map_err(|_| ClientControlError::InvalidPrepare)?;
     let scope_text = take_string(&mut fields, "requested_scope")?;
     let deadline_ms = take_decimal_string(&mut fields, "deadline_ms")?;
-    let workload_class = match take_string(&mut fields, "workload_class")?.as_str() {
-        "operational" => crate::supervisor::WorkloadClass::Operational,
-        "analytical" => crate::supervisor::WorkloadClass::Analytical,
-        _ => return Err(ClientControlError::InvalidPrepare),
-    };
+    let _ = fields.remove("workload_class");
     let transaction_id = fields
         .contains_key("transaction_id")
         .then(|| take_string(&mut fields, "transaction_id"))
@@ -172,7 +168,6 @@ pub fn decode_client_prepare_for_protocol(
         scope_version,
         requested_scope,
         deadline_ms,
-        workload_class,
         transaction_id,
         package_id,
     })

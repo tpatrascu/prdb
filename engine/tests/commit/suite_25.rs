@@ -26,7 +26,7 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
     };
     use prdb_engine::supervisor::{
         ChunkKind, PrepareSubmission, StagingLimits, StagingStore, SubmissionMetadata,
-        SubmissionMetadataValidator, WorkloadClass,
+        SubmissionMetadataValidator,
     };
     use prdb_engine::supervisor_ipc::{
         GatewayAbortReason, GatewayAdmissionConfig, GatewayExecutorConfig, GatewayTerminalDecision,
@@ -485,29 +485,30 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
     let storage = StorageManager::with_config(
         &database,
         StorageManagerConfig {
-            max_active_analytical_invocations: 8,
-            max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
-            max_authorized_index_range_candidates: 128,
-            max_analytical_authorized_index_range_candidates: if sql_in_elevated_budget_only {
-                Some(2_048)
-            } else if indexed_join_benchmark_only {
-                Some(512)
+            max_active_invocations: 128,
+            max_invocation_scan_work: if indexed_join_benchmark_only {
+                1_048_576
             } else {
-                None
+                4_194_304
             },
-            max_authorized_index_range_bytes: 16 * 1024 * 1024,
-            max_analytical_authorized_index_range_bytes: sql_in_elevated_budget_only
-                .then_some(32 * 1024 * 1024),
-            max_analytical_invocation_scan_work: indexed_join_benchmark_only.then_some(1_048_576),
-            max_planner_estimate_requests: if sql_in_elevated_budget_only { 1 } else { 16 },
-            max_analytical_planner_estimate_requests: sql_in_elevated_budget_only.then_some(64),
+            max_authorized_index_range_candidates: if sql_in_elevated_budget_only {
+                2_048
+            } else if indexed_join_benchmark_only {
+                512
+            } else {
+                128
+            },
+            max_authorized_index_range_bytes: if sql_in_elevated_budget_only {
+                32 * 1024 * 1024
+            } else {
+                16 * 1024 * 1024
+            },
+            max_planner_estimate_requests: if sql_in_elevated_budget_only { 64 } else { 16 },
             max_planner_estimate_candidates: if sql_in_elevated_budget_only {
-                1
+                2_048
             } else {
                 prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES
             },
-            max_analytical_planner_estimate_candidates: sql_in_elevated_budget_only
-                .then_some(2_048),
             ..StorageManagerConfig::default()
         },
     )?;
@@ -2751,8 +2752,8 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
     let owner = client.staging_owner()?;
     let staging = StagingStore::new(
         StagingLimits {
-            max_active_analytical: 9,
-            max_active_analytical_per_principal: 8,
+            max_active_invocations: 9,
+            max_active_per_principal: 8,
             ..StagingLimits::default()
         },
         validator_for_scope(requested_scope.clone()),
@@ -2771,7 +2772,14 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
             sql_data_bytes: 0,
             sql_data_sha256: Sha256::digest([]).into(),
             deadline_ms: 120_000,
-            workload_class: WorkloadClass::Analytical,
+            workload_profile_id: prdb_engine::workload_profile::LARGE_ANALYTICAL_PROFILE_ID,
+            workload_profile: {
+                let mut p =
+                    prdb_engine::workload_profile::WorkloadProfileLimits::large_analytical();
+                p.max_active_for_profile = 8;
+                p.max_active_per_principal = 8;
+                p
+            },
         },
     )?;
     let mut artifact_offset = 0;
@@ -2889,7 +2897,6 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
             memory_max_bytes: 256 * 1024 * 1024,
             max_processes: 32,
         },
-        analytical_resource_limits: None,
         launch: prdb_engine::executor_launcher::ExecutorLaunchConfig {
             executor_path: PathBuf::from(env!("CARGO_BIN_EXE_prdb-executor")),
             optimizer_path: PathBuf::from(env!("CARGO_BIN_EXE_prdb-optimizer")),
@@ -2897,27 +2904,19 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
             runtime_read_execute: required_paths("PRDB_TEST_RUNTIME_READ_EXECUTE")?,
             runtime_read_only: required_paths("PRDB_TEST_RUNTIME_READ_ONLY")?,
             spill_broker,
-            max_total_result_bytes: if sql_in_elevated_budget_only {
-                1
+            max_total_result_bytes: if elevated_result_only {
+                192 * 1024 * 1024
             } else {
                 prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES
             },
-            analytical_max_total_result_bytes: if elevated_result_only {
-                Some(192 * 1024 * 1024)
-            } else {
-                sql_in_elevated_budget_only
-                    .then_some(prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES)
-            },
-            max_sql_index_probe_candidates:
-                prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
-            analytical_max_sql_index_probe_candidates: if sql_in_elevated_budget_only {
-                Some(2_048)
+            max_sql_index_probe_candidates: if sql_in_elevated_budget_only {
+                2_048
             } else if indexed_join_asymmetric_benchmark_only
                 || std::env::var_os("PRDB_TEST_INDEXED_JOIN_BENCHMARK_ONLY").is_some()
             {
-                Some(512)
+                512
             } else {
-                None
+                prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES
             },
             cleanup_timeout: Duration::from_secs(2),
         },
@@ -3081,7 +3080,14 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
                 sql_data_bytes: 0,
                 sql_data_sha256: Sha256::digest([]).into(),
                 deadline_ms: 30_000,
-                workload_class: WorkloadClass::Analytical,
+                workload_profile_id: prdb_engine::workload_profile::LARGE_ANALYTICAL_PROFILE_ID,
+                workload_profile: {
+                    let mut p =
+                        prdb_engine::workload_profile::WorkloadProfileLimits::large_analytical();
+                    p.max_active_for_profile = 8;
+                    p.max_active_per_principal = 8;
+                    p
+                },
             },
         )?;
         let mut ordered_offset = 0;
@@ -4347,7 +4353,14 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
             sql_data_bytes: 0,
             sql_data_sha256: Sha256::digest([]).into(),
             deadline_ms: 120_000,
-            workload_class: WorkloadClass::Analytical,
+            workload_profile_id: prdb_engine::workload_profile::LARGE_ANALYTICAL_PROFILE_ID,
+            workload_profile: {
+                let mut p =
+                    prdb_engine::workload_profile::WorkloadProfileLimits::large_analytical();
+                p.max_active_for_profile = 8;
+                p.max_active_per_principal = 8;
+                p
+            },
         },
     )?;
     let mut cancellation_artifact_offset = 0;
@@ -4419,7 +4432,14 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
                 sql_data_bytes: 0,
                 sql_data_sha256: Sha256::digest([]).into(),
                 deadline_ms: 120_000,
-                workload_class: WorkloadClass::Analytical,
+                workload_profile_id: prdb_engine::workload_profile::LARGE_ANALYTICAL_PROFILE_ID,
+                workload_profile: {
+                    let mut p =
+                        prdb_engine::workload_profile::WorkloadProfileLimits::large_analytical();
+                    p.max_active_for_profile = 8;
+                    p.max_active_per_principal = 8;
+                    p
+                },
             },
         )?;
         let mut worker_artifact_offset = 0;
@@ -4497,7 +4517,14 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
             sql_data_bytes: 0,
             sql_data_sha256: Sha256::digest([]).into(),
             deadline_ms: 30_000,
-            workload_class: WorkloadClass::Analytical,
+            workload_profile_id: prdb_engine::workload_profile::LARGE_ANALYTICAL_PROFILE_ID,
+            workload_profile: {
+                let mut p =
+                    prdb_engine::workload_profile::WorkloadProfileLimits::large_analytical();
+                p.max_active_for_profile = 8;
+                p.max_active_per_principal = 8;
+                p
+            },
         },
     )?;
     let mut saturated_artifact_offset = 0;
@@ -5269,6 +5296,11 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
                         );
                         match saturated_start {
                             Err(prdb_engine::client_protocol::ClientStartError::ExecutorStart(
+                                prdb_engine::supervisor::StartError::Staging(
+                                    prdb_engine::supervisor::StagingError::ResourceLimit,
+                                ),
+                            ))
+                            | Err(prdb_engine::client_protocol::ClientStartError::ExecutorStart(
                                 prdb_engine::supervisor::StartError::Admission(
                                     prdb_engine::executor_launcher::ExecutorStartError::Admission {
                                         error: prdb_engine::transaction::TransactionError::AdmissionLimitExceeded,
@@ -5287,6 +5319,8 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
                                 ));
                             }
                         }
+                        let _ = saturated_staging
+                            .cancel_prepared(saturated_owner, saturated_reservation.invocation_id);
                         let request_started = std::time::Instant::now();
                         match cancellation_storage
                             .cancel_owned_invocation(
@@ -6547,7 +6581,14 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
                 sql_data_bytes: 0,
                 sql_data_sha256: Sha256::digest([]).into(),
                 deadline_ms: 30_000,
-                workload_class: WorkloadClass::Analytical,
+                workload_profile_id: prdb_engine::workload_profile::LARGE_ANALYTICAL_PROFILE_ID,
+                workload_profile: {
+                    let mut p =
+                        prdb_engine::workload_profile::WorkloadProfileLimits::large_analytical();
+                    p.max_active_for_profile = 8;
+                    p.max_active_per_principal = 8;
+                    p
+                },
             },
         )?;
         let mut aggregate_offset = 0;
@@ -6964,7 +7005,15 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
                     sql_data_bytes: 0,
                     sql_data_sha256: Sha256::digest([]).into(),
                     deadline_ms: 30_000,
-                    workload_class: WorkloadClass::Analytical,
+                    workload_profile_id: prdb_engine::workload_profile::LARGE_ANALYTICAL_PROFILE_ID,
+                    workload_profile: {
+                        let mut p =
+                            prdb_engine::workload_profile::WorkloadProfileLimits::large_analytical(
+                            );
+                        p.max_active_for_profile = 8;
+                        p.max_active_per_principal = 8;
+                        p
+                    },
                 },
             )?;
             let mut redacted_offset = 0;
@@ -7112,7 +7161,14 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
                 sql_data_bytes: 0,
                 sql_data_sha256: Sha256::digest([]).into(),
                 deadline_ms: 30_000,
-                workload_class: WorkloadClass::Analytical,
+                workload_profile_id: prdb_engine::workload_profile::LARGE_ANALYTICAL_PROFILE_ID,
+                workload_profile: {
+                    let mut p =
+                        prdb_engine::workload_profile::WorkloadProfileLimits::large_analytical();
+                    p.max_active_for_profile = 8;
+                    p.max_active_per_principal = 8;
+                    p
+                },
             },
         )?;
         let mut bigint_offset = 0;
@@ -7531,7 +7587,14 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
             sql_data_bytes: 0,
             sql_data_sha256: Sha256::digest([]).into(),
             deadline_ms: 30_000,
-            workload_class: WorkloadClass::Analytical,
+            workload_profile_id: prdb_engine::workload_profile::LARGE_ANALYTICAL_PROFILE_ID,
+            workload_profile: {
+                let mut p =
+                    prdb_engine::workload_profile::WorkloadProfileLimits::large_analytical();
+                p.max_active_for_profile = 8;
+                p.max_active_per_principal = 8;
+                p
+            },
         },
     )?;
     let mut output_artifact_offset = 0;
@@ -7704,7 +7767,14 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
             scope_version: 1,
             requested_scope: requested_scope.clone(),
             deadline_ms: 30_000,
-            workload_class: WorkloadClass::Analytical,
+            workload_profile_id: prdb_engine::workload_profile::LARGE_ANALYTICAL_PROFILE_ID,
+            workload_profile: {
+                let mut p =
+                    prdb_engine::workload_profile::WorkloadProfileLimits::large_analytical();
+                p.max_active_for_profile = 8;
+                p.max_active_per_principal = 8;
+                p
+            },
         },
     )?;
     let mut cancelled_artifact_offset = 0;
@@ -7861,7 +7931,14 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
             scope_version: 1,
             requested_scope: requested_scope.clone(),
             deadline_ms: 30_000,
-            workload_class: WorkloadClass::Analytical,
+            workload_profile_id: prdb_engine::workload_profile::LARGE_ANALYTICAL_PROFILE_ID,
+            workload_profile: {
+                let mut p =
+                    prdb_engine::workload_profile::WorkloadProfileLimits::large_analytical();
+                p.max_active_for_profile = 8;
+                p.max_active_per_principal = 8;
+                p
+            },
         },
     )?;
     let mut timed_out_artifact_offset = 0;
@@ -8015,7 +8092,9 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
                 sql_data_bytes: 0,
                 sql_data_sha256: Sha256::digest([]).into(),
                 deadline_ms: 30_000,
-                workload_class: WorkloadClass::Operational,
+                workload_profile_id: prdb_engine::workload_profile::SMALL_OPERATIONAL_PROFILE_ID,
+                workload_profile:
+                    prdb_engine::workload_profile::WorkloadProfileLimits::small_operational(),
             },
         )
         .map_err(|error| format!("prepare denied UPDATE fixture: {error:?}"))?;
@@ -8152,7 +8231,9 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
                 sql_data_bytes: 0,
                 sql_data_sha256: Sha256::digest([]).into(),
                 deadline_ms: 30_000,
-                workload_class: WorkloadClass::Operational,
+                workload_profile_id: prdb_engine::workload_profile::SMALL_OPERATIONAL_PROFILE_ID,
+                workload_profile:
+                    prdb_engine::workload_profile::WorkloadProfileLimits::small_operational(),
             },
         )
         .map_err(|error| format!("prepare UPDATE target-limit fixture: {error:?}"))?;
@@ -8281,7 +8362,9 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
             sql_data_bytes: 0,
             sql_data_sha256: Sha256::digest([]).into(),
             deadline_ms: 30_000,
-            workload_class: WorkloadClass::Operational,
+            workload_profile_id: prdb_engine::workload_profile::SMALL_OPERATIONAL_PROFILE_ID,
+            workload_profile:
+                prdb_engine::workload_profile::WorkloadProfileLimits::small_operational(),
         },
     )?;
     let mut stage_failure_artifact_offset = 0;
@@ -8414,7 +8497,9 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
             sql_data_bytes: 0,
             sql_data_sha256: Sha256::digest([]).into(),
             deadline_ms: 30_000,
-            workload_class: WorkloadClass::Operational,
+            workload_profile_id: prdb_engine::workload_profile::SMALL_OPERATIONAL_PROFILE_ID,
+            workload_profile:
+                prdb_engine::workload_profile::WorkloadProfileLimits::small_operational(),
         },
     )?;
     let mut restricted_artifact_offset = 0;

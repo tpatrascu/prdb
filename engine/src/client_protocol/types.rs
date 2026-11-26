@@ -166,7 +166,6 @@ pub struct ClientPrepare {
     pub scope_version: u32,
     pub requested_scope: Vec<u8>,
     pub deadline_ms: u64,
-    pub workload_class: crate::supervisor::WorkloadClass,
     /// Present together only for protocol v2 packages executing inside an
     /// explicit transaction.
     pub transaction_id: Option<[u8; 16]>,
@@ -176,9 +175,11 @@ pub struct ClientPrepare {
 pub(super) enum PendingAdminAction {
     CreateUser {
         name: String,
+        workload_profile: Option<String>,
     },
     CreateUserNoLogin {
         name: String,
+        workload_profile: Option<String>,
     },
     CreateRole {
         name: String,
@@ -330,6 +331,26 @@ pub(super) enum PendingAdminAction {
     SetUserLogin {
         user_id: [u8; 16],
         enabled: bool,
+    },
+    SetUserWorkloadProfile {
+        user_id: [u8; 16],
+        profile_name: String,
+    },
+    CreateWorkloadProfile {
+        name: String,
+        base_profile: Option<String>,
+        settings: Vec<(String, u64)>,
+    },
+    AlterWorkloadProfile {
+        name: String,
+        settings: Vec<(String, u64)>,
+    },
+    RenameWorkloadProfile {
+        old_name: String,
+        new_name: String,
+    },
+    DropWorkloadProfile {
+        name: String,
     },
     ChangeRoleMembership {
         member_id: [u8; 16],
@@ -683,9 +704,11 @@ pub enum ClientAdminCommand {
     },
     PrepareCreateUser {
         name: String,
+        workload_profile: Option<String>,
     },
     PrepareCreateUserNoLogin {
         name: String,
+        workload_profile: Option<String>,
     },
     PrepareCreateRole {
         name: String,
@@ -837,6 +860,26 @@ pub enum ClientAdminCommand {
     PrepareSetUserLogin {
         user_id: [u8; 16],
         enabled: bool,
+    },
+    PrepareSetUserWorkloadProfile {
+        user_id: [u8; 16],
+        profile_name: String,
+    },
+    PrepareCreateWorkloadProfile {
+        name: String,
+        base_profile: Option<String>,
+        settings: Vec<(String, u64)>,
+    },
+    PrepareAlterWorkloadProfile {
+        name: String,
+        settings: Vec<(String, u64)>,
+    },
+    PrepareRenameWorkloadProfile {
+        old_name: String,
+        new_name: String,
+    },
+    PrepareDropWorkloadProfile {
+        name: String,
     },
     PrepareGrantRole {
         member_id: [u8; 16],

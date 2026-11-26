@@ -59,3 +59,4 @@ pub mod supervisor;
 pub mod supervisor_ipc;
 pub mod transaction;
 pub mod tuple;
+pub mod workload_profile;

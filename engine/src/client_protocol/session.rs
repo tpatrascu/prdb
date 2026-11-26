@@ -398,6 +398,16 @@ impl ClientConnectionSession {
                 ClientControlError::InvalidPrepare,
             ));
         }
+        let (workload_profile_id, workload_profile) = {
+            let session = self
+                .authenticated
+                .as_ref()
+                .ok_or(ClientSessionError::WrongMode)?;
+            (
+                session.workload_profile_id(),
+                session.workload_profile().clone(),
+            )
+        };
         let reservation = staging
             .prepare(
                 self.staging_owner()?,
@@ -413,7 +423,8 @@ impl ClientConnectionSession {
                     sql_data_bytes: prepare.sql_data_bytes,
                     sql_data_sha256: prepare.sql_data_sha256,
                     deadline_ms: prepare.deadline_ms,
-                    workload_class: prepare.workload_class,
+                    workload_profile_id,
+                    workload_profile,
                 },
             )
             .map_err(ClientSessionError::Staging)?;
@@ -995,7 +1006,7 @@ impl ClientConnectionSession {
                     max_rows,
                     max_bytes,
                     deadline: Some(deadline),
-                    workload_class: submission.metadata().workload_class,
+                    workload_profile: Some(submission.metadata().workload_profile.clone()),
                 },
                 requested_scope,
                 &token_secret,
@@ -1038,7 +1049,7 @@ impl ClientConnectionSession {
             owner,
             invocation_id,
             &executor.cgroup_parent,
-            |metadata| executor.resource_limits_for(metadata.workload_class),
+            |metadata| executor.clamp_resource_limits(&metadata.workload_profile),
             &executor.launch,
             |submission| {
                 let duration = std::time::Duration::from_millis(submission.metadata().deadline_ms);
@@ -1059,7 +1070,7 @@ impl ClientConnectionSession {
                         max_rows: admission.max_rows,
                         max_bytes: admission.max_bytes,
                         deadline: Some(deadline),
-                        workload_class: submission.metadata().workload_class,
+                        workload_profile: Some(submission.metadata().workload_profile.clone()),
                     },
                     requested_scope,
                     &token_secret,

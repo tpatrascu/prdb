@@ -983,7 +983,7 @@ pub(super) fn client_handshake_requires_hello_first_and_sequences_responses()
         let prepare = round_trip!(
             3,
             4,
-            format!("{{\"manifest_version\":1,\"manifest\":\"bQ==\",\"artifact_bytes\":\"6\",\"artifact_sha256\":\"{artifact_hash}\",\"parameter_bytes\":\"0\",\"parameter_sha256\":\"{empty_hash}\",\"sql_data_bytes\":\"0\",\"sql_data_sha256\":\"{empty_hash}\",\"scope_version\":1,\"requested_scope\":\"UFNDMQABAgIBAQEBAQEBAQEBAQEBAQEB\",\"deadline_ms\":\"30000\",\"workload_class\":\"operational\",\"sdk_library_mode\":\"repository\"}}").into_bytes()
+            format!("{{\"manifest_version\":1,\"manifest\":\"bQ==\",\"artifact_bytes\":\"6\",\"artifact_sha256\":\"{artifact_hash}\",\"parameter_bytes\":\"0\",\"parameter_sha256\":\"{empty_hash}\",\"sql_data_bytes\":\"0\",\"sql_data_sha256\":\"{empty_hash}\",\"scope_version\":1,\"requested_scope\":\"UFNDMQABAgIBAQEBAQEBAQEBAQEBAQEB\",\"deadline_ms\":\"30000\",\"sdk_library_mode\":\"repository\"}}").into_bytes()
         );
         let prepare_response = std::str::from_utf8(&prepare.payload)?;
         let invocation_hex = prepare_response

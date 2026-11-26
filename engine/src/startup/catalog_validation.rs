@@ -41,7 +41,7 @@ pub(super) fn validate_catalog(
     metadata: &EngineMetadata,
 ) -> Result<PersistedCatalog, StartupError> {
     let table = read.open_table(CATALOG).map_err(storage_error)?;
-    let mut family_counts = [0usize; 18];
+    let mut family_counts = [0usize; 19];
     let mut count = 0usize;
     let mut index_definitions = HashMap::new();
     let mut builtin_mappings = None;
@@ -94,7 +94,7 @@ pub(super) fn validate_catalog(
         let max_family = if metadata.catalog_version == 1 {
             16
         } else {
-            17
+            18
         };
         if !(1..=max_family).contains(&family_code) {
             return Err(StartupError::InvalidCatalog);
@@ -158,7 +158,7 @@ pub(super) fn validate_catalog(
                         .map_err(|_| StartupError::InvalidCatalog)
                 })
                 .transpose()?;
-            if !matches!(kind, 1..=10)
+            if !matches!(kind, 1..=11)
                 || object_parents.insert(object_id, parent_id).is_some()
                 || object_kinds.insert(object_id, kind).is_some()
             {
@@ -557,7 +557,7 @@ pub(super) fn validate_catalog(
                     .try_into()
                     .map_err(|_| StartupError::InvalidCatalog)?,
             );
-            if !matches!(kind, 1..=5) {
+            if !matches!(kind, 1..=6) {
                 return Err(StartupError::InvalidCatalog);
             }
             dependencies.push((dependent_id, referenced_id, kind));
@@ -857,7 +857,11 @@ pub(super) fn validate_catalog(
             .ok_or(StartupError::InvalidCatalog)?;
         let typed_record = decode_registered_envelope(typed_value.value())
             .map_err(|_| StartupError::InvalidCatalog)?;
-        let name_tag = if family == 6 { 3 } else { 2 };
+        let name_tag = match family {
+            6 => 3,
+            18 => 1,
+            _ => 2,
+        };
         let object_key = catalog_id_key(2, object_id);
         let object_value = table
             .get(object_key.as_slice())
@@ -1033,6 +1037,7 @@ pub(super) fn typed_family_object_kind(
             _ => return Err(StartupError::InvalidCatalog),
         },
         13 => Some(10),
+        18 => Some(11),
         _ => None,
     };
     Ok(kind)

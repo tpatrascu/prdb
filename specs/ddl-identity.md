@@ -9,14 +9,20 @@ Initially support database-local users and roles with database-issued opaque bea
 ## User and Role DDL
 
 ```sql
-CREATE USER alice LOGIN;
+CREATE USER alice LOGIN WORKLOAD PROFILE small_operational;
 CREATE USER IF NOT EXISTS alice LOGIN;
-CREATE USER service_loader NOLOGIN;
+CREATE USER service_loader NOLOGIN WORKLOAD PROFILE large_analytical;
 ALTER USER alice NOLOGIN;
 ALTER USER alice LOGIN;
+ALTER USER alice WORKLOAD PROFILE large_operational;
 ALTER USER alice RENAME TO alice_admin;
 DROP USER service_loader RESTRICT;
 DROP USER IF EXISTS retired_loader RESTRICT;
+
+CREATE WORKLOAD PROFILE erp_batch FROM small_operational WITH (memory_max_bytes = 536870912, max_processes = 64);
+ALTER WORKLOAD PROFILE erp_batch SET (max_sql_index_probe_candidates = 2048);
+ALTER WORKLOAD PROFILE erp_batch RENAME TO erp_batch_v2;
+DROP WORKLOAD PROFILE erp_batch_v2 RESTRICT;
 
 CREATE ROLE managers;
 CREATE ROLE IF NOT EXISTS managers;

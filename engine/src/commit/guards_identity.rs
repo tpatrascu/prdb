@@ -637,6 +637,8 @@ pub(super) fn identity_ddl_authority_guards(
     let read = database.begin_read().map_err(storage_error)?;
     let catalog = read.open_table(CATALOG).map_err(storage_error)?;
     let mut principal_changes = HashMap::<[u8; 16], (u16, bool, bool, bool, bool, Vec<u8>)>::new();
+    let mut workload_profile_changes = HashMap::<[u8; 16], (bool, bool, bool)>::new();
+    let mut require_admin = false;
     let mut object_changes = HashMap::<[u8; 16], (u16, bool, bool, bool)>::new();
     let mut credential_changes = HashMap::<[u8; 16], [u8; 16]>::new();
     let mut credential_issues = HashSet::<[u8; 16]>::new();
@@ -651,7 +653,7 @@ pub(super) fn identity_ddl_authority_guards(
             .and_then(|bytes| <[u8; 2]>::try_from(bytes).ok())
             .map(u16::from_be_bytes)
             .ok_or(CommitError::InvalidCatalog)?;
-        if !matches!(family, 2 | 10 | 16 | 17) {
+        if !matches!(family, 2 | 10 | 15 | 16 | 17 | 18) {
             return Err(CommitError::InvalidCatalog);
         }
         let current = catalog
@@ -659,6 +661,19 @@ pub(super) fn identity_ddl_authority_guards(
             .map_err(storage_error)?
             .map(|value| value.value().to_vec());
         if current.as_deref() == write.payload.as_deref() {
+            continue;
+        }
+        if family == 15 {
+            if write.key.len() != 39
+                || write.key[2] != 1
+                || write.key[19] != 1
+                || write.key[36] != 1
+                || u16::from_be_bytes([write.key[37], write.key[38]]) != 6
+            {
+                return Err(CommitError::InvalidCatalog);
+            }
+            add_catalog_guard(&mut guards, write.key.clone(), current);
+            required_privileges.insert(12);
             continue;
         }
         if family == 17 {
@@ -759,7 +774,7 @@ pub(super) fn identity_ddl_authority_guards(
             match family {
                 2 => {
                     let old_kind = catalog_field_u16(&write.key, old_bytes, 2, 1)?;
-                    if !matches!(old_kind, 8 | 9)
+                    if !matches!(old_kind, 8 | 9 | 11)
                         || old.fields.iter().any(|field| field.tag == 2)
                         || catalog_field_u64(&write.key, old_bytes, 2, 5)? == 0
                     {
@@ -789,6 +804,14 @@ pub(super) fn identity_ddl_authority_guards(
                         ),
                     );
                 }
+                18 => {
+                    let is_builtin = catalog_field_bytes(&write.key, old_bytes, 18, 3)?;
+                    if is_builtin != [0] || catalog_field_u64(&write.key, old_bytes, 18, 2)? == 0 {
+                        return Err(CommitError::InvalidCatalog);
+                    }
+                    require_admin = true;
+                    workload_profile_changes.insert(object_id, (false, false, true));
+                }
                 _ => return Err(CommitError::InvalidCatalog),
             }
             continue;
@@ -802,7 +825,7 @@ pub(super) fn identity_ddl_authority_guards(
             2 => {
                 let next = decode_catalog_record(&write.key, next_bytes)?;
                 let next_kind = catalog_field_u16(&write.key, next_bytes, 2, 1)?;
-                if !matches!(next_kind, 8 | 9)
+                if !matches!(next_kind, 8 | 9 | 11)
                     || next.fields.iter().any(|field| field.tag == 2)
                     || catalog_field_u16(&write.key, next_bytes, 2, 6)? != 1
                     || catalog_field_u64(&write.key, next_bytes, 2, 5)? == 0
@@ -847,7 +870,7 @@ pub(super) fn identity_ddl_authority_guards(
                             || !catalog_fields_equal_except(
                                 &old,
                                 &decode_catalog_record(&write.key, next_bytes)?,
-                                &[2, 3, 4],
+                                &[2, 3, 4, 5],
                             )
                             || next_epoch <= principal_authority_epoch(&write.key, old_bytes)?
                         {
@@ -855,7 +878,19 @@ pub(super) fn identity_ddl_authority_guards(
                         }
                         let name_changed = old_name != next_name;
                         let login_changed = old_login != next_login;
-                        if !name_changed && !login_changed {
+                        let old_profile = old
+                            .fields
+                            .iter()
+                            .find(|f| f.tag == 5)
+                            .map(|f| f.payload.as_slice());
+                        let next_record = decode_catalog_record(&write.key, next_bytes)?;
+                        let next_profile = next_record
+                            .fields
+                            .iter()
+                            .find(|f| f.tag == 5)
+                            .map(|f| f.payload.as_slice());
+                        let profile_changed = old_profile != next_profile;
+                        if !name_changed && !login_changed && !profile_changed {
                             return Err(CommitError::InvalidCatalog);
                         }
                         (false, name_changed, login_changed)
@@ -879,18 +914,41 @@ pub(super) fn identity_ddl_authority_guards(
                     ),
                 );
             }
+            18 => {
+                let next_name = catalog_field_bytes(&write.key, next_bytes, 18, 1)?;
+                let next_epoch = catalog_field_u64(&write.key, next_bytes, 18, 2)?;
+                if next_epoch == 0 {
+                    return Err(CommitError::InvalidCatalog);
+                }
+                let (created, renamed) = if let Some(old_bytes) = current.as_deref() {
+                    let old_name = catalog_field_bytes(&write.key, old_bytes, 18, 1)?;
+                    let old_epoch = catalog_field_u64(&write.key, old_bytes, 18, 2)?;
+                    if next_epoch <= old_epoch {
+                        return Err(CommitError::InvalidCatalog);
+                    }
+                    (false, old_name != next_name)
+                } else {
+                    (true, false)
+                };
+                require_admin = true;
+                workload_profile_changes.insert(object_id, (created, renamed, false));
+            }
             _ => unreachable!(),
         }
     }
 
-    if principal_changes.is_empty() && credential_changes.is_empty() {
+    if principal_changes.is_empty()
+        && credential_changes.is_empty()
+        && workload_profile_changes.is_empty()
+    {
         return Err(CommitError::InvalidCatalog);
     }
     if (principal_changes.is_empty()
+        && workload_profile_changes.is_empty()
         && audit_events
             .iter()
             .any(|event| event.action != crate::audit::AuditAction::TokenLifecycle))
-        || (!principal_changes.is_empty()
+        || ((!principal_changes.is_empty() || !workload_profile_changes.is_empty())
             && audit_events
                 .iter()
                 .any(|event| event.action != crate::audit::AuditAction::Ddl))
@@ -902,10 +960,10 @@ pub(super) fn identity_ddl_authority_guards(
     {
         return Err(CommitError::InvalidAudit);
     }
-    if object_changes
-        .keys()
-        .any(|object_id| !principal_changes.contains_key(object_id))
-    {
+    if object_changes.keys().any(|object_id| {
+        !principal_changes.contains_key(object_id)
+            && !workload_profile_changes.contains_key(object_id)
+    }) {
         return Err(CommitError::InvalidCatalog);
     }
     let mut dropped_ids = HashSet::new();
@@ -923,6 +981,21 @@ pub(super) fn identity_ddl_authority_guards(
                 if *object_kind == required_object_kind => {}
             (false, true, Some((object_kind, false, true, false)))
                 if *object_kind == required_object_kind => {}
+            (false, false, None) => {}
+            _ => return Err(CommitError::InvalidCatalog),
+        }
+    }
+    for (object_id, (created, renamed, dropped)) in &workload_profile_changes {
+        if *dropped {
+            if object_changes.get(object_id) != Some(&(11, false, false, true)) {
+                return Err(CommitError::InvalidCatalog);
+            }
+            dropped_ids.insert(*object_id);
+            continue;
+        }
+        match (created, renamed, object_changes.get(object_id)) {
+            (true, _, Some((11, true, false, false))) => {}
+            (false, true, Some((11, false, true, false))) => {}
             (false, false, None) => {}
             _ => return Err(CommitError::InvalidCatalog),
         }
@@ -1075,6 +1148,9 @@ pub(super) fn identity_ddl_authority_guards(
     let roles = resolve_role_closure(principal_id, &memberships)
         .map_err(|_| CommitError::InvalidCatalog)?;
     let is_database_admin = roles.contains(&admin_role_id);
+    if require_admin && !is_database_admin {
+        return Err(CommitError::DdlAuthorizationDenied);
+    }
     let mut authority_subjects = roles.clone();
     authority_subjects.insert(principal_id);
     let metadata = read
@@ -1283,8 +1359,10 @@ pub(super) fn identity_drop_restrict_references(
         if dependency_count > crate::snapshot::MAX_CATALOG_FAMILY_SCAN {
             return Err(CommitError::InvalidCatalog);
         }
-        let (dependent_id, referenced_id, _) = decode_dependency_edge(key, value.value())?;
-        if dropped_ids.contains(&dependent_id) || dropped_ids.contains(&referenced_id) {
+        let (dependent_id, referenced_id, kind) = decode_dependency_edge(key, value.value())?;
+        if (kind != 6 && dropped_ids.contains(&dependent_id))
+            || dropped_ids.contains(&referenced_id)
+        {
             return Err(CommitError::DdlAuthorizationDenied);
         }
     }

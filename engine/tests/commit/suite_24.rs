@@ -19,7 +19,7 @@ pub(super) fn sandboxed_optimizer_metadata_submission_cancels_over_tcp()
         ArtifactCompatibilityProfile, VersionedSubmissionMetadataValidator, encode_manifest_v1,
         manifest_v1_from_elf,
     };
-    use prdb_engine::supervisor::{StagingLimits, StagingStore, WorkloadClass};
+    use prdb_engine::supervisor::{StagingLimits, StagingStore};
     use prdb_engine::supervisor_ipc::{
         GatewayAdmissionConfig, GatewayClientServiceEvent, GatewayExecutorConfig,
         GatewayTerminalDecision,
@@ -289,7 +289,6 @@ pub(super) fn sandboxed_optimizer_metadata_submission_cancels_over_tcp()
             memory_max_bytes: 256 * 1024 * 1024,
             max_processes: 32,
         },
-        analytical_resource_limits: None,
         launch: prdb_engine::executor_launcher::ExecutorLaunchConfig {
             executor_path: PathBuf::from(env!("CARGO_BIN_EXE_prdb-executor")),
             optimizer_path: PathBuf::from(env!("CARGO_BIN_EXE_prdb-optimizer")),
@@ -298,10 +297,8 @@ pub(super) fn sandboxed_optimizer_metadata_submission_cancels_over_tcp()
             runtime_read_only: required_paths("PRDB_TEST_RUNTIME_READ_ONLY")?,
             spill_broker: None,
             max_total_result_bytes: prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
-            analytical_max_total_result_bytes: None,
             max_sql_index_probe_candidates:
                 prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
-            analytical_max_sql_index_probe_candidates: None,
             cleanup_timeout: Duration::from_secs(2),
         },
     };
@@ -537,7 +534,7 @@ pub(super) fn sandboxed_optimizer_metadata_submission_cancels_over_tcp()
                 SubmissionClient::connect_authenticated(address, token_id, &mut client_secret)?;
             assert_eq!(client_secret, [0; 32]);
             let invocation_id = client
-                .upload_and_seal(&package, &[], 30_000, WorkloadClass::Operational)
+                .upload_and_seal(&package, &[], 30_000)
                 .map_err(|error| format!("first TCP upload/seal failed: {error:?}"))?;
             {
                 let mut started = client
@@ -561,7 +558,7 @@ pub(super) fn sandboxed_optimizer_metadata_submission_cancels_over_tcp()
                 prdb_engine::client_submit::InvocationStatus::Committed
             );
             let cancelled_id = client
-                .upload_and_seal(&package, &[], 30_000, WorkloadClass::Operational)
+                .upload_and_seal(&package, &[], 30_000)
                 .map_err(|error| format!("second TCP upload/seal failed: {error:?}"))?;
             let cancelled_receipt = fixture.0.join("cancelled-invocation.receipt");
             {

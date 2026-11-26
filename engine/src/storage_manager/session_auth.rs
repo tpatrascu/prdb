@@ -87,6 +87,8 @@ pub struct AuthenticatedQuerySession {
     pub(super) principal_name: String,
     pub(super) authority_epoch: u64,
     pub(super) role_ids: HashSet<[u8; 16]>,
+    pub(super) workload_profile_id: [u8; 16],
+    pub(super) workload_profile: crate::workload_profile::WorkloadProfileLimits,
 }
 
 pub(super) struct ResolvedQueryIdentity {
@@ -94,6 +96,8 @@ pub(super) struct ResolvedQueryIdentity {
     pub(super) principal_name: String,
     pub(super) authority_epoch: u64,
     pub(super) role_ids: HashSet<[u8; 16]>,
+    pub(super) workload_profile_id: [u8; 16],
+    pub(super) workload_profile: crate::workload_profile::WorkloadProfileLimits,
 }
 
 impl AuthenticatedQuerySession {
@@ -105,6 +109,14 @@ impl AuthenticatedQuerySession {
 
     pub fn principal_id(&self) -> [u8; 16] {
         self.principal_id
+    }
+
+    pub fn workload_profile_id(&self) -> [u8; 16] {
+        self.workload_profile_id
+    }
+
+    pub fn workload_profile(&self) -> &crate::workload_profile::WorkloadProfileLimits {
+        &self.workload_profile
     }
 
     pub fn principal_name(&self) -> &str {
@@ -168,24 +180,46 @@ impl<'db> StorageManager<'db> {
         max_rows: usize,
         max_bytes: usize,
     ) -> Result<InvocationTransaction<'db>, TransactionError> {
-        self.begin_invocation_in_class(
+        let profile = self.resolve_principal_workload_profile(principal_id);
+        self.begin_invocation_with_profile(
             invocation_id,
             principal_id,
             retention_deadline_us,
             max_rows,
             max_bytes,
-            crate::supervisor::WorkloadClass::Operational,
+            &profile,
         )
     }
 
-    pub(super) fn begin_invocation_in_class(
+    pub(super) fn resolve_principal_workload_profile(
+        &self,
+        principal_id: [u8; 16],
+    ) -> crate::workload_profile::WorkloadProfileLimits {
+        use redb::ReadableDatabase;
+        if let Ok(read) = self.database.begin_read()
+            && let Ok(catalog) = read.open_table(crate::schema::CATALOG)
+            && let Ok(Some(bytes)) = catalog.get(principal_catalog_key(principal_id).as_slice())
+            && let Ok(record) = crate::catalog::decode_registered_envelope(bytes.value())
+            && let Some(profile_id) = record
+                .fields
+                .iter()
+                .find(|f| f.tag == 5 && f.wire_type == crate::catalog::WireType::Id)
+                .and_then(|f| <[u8; 16]>::try_from(f.payload.as_slice()).ok())
+            && let Ok(profile) = self.load_workload_profile(profile_id)
+        {
+            return profile.limits;
+        }
+        crate::workload_profile::WorkloadProfileLimits::small_operational()
+    }
+
+    pub(super) fn begin_invocation_with_profile(
         &self,
         invocation_id: [u8; 16],
         principal_id: [u8; 16],
         retention_deadline_us: i64,
         max_rows: usize,
         max_bytes: usize,
-        workload_class: crate::supervisor::WorkloadClass,
+        profile: &crate::workload_profile::WorkloadProfileLimits,
     ) -> Result<InvocationTransaction<'db>, TransactionError> {
         let started_at_us = now_unix_micros().ok_or(TransactionError::ClockUnavailable)?;
         let admission_permit = self
@@ -193,7 +227,6 @@ impl<'db> StorageManager<'db> {
             .acquire(
                 invocation_id,
                 principal_id,
-                workload_class,
                 started_at_us,
                 self.max_invocation_age,
             )
@@ -211,13 +244,13 @@ impl<'db> StorageManager<'db> {
                 self.ddl_fences.clone(),
                 admission_permit,
                 self.max_invocation_age,
-                self.max_invocation_scan_work_for(workload_class),
+                self.max_invocation_scan_work_for_profile(profile),
                 crate::transaction::AuthorizedIndexRangeBudget {
-                    candidates: self.max_authorized_index_range_candidates_for(workload_class),
-                    bytes: self.max_authorized_index_range_bytes_for(workload_class),
+                    candidates: self.max_authorized_index_range_candidates_for_profile(profile),
+                    bytes: self.max_authorized_index_range_bytes_for_profile(profile),
                 },
-                self.max_planner_estimate_requests_for(workload_class),
-                self.max_planner_estimate_candidates_for(workload_class),
+                self.max_planner_estimate_requests_for_profile(profile),
+                self.max_planner_estimate_candidates_for_profile(profile),
             ),
             invocation_id,
             principal_id,
@@ -265,7 +298,7 @@ impl<'db> StorageManager<'db> {
         max_rows: usize,
         max_bytes: usize,
     ) -> Result<(InvocationTransaction<'db>, HashSet<[u8; 16]>), TransactionError> {
-        self.begin_token_authenticated_invocation_in_class(
+        self.begin_token_authenticated_invocation_with_profile(
             SupervisorAdmissionRequest {
                 invocation_id,
                 token_id,
@@ -273,25 +306,28 @@ impl<'db> StorageManager<'db> {
                 max_rows,
                 max_bytes,
                 deadline: None,
-                workload_class: crate::supervisor::WorkloadClass::Operational,
+                workload_profile: None,
             },
             token_secret,
         )
     }
 
-    pub(super) fn begin_token_authenticated_invocation_in_class(
+    pub(super) fn begin_token_authenticated_invocation_with_profile(
         &self,
         request: SupervisorAdmissionRequest,
         token_secret: &[u8; TOKEN_SECRET_BYTES],
     ) -> Result<(InvocationTransaction<'db>, HashSet<[u8; 16]>), TransactionError> {
         let principal_id = lookup_credential_principal(self.database, request.token_id)?;
-        let mut transaction = self.begin_invocation_in_class(
+        let profile = request
+            .workload_profile
+            .unwrap_or_else(|| self.resolve_principal_workload_profile(principal_id));
+        let mut transaction = self.begin_invocation_with_profile(
             request.invocation_id,
             principal_id,
             request.retention_deadline_us,
             request.max_rows,
             request.max_bytes,
-            request.workload_class,
+            &profile,
         )?;
         let Some(now_us) = now_unix_micros() else {
             transaction.discard_unstarted_admission();
@@ -328,6 +364,8 @@ impl<'db> StorageManager<'db> {
             principal_name: identity.principal_name,
             authority_epoch: identity.authority_epoch,
             role_ids: identity.role_ids,
+            workload_profile_id: identity.workload_profile_id,
+            workload_profile: identity.workload_profile,
         })
     }
 
@@ -345,6 +383,8 @@ impl<'db> StorageManager<'db> {
         session.principal_name = identity.principal_name;
         session.authority_epoch = identity.authority_epoch;
         session.role_ids = identity.role_ids;
+        session.workload_profile_id = identity.workload_profile_id;
+        session.workload_profile = identity.workload_profile;
         Ok(())
     }
 
@@ -428,11 +468,25 @@ impl<'db> StorageManager<'db> {
             .map(u64::from_le_bytes)
             .filter(|epoch| *epoch != 0)
             .ok_or(TransactionError::AuthenticationFailed)?;
+        let workload_profile_id = principal
+            .fields
+            .iter()
+            .find(|field| field.tag == 5 && field.wire_type == crate::catalog::WireType::Id)
+            .and_then(|field| <[u8; 16]>::try_from(field.payload.as_slice()).ok())
+            .unwrap_or(crate::workload_profile::SMALL_OPERATIONAL_PROFILE_ID);
+        let workload_profile = self
+            .load_workload_profile(workload_profile_id)
+            .map(|p| p.limits)
+            .unwrap_or_else(|_| {
+                crate::workload_profile::WorkloadProfileLimits::small_operational()
+            });
         Ok(ResolvedQueryIdentity {
             principal_id,
             principal_name,
             authority_epoch,
             role_ids,
+            workload_profile_id,
+            workload_profile,
         })
     }
 

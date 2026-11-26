@@ -544,22 +544,22 @@ static int32_t run_write_read_fixture(
         static const uint8_t samples_finished[] =
             "JOIN_BENCHMARK_SAMPLES_FINISHED";
         if (invocation->parameters[0] == '6') {
-            uint8_t workload_response[12] = {0};
+            uint8_t workload_response[164] = {0};
             uint8_t empty_request = 0;
             uint64_t workload_response_len = 0;
             int32_t workload_status = host->executor_request(
                 host->context, PRDB_QUERY_HOST_OP_GET_WORKLOAD_BUDGETS,
                 &empty_request, 0, workload_response,
                 sizeof(workload_response), &workload_response_len);
-            uint32_t candidate_budget = workload_response_len == 12
+            uint32_t candidate_budget = workload_response_len == 164
                 ? ((uint32_t)workload_response[8] << 24) |
                   ((uint32_t)workload_response[9] << 16) |
                   ((uint32_t)workload_response[10] << 8) |
                   (uint32_t)workload_response[11]
                 : 0;
             if (workload_status != PRDB_QUERY_CALLBACK_OK ||
-                workload_response_len != 12 ||
-                memcmp(workload_response, "PQB1\0\1\0\14", 8) != 0 ||
+                workload_response_len != 164 ||
+                memcmp(workload_response, "PQB1\0\1\0\xa4", 8) != 0 ||
                 candidate_budget != 512) {
                 char message[72];
                 int message_len = snprintf(

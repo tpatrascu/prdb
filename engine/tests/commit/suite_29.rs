@@ -547,6 +547,16 @@ pub(super) fn planner_stream_estimates_same_typed_decimal_column_predicate()
         },
     )?;
     assert_eq!(default_estimate, EstimatePredicateResponse::Unknown);
+    let mut profile_audit = identity_audit_event(0xc4, actor, actor);
+    profile_audit.correlation_id = id(0xc4);
+    storage.set_user_workload_profile(
+        id(0xc4),
+        actor,
+        actor,
+        prdb_engine::workload_profile::LARGE_ANALYTICAL_PROFILE_ID,
+        9_999,
+        profile_audit,
+    )?;
     let elevated_storage = StorageManager::with_config(
         &database,
         StorageManagerConfig {

@@ -1103,5 +1103,5 @@ fn every_catalog_family_has_a_complete_required_field_registry() {
         assert_eq!(decode_envelope(&schema, &encoded).unwrap().fields, fields);
     }
     assert!(family_schema(0).is_none());
-    assert!(family_schema(18).is_none());
+    assert!(family_schema(19).is_none());
 }

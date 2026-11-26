@@ -518,7 +518,7 @@ pub(super) fn admin_client_lists_runtime_invocation_pages_with_best_effort_metad
             r#"{"phase":"read","operation_version":8,"operation":"runtime.invocations.list","arguments":{"limit":"1"}}"#
         );
         let first_response = format!(
-            "{{\"observed_at_us\":1000,\"consistency\":\"best_effort\",\"invocations\":[{{\"invocation_id\":\"{}\",\"transaction_id\":\"{}\",\"principal_id\":\"{}\",\"state\":\"active\",\"workload_class\":\"operational\",\"started_at_us\":900,\"age_us\":100,\"deadline_at_us\":1200,\"staged_rows\":1,\"staged_value_bytes\":12,\"snapshot_pin_count\":1,\"cancellation_requested\":false,\"cancellation_reason_code\":null}}],\"pinned_snapshot_count\":2,\"oldest_snapshot_pin_age_us\":500,\"invocations_admitted_total\":2,\"invocation_conflicts_total\":1,\"admin_cancellations_accepted_total\":1,\"admin_cancellations_denied_total\":2,\"invocation_policy_denials_total\":3,\"invocation_staged_value_bytes_total\":32,\"invocation_commit_latency_buckets\":[11,12,13,14,15,16],\"invocation_redb_write_acquisition_buckets\":[1,2,3,4,5,6],\"outcome_maintenance_passes_total\":7,\"outcome_maintenance_failures_total\":8,\"outcomes_pruned_total\":9,\"fence_waits\":[{{\"wait_id\":\"{}\",\"category\":\"ddl\",\"waited_us\":50,\"resource_ids\":[\"{}\"],\"resources_truncated\":false,\"blocker_ids\":[\"{}\"],\"blockers_truncated\":false}}],\"fence_waits_truncated\":false,\"gateway_result_bytes_relayed_total\":12345,\"gateway_result_bytes_sent_to_clients_total\":6789,\"supervisor_queue\":{{\"pending_submissions\":4,\"starting_submissions\":1,\"started_submissions\":2,\"queued_operational_starts\":3,\"queued_analytical_starts\":5,\"oldest_queued_start_wait_us\":6000,\"operational_start_wait_buckets\":[1,2,3,4,5,6],\"analytical_start_wait_buckets\":[6,5,4,3,2,1],\"reserved_submission_bytes\":4096}},\"next_cursor\":\"{server_cursor}\"}}",
+            "{{\"observed_at_us\":1000,\"consistency\":\"best_effort\",\"invocations\":[{{\"invocation_id\":\"{}\",\"transaction_id\":\"{}\",\"principal_id\":\"{}\",\"state\":\"active\",\"started_at_us\":900,\"age_us\":100,\"deadline_at_us\":1200,\"staged_rows\":1,\"staged_value_bytes\":12,\"snapshot_pin_count\":1,\"cancellation_requested\":false,\"cancellation_reason_code\":null}}],\"pinned_snapshot_count\":2,\"oldest_snapshot_pin_age_us\":500,\"invocations_admitted_total\":2,\"invocation_conflicts_total\":1,\"admin_cancellations_accepted_total\":1,\"admin_cancellations_denied_total\":2,\"invocation_policy_denials_total\":3,\"invocation_staged_value_bytes_total\":32,\"invocation_commit_latency_buckets\":[11,12,13,14,15,16],\"invocation_redb_write_acquisition_buckets\":[1,2,3,4,5,6],\"outcome_maintenance_passes_total\":7,\"outcome_maintenance_failures_total\":8,\"outcomes_pruned_total\":9,\"fence_waits\":[{{\"wait_id\":\"{}\",\"category\":\"ddl\",\"waited_us\":50,\"resource_ids\":[\"{}\"],\"resources_truncated\":false,\"blocker_ids\":[\"{}\"],\"blockers_truncated\":false}}],\"fence_waits_truncated\":false,\"gateway_result_bytes_relayed_total\":12345,\"gateway_result_bytes_sent_to_clients_total\":6789,\"supervisor_queue\":{{\"pending_submissions\":4,\"starting_submissions\":1,\"started_submissions\":2,\"queued_starts\":3,\"oldest_queued_start_wait_us\":6000,\"start_wait_buckets\":[1,2,3,4,5,6],\"reserved_submission_bytes\":4096}},\"next_cursor\":\"{server_cursor}\"}}",
             "10".repeat(16),
             "30".repeat(16),
             "20".repeat(16),
@@ -539,7 +539,7 @@ pub(super) fn admin_client_lists_runtime_invocation_pages_with_best_effort_metad
             &mut stream,
             &request,
             format!(
-                "{{\"observed_at_us\":1001,\"consistency\":\"best_effort\",\"invocations\":[{{\"invocation_id\":\"{}\",\"transaction_id\":\"{}\",\"principal_id\":\"{}\",\"state\":\"committing\",\"workload_class\":\"analytical\",\"started_at_us\":901,\"age_us\":100,\"deadline_at_us\":null,\"staged_rows\":2,\"staged_value_bytes\":24,\"snapshot_pin_count\":1,\"cancellation_requested\":true,\"cancellation_reason_code\":7}}],\"pinned_snapshot_count\":2,\"oldest_snapshot_pin_age_us\":600,\"invocations_admitted_total\":2,\"invocation_conflicts_total\":2,\"admin_cancellations_accepted_total\":2,\"admin_cancellations_denied_total\":4,\"invocation_policy_denials_total\":5,\"invocation_staged_value_bytes_total\":64,\"invocation_commit_latency_buckets\":[21,22,23,24,25,26],\"invocation_redb_write_acquisition_buckets\":[6,5,4,3,2,1],\"outcome_maintenance_passes_total\":10,\"outcome_maintenance_failures_total\":11,\"outcomes_pruned_total\":12,\"fence_waits\":[],\"fence_waits_truncated\":false,\"gateway_result_bytes_relayed_total\":12346,\"gateway_result_bytes_sent_to_clients_total\":6790,\"supervisor_queue\":{{\"pending_submissions\":0,\"starting_submissions\":0,\"started_submissions\":1,\"queued_operational_starts\":0,\"queued_analytical_starts\":0,\"oldest_queued_start_wait_us\":0,\"operational_start_wait_buckets\":[0,0,0,0,0,0],\"analytical_start_wait_buckets\":[0,0,0,0,0,0],\"reserved_submission_bytes\":0}},\"next_cursor\":null}}",
+                "{{\"observed_at_us\":1001,\"consistency\":\"best_effort\",\"invocations\":[{{\"invocation_id\":\"{}\",\"transaction_id\":\"{}\",\"principal_id\":\"{}\",\"state\":\"committing\",\"started_at_us\":901,\"age_us\":100,\"deadline_at_us\":null,\"staged_rows\":2,\"staged_value_bytes\":24,\"snapshot_pin_count\":1,\"cancellation_requested\":true,\"cancellation_reason_code\":7}}],\"pinned_snapshot_count\":2,\"oldest_snapshot_pin_age_us\":600,\"invocations_admitted_total\":2,\"invocation_conflicts_total\":2,\"admin_cancellations_accepted_total\":2,\"admin_cancellations_denied_total\":4,\"invocation_policy_denials_total\":5,\"invocation_staged_value_bytes_total\":64,\"invocation_commit_latency_buckets\":[21,22,23,24,25,26],\"invocation_redb_write_acquisition_buckets\":[6,5,4,3,2,1],\"outcome_maintenance_passes_total\":10,\"outcome_maintenance_failures_total\":11,\"outcomes_pruned_total\":12,\"fence_waits\":[],\"fence_waits_truncated\":false,\"gateway_result_bytes_relayed_total\":12346,\"gateway_result_bytes_sent_to_clients_total\":6790,\"supervisor_queue\":{{\"pending_submissions\":0,\"starting_submissions\":0,\"started_submissions\":1,\"queued_starts\":0,\"oldest_queued_start_wait_us\":0,\"start_wait_buckets\":[0,0,0,0,0,0],\"reserved_submission_bytes\":0}},\"next_cursor\":null}}",
                 "11".repeat(16),
                 "31".repeat(16),
                 "20".repeat(16)
@@ -560,10 +560,6 @@ pub(super) fn admin_client_lists_runtime_invocation_pages_with_best_effort_metad
     assert_eq!(first.records[0].invocation_id, [0x10; 16]);
     assert_eq!(first.records[0].transaction_id, [0x30; 16]);
     assert_eq!(first.records[0].principal_id, [0x20; 16]);
-    assert_eq!(
-        first.records[0].workload_class,
-        prdb_engine::client_submit::RuntimeWorkloadClass::Operational
-    );
     assert_eq!(
         first.records[0].state,
         prdb_engine::client_submit::RuntimeInvocationState::Active
@@ -613,11 +609,9 @@ pub(super) fn admin_client_lists_runtime_invocation_pages_with_best_effort_metad
             pending_submissions: 4,
             starting_submissions: 1,
             started_submissions: 2,
-            queued_operational_starts: 3,
-            queued_analytical_starts: 5,
+            queued_starts: 3,
             oldest_queued_start_wait_us: 6000,
-            operational_start_wait_buckets: [1, 2, 3, 4, 5, 6],
-            analytical_start_wait_buckets: [6, 5, 4, 3, 2, 1],
+            start_wait_buckets: [1, 2, 3, 4, 5, 6],
             reserved_submission_bytes: 4096,
         }
     );
@@ -634,14 +628,7 @@ pub(super) fn admin_client_lists_runtime_invocation_pages_with_best_effort_metad
     assert_eq!(second.records[0].age_us, 100);
     assert!(second.fence_waits.is_empty());
     assert_eq!(second.supervisor_queue.started_submissions, 1);
-    assert_eq!(
-        second.supervisor_queue.operational_start_wait_buckets,
-        [0; 6]
-    );
-    assert_eq!(
-        second.supervisor_queue.analytical_start_wait_buckets,
-        [0; 6]
-    );
+    assert_eq!(second.supervisor_queue.start_wait_buckets, [0; 6]);
     assert_eq!(second.gateway_result_bytes_relayed_total, 12346);
     assert_eq!(second.gateway_result_bytes_sent_to_clients_total, 6790);
     assert_eq!(second.pinned_snapshot_count, 2);
@@ -660,10 +647,6 @@ pub(super) fn admin_client_lists_runtime_invocation_pages_with_best_effort_metad
     assert_eq!(second.outcome_maintenance_failures_total, 11);
     assert_eq!(second.outcomes_pruned_total, 12);
     assert!(!second.fence_waits_truncated);
-    assert_eq!(
-        second.records[0].workload_class,
-        prdb_engine::client_submit::RuntimeWorkloadClass::Analytical
-    );
     assert_eq!(
         second.records[0].state,
         prdb_engine::client_submit::RuntimeInvocationState::Committing

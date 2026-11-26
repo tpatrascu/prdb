@@ -1104,7 +1104,7 @@ where
             .try_into()
             .map_err(|_| StartupError::InvalidCatalog)?;
         let kind = u16::from_be_bytes([key[37], key[38]]);
-        if dependent == [0; 16] || referenced == [0; 16] || !matches!(kind, 1..=5) {
+        if dependent == [0; 16] || referenced == [0; 16] || !matches!(kind, 1..=6) {
             return Err(StartupError::InvalidCatalog);
         }
         for (direction, first, second) in

@@ -8,7 +8,6 @@ use prdb_engine::client_submit::{
     InvocationStatus, SubmissionClient,
 };
 use prdb_engine::submission_manifest::{encode_manifest_v1, manifest_v1_from_elf};
-use prdb_engine::supervisor::WorkloadClass;
 use sha2::{Digest, Sha256};
 use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;
@@ -931,7 +930,7 @@ pub(super) fn disconnected_submission_is_reconciled_after_gateway_restart()
     let mut client =
         SubmissionClient::connect_authenticated(address, query_token_id, &mut query_secret)?;
     let invocation_id = client
-        .upload_and_seal(&package, &[], 30_000, WorkloadClass::Operational)
+        .upload_and_seal(&package, &[], 30_000)
         .map_err(|error| format!("upload/seal failed: {error:?}"))?;
     let receipt = root.join("start.receipt");
     let cancellation_requested_at;
@@ -1020,7 +1019,6 @@ pub(super) fn disconnected_submission_is_reconciled_after_gateway_restart()
         assert!(runtime_output.contains("\"observed_at_us\":"));
         assert!(runtime_output.contains("\"consistency\":\"best_effort\""));
         assert!(runtime_output.contains("\"invocations\":["));
-        assert!(runtime_output.contains("\"workload_class\":\"operational\""));
         assert!(runtime_output.contains("\"staged_rows\":0"));
         assert!(runtime_output.contains("\"staged_value_bytes\":0"));
         assert!(runtime_output.contains("\"snapshot_pin_count\":1"));
@@ -1045,11 +1043,9 @@ pub(super) fn disconnected_submission_is_reconciled_after_gateway_restart()
         assert!(runtime_output.contains("\"pending_submissions\":0"));
         assert!(runtime_output.contains("\"starting_submissions\":0"));
         assert!(runtime_output.contains("\"started_submissions\":1"));
-        assert!(runtime_output.contains("\"queued_operational_starts\":0"));
-        assert!(runtime_output.contains("\"queued_analytical_starts\":0"));
+        assert!(runtime_output.contains("\"queued_starts\":0"));
         assert!(runtime_output.contains("\"oldest_queued_start_wait_us\":0"));
-        assert!(runtime_output.contains("\"operational_start_wait_buckets\":[0, 0, 0, 0, 0, 0]"));
-        assert!(runtime_output.contains("\"analytical_start_wait_buckets\":[0, 0, 0, 0, 0, 0]"));
+        assert!(runtime_output.contains("\"start_wait_buckets\":[0, 0, 0, 0, 0, 0]"));
         assert!(runtime_output.contains("\"reserved_submission_bytes\":"));
         assert!(runtime_output.contains("\"pinned_snapshot_count\":1"));
         assert!(runtime_output.contains("\"oldest_snapshot_pin_age_us\":"));

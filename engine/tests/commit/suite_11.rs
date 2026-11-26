@@ -796,7 +796,7 @@ pub(super) fn storage_manager_runtime_and_metadata_reads_enforce_authorization()
             kind: 3,
             request_id: 1,
             response_sequence: 0,
-            payload: br#"{"manifest_version":1,"manifest":"bQ==","artifact_bytes":"3","artifact_sha256":"0000000000000000000000000000000000000000000000000000000000000000","parameter_bytes":"0","parameter_sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","sql_data_bytes":"0","sql_data_sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","scope_version":1,"requested_scope":"cw==","deadline_ms":"30000","workload_class":"analytical","sdk_library_mode":"repository"}"#.to_vec(),
+            payload: br#"{"manifest_version":1,"manifest":"bQ==","artifact_bytes":"3","artifact_sha256":"0000000000000000000000000000000000000000000000000000000000000000","parameter_bytes":"0","parameter_sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","sql_data_bytes":"0","sql_data_sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","scope_version":1,"requested_scope":"cw==","deadline_ms":"30000","sdk_library_mode":"repository"}"#.to_vec(),
         },
     )?;
     assert!(
@@ -1358,7 +1358,6 @@ pub(super) fn storage_manager_runtime_and_metadata_reads_enforce_authorization()
         format!("{:02x}", 232).repeat(16)
     )));
     assert!(runtime_page.contains("\"consistency\":\"best_effort\""));
-    assert!(runtime_page.contains("\"workload_class\":\"operational\""));
     assert!(runtime_page.contains("\"staged_rows\":1"));
     assert!(runtime_page.contains("\"staged_value_bytes\":5"));
     assert!(runtime_page.contains("\"snapshot_pin_count\":1"));

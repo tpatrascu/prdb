@@ -432,18 +432,11 @@ pub enum RuntimeConsistency {
     BestEffort,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RuntimeWorkloadClass {
-    Operational,
-    Analytical,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeInvocation {
     pub invocation_id: [u8; 16],
     pub transaction_id: [u8; 16],
     pub principal_id: [u8; 16],
-    pub workload_class: RuntimeWorkloadClass,
     pub state: RuntimeInvocationState,
     pub started_at_us: Option<u64>,
     pub age_us: u64,

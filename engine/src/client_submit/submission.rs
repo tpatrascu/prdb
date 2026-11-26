@@ -9,7 +9,7 @@ use crate::credentials::TOKEN_SECRET_BYTES;
 use crate::submission_manifest::decode_manifest_v1;
 use crate::submission_scope::decode_requested_scope_v1;
 use crate::supervisor::{
-    MAX_MANIFEST_BYTES, MAX_PARAMETER_BYTES, MAX_SCOPE_BYTES, MAX_SQL_DATA_BYTES, WorkloadClass,
+    MAX_MANIFEST_BYTES, MAX_PARAMETER_BYTES, MAX_SCOPE_BYTES, MAX_SQL_DATA_BYTES,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{HashSet, VecDeque};
@@ -322,16 +322,8 @@ impl SubmissionClient {
         package_dir: &std::path::Path,
         parameters: &[u8],
         deadline_ms: u64,
-        workload_class: WorkloadClass,
     ) -> Result<[u8; 16], ClientSubmitError> {
-        self.upload_and_seal_bound(
-            package_dir,
-            parameters,
-            None,
-            deadline_ms,
-            workload_class,
-            None,
-        )
+        self.upload_and_seal_bound(package_dir, parameters, None, deadline_ms, None)
     }
 
     /// Upload a private package directory with explicit SQL data and parameter
@@ -342,16 +334,8 @@ impl SubmissionClient {
         parameters: &[u8],
         sql_data: &[u8],
         deadline_ms: u64,
-        workload_class: WorkloadClass,
     ) -> Result<[u8; 16], ClientSubmitError> {
-        self.upload_and_seal_bound(
-            package_dir,
-            parameters,
-            Some(sql_data),
-            deadline_ms,
-            workload_class,
-            None,
-        )
+        self.upload_and_seal_bound(package_dir, parameters, Some(sql_data), deadline_ms, None)
     }
 
     /// Upload and seal a package bound to a retained v2 transaction. The
@@ -362,7 +346,6 @@ impl SubmissionClient {
         package_dir: &std::path::Path,
         parameters: &[u8],
         deadline_ms: u64,
-        workload_class: WorkloadClass,
         transaction_id: [u8; 16],
         package_id: [u8; 16],
     ) -> Result<[u8; 16], ClientSubmitError> {
@@ -371,7 +354,6 @@ impl SubmissionClient {
             parameters,
             None,
             deadline_ms,
-            workload_class,
             Some((transaction_id, package_id)),
         )
     }
@@ -385,7 +367,6 @@ impl SubmissionClient {
         parameters: &[u8],
         sql_data: &[u8],
         deadline_ms: u64,
-        workload_class: WorkloadClass,
         transaction_id: [u8; 16],
         package_id: [u8; 16],
     ) -> Result<[u8; 16], ClientSubmitError> {
@@ -394,7 +375,6 @@ impl SubmissionClient {
             parameters,
             Some(sql_data),
             deadline_ms,
-            workload_class,
             Some((transaction_id, package_id)),
         )
     }
@@ -405,7 +385,6 @@ impl SubmissionClient {
         parameters: &[u8],
         sql_data_override: Option<&[u8]>,
         deadline_ms: u64,
-        workload_class: WorkloadClass,
         transaction_binding: Option<([u8; 16], [u8; 16])>,
     ) -> Result<[u8; 16], ClientSubmitError> {
         if deadline_ms == 0 || parameters.len() as u64 > MAX_PARAMETER_BYTES {
@@ -424,12 +403,8 @@ impl SubmissionClient {
         let artifact_hash: [u8; 32] = Sha256::digest(&package.artifact).into();
         let parameter_hash: [u8; 32] = Sha256::digest(parameters).into();
         let sql_data_hash: [u8; 32] = Sha256::digest(sql_data).into();
-        let workload = match workload_class {
-            WorkloadClass::Operational => "operational",
-            WorkloadClass::Analytical => "analytical",
-        };
         let mut prepare = format!(
-            "{{\"manifest_version\":1,\"manifest\":\"{}\",\"artifact_bytes\":\"{}\",\"artifact_sha256\":\"{}\",\"parameter_bytes\":\"{}\",\"parameter_sha256\":\"{}\",\"sql_data_bytes\":\"{}\",\"sql_data_sha256\":\"{}\",\"scope_version\":1,\"requested_scope\":\"{}\",\"deadline_ms\":\"{deadline_ms}\",\"workload_class\":\"{workload}\",\"sdk_library_mode\":\"repository\"}}",
+            "{{\"manifest_version\":1,\"manifest\":\"{}\",\"artifact_bytes\":\"{}\",\"artifact_sha256\":\"{}\",\"parameter_bytes\":\"{}\",\"parameter_sha256\":\"{}\",\"sql_data_bytes\":\"{}\",\"sql_data_sha256\":\"{}\",\"scope_version\":1,\"requested_scope\":\"{}\",\"deadline_ms\":\"{deadline_ms}\",\"sdk_library_mode\":\"repository\"}}",
             encode_base64(&package.manifest),
             package.artifact.len(),
             lower_hex(&artifact_hash),

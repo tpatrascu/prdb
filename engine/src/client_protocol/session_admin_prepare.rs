@@ -10,7 +10,10 @@ impl ClientConnectionSession {
         command: ClientAdminCommand,
     ) -> Result<ClientFrame, ClientSessionError> {
         match command {
-            ClientAdminCommand::PrepareCreateUser { name } => {
+            ClientAdminCommand::PrepareCreateUser {
+                name,
+                workload_profile,
+            } => {
                 if self.pending_admin_operation.is_some() {
                     return Err(ClientSessionError::WrongMode);
                 }
@@ -25,7 +28,10 @@ impl ClientConnectionSession {
                 }
                 self.pending_admin_operation = Some(PendingAdminOperation {
                     operation_id,
-                    action: PendingAdminAction::CreateUser { name },
+                    action: PendingAdminAction::CreateUser {
+                        name,
+                        workload_profile,
+                    },
                 });
                 self.json_response(
                     request.request_id,
@@ -36,7 +42,10 @@ impl ClientConnectionSession {
                     .into_bytes(),
                 )
             }
-            ClientAdminCommand::PrepareCreateUserNoLogin { name } => {
+            ClientAdminCommand::PrepareCreateUserNoLogin {
+                name,
+                workload_profile,
+            } => {
                 if self.pending_admin_operation.is_some() {
                     return Err(ClientSessionError::WrongMode);
                 }
@@ -51,7 +60,10 @@ impl ClientConnectionSession {
                 }
                 self.pending_admin_operation = Some(PendingAdminOperation {
                     operation_id,
-                    action: PendingAdminAction::CreateUserNoLogin { name },
+                    action: PendingAdminAction::CreateUserNoLogin {
+                        name,
+                        workload_profile,
+                    },
                 });
                 self.json_response(
                     request.request_id,
@@ -995,6 +1007,43 @@ impl ClientConnectionSession {
             ClientAdminCommand::PrepareSetUserLogin { user_id, enabled } => {
                 self.prepare_user_login(request.request_id, user_id, enabled)
             }
+            ClientAdminCommand::PrepareSetUserWorkloadProfile {
+                user_id,
+                profile_name,
+            } => self.prepare_simple_admin_action(
+                request.request_id,
+                PendingAdminAction::SetUserWorkloadProfile {
+                    user_id,
+                    profile_name,
+                },
+            ),
+            ClientAdminCommand::PrepareCreateWorkloadProfile {
+                name,
+                base_profile,
+                settings,
+            } => self.prepare_simple_admin_action(
+                request.request_id,
+                PendingAdminAction::CreateWorkloadProfile {
+                    name,
+                    base_profile,
+                    settings,
+                },
+            ),
+            ClientAdminCommand::PrepareAlterWorkloadProfile { name, settings } => self
+                .prepare_simple_admin_action(
+                    request.request_id,
+                    PendingAdminAction::AlterWorkloadProfile { name, settings },
+                ),
+            ClientAdminCommand::PrepareRenameWorkloadProfile { old_name, new_name } => self
+                .prepare_simple_admin_action(
+                    request.request_id,
+                    PendingAdminAction::RenameWorkloadProfile { old_name, new_name },
+                ),
+            ClientAdminCommand::PrepareDropWorkloadProfile { name } => self
+                .prepare_simple_admin_action(
+                    request.request_id,
+                    PendingAdminAction::DropWorkloadProfile { name },
+                ),
             ClientAdminCommand::PrepareGrantRole { member_id, role_id } => {
                 self.prepare_role_membership(request.request_id, member_id, role_id, true)
             }
@@ -1268,6 +1317,36 @@ impl ClientConnectionSession {
         self.pending_admin_operation = Some(PendingAdminOperation {
             operation_id,
             action: PendingAdminAction::RenameIdentity { identity_id, name },
+        });
+        self.json_response(
+            request_id,
+            format!(
+                "{{\"operation_id\":\"{}\",\"state\":\"prepared\"}}",
+                encode_lower_hex_id(operation_id)
+            )
+            .into_bytes(),
+        )
+    }
+
+    pub(super) fn prepare_simple_admin_action(
+        &mut self,
+        request_id: u64,
+        action: PendingAdminAction,
+    ) -> Result<ClientFrame, ClientSessionError> {
+        if self.pending_admin_operation.is_some() {
+            return Err(ClientSessionError::WrongMode);
+        }
+        let mut operation_id = [0; 16];
+        getrandom::fill(&mut operation_id)
+            .map_err(|_| ClientSessionError::Storage(TransactionError::RandomnessUnavailable))?;
+        if operation_id == [0; 16] {
+            return Err(ClientSessionError::Storage(
+                TransactionError::RandomnessUnavailable,
+            ));
+        }
+        self.pending_admin_operation = Some(PendingAdminOperation {
+            operation_id,
+            action,
         });
         self.json_response(
             request_id,

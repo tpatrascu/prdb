@@ -1588,9 +1588,9 @@ fn seed_database(
 ) -> Result<([u8; 16], [u8; 16], OneTimeSecret), BootstrapError> {
     let now_us = now_unix_micros().ok_or(BootstrapError::InvalidRequest)?;
     validate_expiry_at(expires_at_us, now_us)?;
-    let reserved = (1u16..=3)
+    let reserved = (1u16..=7)
         .chain(101u16..=111)
-        .chain(201u16..=217)
+        .chain(201u16..=218)
         .map(builtin_id)
         .collect::<HashSet<_>>();
     let database_id = random_id(&reserved)?;
@@ -1763,9 +1763,33 @@ fn bootstrap_catalog_records(
         encode_record(
             10,
             &principal_key(ADMIN_ROLE_ID),
-            &principal_fields(2, "database_admin", false),
+            &principal_fields(2, "database_admin", false, None),
         )?,
     ));
+    for preset in crate::workload_profile::builtin_presets() {
+        let wp_object_key = object_key(preset.profile_id);
+        records.push((
+            wp_object_key.clone(),
+            encode_record(2, &wp_object_key, &object_fields(11, &preset.name, owner))?,
+        ));
+        let wp_key = id_key(18, preset.profile_id);
+        let wp_fields = [
+            text_field(1, &preset.name),
+            u64_field(2, preset.definition_epoch),
+            CatalogField {
+                tag: 3,
+                wire_type: WireType::Bool,
+                payload: vec![u8::from(preset.is_builtin)],
+            },
+            u32_field(4, crate::workload_profile::WORKLOAD_PROFILE_LIMITS_VERSION),
+            CatalogField {
+                tag: 5,
+                wire_type: WireType::Bytes,
+                payload: preset.limits.encode(),
+            },
+        ];
+        records.push((wp_key.clone(), encode_record(18, &wp_key, &wp_fields)?));
+    }
     for (code, name) in [(1u16, "pg_catalog"), (2, "information_schema")] {
         let id = builtin_id(code);
         let key = object_key(id);
@@ -1808,9 +1832,20 @@ fn bootstrap_catalog_records(
         encode_record(
             10,
             &user_principal_key,
-            &principal_fields(1, administrator_name, true),
+            &principal_fields(
+                1,
+                administrator_name,
+                true,
+                Some(crate::workload_profile::LARGE_OPERATIONAL_PROFILE_ID),
+            ),
         )?,
     ));
+    let wp_dep_key = dependency_key(
+        admin_user_id,
+        crate::workload_profile::LARGE_OPERATIONAL_PROFILE_ID,
+        6,
+    );
+    records.push((wp_dep_key.clone(), encode_record(15, &wp_dep_key, &[])?));
     let membership_key = membership_key(admin_user_id, ADMIN_ROLE_ID);
     records.push((
         membership_key.clone(),
@@ -1906,8 +1941,13 @@ fn object_fields(kind: u16, name: &str, owner_id: [u8; 16]) -> Vec<CatalogField>
     ]
 }
 
-fn principal_fields(kind: u16, name: &str, login: bool) -> Vec<CatalogField> {
-    vec![
+fn principal_fields(
+    kind: u16,
+    name: &str,
+    login: bool,
+    workload_profile_id: Option<[u8; 16]>,
+) -> Vec<CatalogField> {
+    let mut fields = vec![
         u16_field(1, kind),
         text_field(2, name),
         CatalogField {
@@ -1916,7 +1956,11 @@ fn principal_fields(kind: u16, name: &str, login: bool) -> Vec<CatalogField> {
             payload: vec![u8::from(login)],
         },
         u64_field(4, 1),
-    ]
+    ];
+    if let Some(profile_id) = workload_profile_id {
+        fields.push(id_field(5, profile_id));
+    }
+    fields
 }
 
 fn load_bootstrap_identity(database: &Database) -> Result<BootstrapIdentity, BootstrapError> {

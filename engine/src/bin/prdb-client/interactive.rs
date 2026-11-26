@@ -9,7 +9,6 @@ use prdb_engine::client_submit::{
     ClientResultEvent, InvocationStatus, SubmissionClient, TerminalOutcome,
 };
 use prdb_engine::interactive_sql::{InteractiveStatement, parse_interactive_sql};
-use prdb_engine::supervisor::WorkloadClass;
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, IsTerminal, Read, Write};
@@ -32,7 +31,6 @@ pub(super) struct InteractiveClientOptions {
 
 pub(super) struct InteractiveExecutionSettings {
     pub(super) deadline_ms: u64,
-    pub(super) workload: WorkloadClass,
     pub(super) repository_profile: bool,
 }
 
@@ -85,12 +83,7 @@ pub(super) fn interactive_sql(
     if deadline_ms == 0 {
         return Err("--deadline-ms must be positive".to_owned());
     }
-    let workload = match fields.remove("--workload") {
-        None => WorkloadClass::Operational,
-        Some(value) if value == "operational" => WorkloadClass::Operational,
-        Some(value) if value == "analytical" => WorkloadClass::Analytical,
-        Some(_) => return Err("--workload must be operational or analytical".to_owned()),
-    };
+    let _ = fields.remove("--workload");
     reject_unknown(fields)?;
 
     let profiles = match configured_profiles {
@@ -314,7 +307,6 @@ pub(super) fn interactive_sql(
                         &compiler_identity,
                         &mut parameters,
                         deadline_ms,
-                        workload,
                         repository_profile,
                     )?;
                 }
@@ -342,7 +334,6 @@ pub(super) fn interactive_sql(
                         &compiler_identity,
                         &mut parameters,
                         deadline_ms,
-                        workload,
                         repository_profile,
                     )?;
                 }
@@ -439,7 +430,6 @@ pub(super) fn execute_interactive_package(
     compiler_identity: &str,
     parameters: &mut [u8],
     deadline_ms: u64,
-    workload: WorkloadClass,
     repository_profile: bool,
 ) -> Result<(), String> {
     if *abort_only {
@@ -500,7 +490,6 @@ pub(super) fn execute_interactive_package(
                 &package_parameters,
                 &sql_data,
                 deadline_ms,
-                workload,
                 transaction_id,
                 package_id,
             )
@@ -573,7 +562,6 @@ pub(super) fn execute_interactive_package(
             &sql_data,
             InteractiveExecutionSettings {
                 deadline_ms,
-                workload,
                 repository_profile,
             },
         )
@@ -618,7 +606,6 @@ pub(super) fn stream_autocommit_interactive_package(
 ) -> Result<(), String> {
     let InteractiveExecutionSettings {
         deadline_ms,
-        workload,
         repository_profile,
     } = settings;
     let result = (|| {
@@ -632,7 +619,7 @@ pub(super) fn stream_autocommit_interactive_package(
         )
         .map_err(|error| error.to_string())?;
         let invocation_id = client
-            .upload_and_seal_with_sql_data(package, parameters, sql_data, deadline_ms, workload)
+            .upload_and_seal_with_sql_data(package, parameters, sql_data, deadline_ms)
             .map_err(|error| error.to_string())?;
         match client.start(invocation_id, receipt) {
             Ok(mut started) => {

@@ -118,6 +118,16 @@ pub(super) fn admin_sql_with_credentials_once(
     let rename_identity_statement = prdb_engine::ddl_sql::parse_rename_identity(sql).ok();
     let drop_identity_statement = prdb_engine::ddl_sql::parse_drop_identity(sql).ok();
     let set_user_login_statement = prdb_engine::ddl_sql::parse_set_user_login(sql).ok();
+    let set_user_workload_profile_statement =
+        prdb_engine::ddl_sql::parse_set_user_workload_profile(sql).ok();
+    let create_workload_profile_statement =
+        prdb_engine::ddl_sql::parse_create_workload_profile(sql).ok();
+    let alter_workload_profile_statement =
+        prdb_engine::ddl_sql::parse_alter_workload_profile(sql).ok();
+    let rename_workload_profile_statement =
+        prdb_engine::ddl_sql::parse_rename_workload_profile(sql).ok();
+    let drop_workload_profile_statement =
+        prdb_engine::ddl_sql::parse_drop_workload_profile(sql).ok();
     let role_membership_statement = prdb_engine::ddl_sql::parse_role_membership(sql).ok();
     let system_privilege_statement = prdb_engine::ddl_sql::parse_system_privilege(sql).ok();
     let object_privilege_statement = prdb_engine::ddl_sql::parse_object_privilege(sql).ok();
@@ -264,6 +274,51 @@ pub(super) fn admin_sql_with_credentials_once(
         };
         print_operation(
             &format!("set user {state}"),
+            &result.operation_id,
+            result.commit_sequence,
+        );
+    } else if let Some(_statement) = set_user_workload_profile_statement {
+        let result = client
+            .execute_set_user_workload_profile_sql(sql)
+            .map_err(|error| error.to_string())?;
+        print_operation(
+            "set user workload profile",
+            &result.operation_id,
+            result.commit_sequence,
+        );
+    } else if let Some(_statement) = create_workload_profile_statement {
+        let result = client
+            .execute_create_workload_profile_sql(sql)
+            .map_err(|error| error.to_string())?;
+        print_operation(
+            "created workload profile",
+            &result.operation_id,
+            result.commit_sequence,
+        );
+    } else if let Some(_statement) = alter_workload_profile_statement {
+        let result = client
+            .execute_alter_workload_profile_sql(sql)
+            .map_err(|error| error.to_string())?;
+        print_operation(
+            "altered workload profile",
+            &result.operation_id,
+            result.commit_sequence,
+        );
+    } else if let Some(_statement) = rename_workload_profile_statement {
+        let result = client
+            .execute_rename_workload_profile_sql(sql)
+            .map_err(|error| error.to_string())?;
+        print_operation(
+            "renamed workload profile",
+            &result.operation_id,
+            result.commit_sequence,
+        );
+    } else if let Some(_statement) = drop_workload_profile_statement {
+        let result = client
+            .execute_drop_workload_profile_sql(sql)
+            .map_err(|error| error.to_string())?;
+        print_operation(
+            "dropped workload profile",
             &result.operation_id,
             result.commit_sequence,
         );
@@ -711,6 +766,11 @@ pub(super) fn is_supported_admin_sql(sql: &str) -> bool {
         || prdb_engine::ddl_sql::parse_rename_identity(sql).is_ok()
         || prdb_engine::ddl_sql::parse_drop_identity(sql).is_ok()
         || prdb_engine::ddl_sql::parse_set_user_login(sql).is_ok()
+        || prdb_engine::ddl_sql::parse_set_user_workload_profile(sql).is_ok()
+        || prdb_engine::ddl_sql::parse_create_workload_profile(sql).is_ok()
+        || prdb_engine::ddl_sql::parse_alter_workload_profile(sql).is_ok()
+        || prdb_engine::ddl_sql::parse_rename_workload_profile(sql).is_ok()
+        || prdb_engine::ddl_sql::parse_drop_workload_profile(sql).is_ok()
         || prdb_engine::ddl_sql::parse_role_membership(sql).is_ok()
         || prdb_engine::ddl_sql::parse_system_privilege(sql).is_ok()
         || prdb_engine::ddl_sql::parse_object_privilege(sql).is_ok()

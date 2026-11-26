@@ -1029,7 +1029,6 @@ pub(super) fn managed_cancellation_releases_snapshot_admission_during_write_pres
         database,
         prdb_engine::storage_manager::StorageManagerConfig {
             max_active_invocations: 3,
-            max_active_analytical_invocations: 1,
             ..Default::default()
         },
     )?;

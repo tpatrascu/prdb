@@ -26,10 +26,43 @@
 #define PRDB_SDK_EXECUTOR_OP_GET_WORKLOAD_BUDGETS PRDB_QUERY_HOST_OP_GET_WORKLOAD_BUDGETS
 #define PRDB_SDK_EXECUTOR_MAX_COLUMN_IDS UINT16_C(256)
 
+#define PRDB_QUERY_WORKLOAD_BUDGETS_WIRE_BYTES 164
+
 typedef struct prdb_sdk_workload_budgets_v1 {
     uint32_t struct_size;
     uint32_t abi_version;
     uint32_t max_index_probe_candidates;
+    uint32_t max_executor_requests;
+    uint32_t max_planner_requests;
+    uint32_t max_optimizer_requests;
+    uint32_t sql_max_query_bytes;
+    uint32_t sql_max_projection_columns;
+    uint32_t sql_max_predicate_nodes;
+    uint32_t sql_max_expression_depth;
+    uint32_t sql_max_group_keys;
+    uint32_t sql_max_join_keys;
+    uint32_t sql_max_order_keys;
+    uint32_t sql_max_in_values;
+    uint32_t sql_max_limit;
+    uint32_t sql_batch_max_statements;
+    uint32_t sql_exec_max_scan_pages;
+    uint32_t sql_exec_max_mutation_targets;
+    uint32_t sql_in_mem_max_rows;
+    uint32_t sql_in_mem_join_max_pairs;
+    uint32_t sql_spill_sort_max_row_bytes;
+    uint32_t sql_spill_sort_max_workspace_bytes;
+    uint32_t sql_spill_join_max_record_bytes;
+    uint32_t sql_spill_join_max_workspace_bytes;
+    uint32_t optimizer_max_plan_bytes;
+    uint32_t reserved_pad;
+    uint64_t max_parameter_bytes;
+    uint64_t max_sql_data_bytes;
+    uint64_t max_ipc_request_bytes;
+    uint64_t max_ipc_response_bytes;
+    uint64_t max_result_chunk_bytes;
+    uint64_t max_total_result_bytes;
+    uint64_t sql_dispatch_max_heap_bytes;
+    uint64_t sql_exec_max_materialized_bytes;
 } prdb_sdk_workload_budgets_v1;
 
 /* Reads a trusted, invocation-pinned workload budget from the executor host.

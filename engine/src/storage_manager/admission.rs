@@ -158,7 +158,6 @@ pub(super) enum LiveInvocationPhase {
 pub(super) struct LiveInvocation {
     pub(super) transaction_id: [u8; 16],
     pub(super) principal_id: [u8; 16],
-    pub(super) workload_class: crate::supervisor::WorkloadClass,
     pub(super) started_at_us: i64,
     pub(super) deadline_at_us: Option<i64>,
     pub(super) phase: LiveInvocationPhase,
@@ -176,7 +175,6 @@ pub(super) struct LiveInvocation {
 pub(super) struct InvocationAdmissionState {
     pub(super) database_key: usize,
     pub(super) limit: AtomicUsize,
-    pub(super) analytical_limit: AtomicUsize,
     pub(super) statistics_collection_limit: AtomicUsize,
     pub(super) statistics_collection_active: AtomicBool,
     pub(super) database_uncertain: AtomicBool,
@@ -413,7 +411,6 @@ impl InvocationAdmissionState {
         self: &Arc<Self>,
         invocation_id: [u8; 16],
         principal_id: [u8; 16],
-        workload_class: crate::supervisor::WorkloadClass,
         started_at_us: i64,
         max_age: Duration,
     ) -> Result<InvocationAdmissionPermit, AdmissionError> {
@@ -426,18 +423,6 @@ impl InvocationAdmissionState {
         }
         if live.entries.contains_key(&invocation_id) {
             return Err(AdmissionError::Duplicate);
-        }
-        if workload_class == crate::supervisor::WorkloadClass::Analytical
-            && live
-                .entries
-                .values()
-                .filter(|invocation| {
-                    invocation.workload_class == crate::supervisor::WorkloadClass::Analytical
-                })
-                .count()
-                >= self.analytical_limit.load(Ordering::Acquire)
-        {
-            return Err(AdmissionError::Limit);
         }
         if live.entries.len() >= self.limit.load(Ordering::Acquire) {
             return Err(AdmissionError::Limit);
@@ -464,7 +449,6 @@ impl InvocationAdmissionState {
             LiveInvocation {
                 transaction_id,
                 principal_id,
-                workload_class,
                 started_at_us,
                 deadline_at_us,
                 phase: LiveInvocationPhase::Active,
@@ -620,7 +604,6 @@ impl InvocationAdmissionState {
                     invocation_id,
                     transaction_id: invocation.transaction_id,
                     principal_id: invocation.principal_id,
-                    workload_class: invocation.workload_class,
                     status: match invocation.phase {
                         LiveInvocationPhase::Active => InvocationStatus::Active {
                             started_at_us: invocation.started_at_us,
@@ -849,7 +832,6 @@ impl Drop for InvocationAdmissionPermit {
 pub(super) fn invocation_registry(
     database: &Database,
     configured_limit: usize,
-    configured_analytical_limit: usize,
     configured_statistics_collection_limit: usize,
 ) -> Arc<InvocationAdmissionState> {
     let database_key = database as *const Database as usize;
@@ -863,9 +845,6 @@ pub(super) fn invocation_registry(
         invocations
             .limit
             .fetch_min(configured_limit, Ordering::Relaxed);
-        invocations
-            .analytical_limit
-            .fetch_min(configured_analytical_limit, Ordering::Relaxed);
         invocations
             .statistics_collection_limit
             .fetch_min(configured_statistics_collection_limit, Ordering::Relaxed);
@@ -881,9 +860,6 @@ pub(super) fn invocation_registry(
             .limit
             .fetch_min(configured_limit, Ordering::Relaxed);
         invocations
-            .analytical_limit
-            .fetch_min(configured_analytical_limit, Ordering::Relaxed);
-        invocations
             .statistics_collection_limit
             .fetch_min(configured_statistics_collection_limit, Ordering::Relaxed);
         return invocations;
@@ -891,7 +867,6 @@ pub(super) fn invocation_registry(
     let invocations = Arc::new(InvocationAdmissionState {
         database_key,
         limit: AtomicUsize::new(configured_limit),
-        analytical_limit: AtomicUsize::new(configured_analytical_limit),
         statistics_collection_limit: AtomicUsize::new(configured_statistics_collection_limit),
         statistics_collection_active: AtomicBool::new(false),
         database_uncertain: AtomicBool::new(false),
@@ -919,13 +894,11 @@ pub(super) fn invocation_registry(
 pub(super) fn shared_invocation_registry(
     database: &Database,
     configured_limit: usize,
-    configured_analytical_limit: usize,
     configured_statistics_collection_limit: usize,
 ) -> Arc<InvocationAdmissionState> {
     invocation_registry(
         database,
         configured_limit,
-        configured_analytical_limit,
         configured_statistics_collection_limit,
     )
 }
@@ -965,7 +938,6 @@ pub(crate) fn mark_database_uncertain(database: &Database) {
     let invocations = invocation_registry(
         database,
         StorageManagerConfig::default().max_active_invocations,
-        StorageManagerConfig::default().max_active_analytical_invocations,
         StorageManagerConfig::default().max_statistics_collection_rows,
     );
     let first_uncertain = !invocations.database_uncertain.swap(true, Ordering::AcqRel);

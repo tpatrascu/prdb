@@ -110,7 +110,6 @@ pub(super) fn gateway_service_listener_authenticates_control_admin_over_socket()
                             memory_max_bytes: 64 * 1024 * 1024,
                             max_processes: 16,
                         },
-                        analytical_resource_limits: None,
                         launch: prdb_engine::executor_launcher::ExecutorLaunchConfig {
                             executor_path: executor_path.clone(),
                             optimizer_path: std::path::PathBuf::from(env!(
@@ -121,10 +120,8 @@ pub(super) fn gateway_service_listener_authenticates_control_admin_over_socket()
                             runtime_read_only: Vec::new(),
                             spill_broker: None,
                             max_total_result_bytes: prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
-                            analytical_max_total_result_bytes: None,
                             max_sql_index_probe_candidates:
                                 prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
-                            analytical_max_sql_index_probe_candidates: None,
                             cleanup_timeout: Duration::from_millis(100),
                         },
                     },

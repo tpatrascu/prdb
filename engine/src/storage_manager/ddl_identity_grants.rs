@@ -215,11 +215,32 @@ impl<'db> StorageManager<'db> {
         retention_deadline_us: i64,
         audit_event: AuditEvent,
     ) -> Result<CreatedUser, IdentityLifecycleError> {
+        self.create_user_with_profile(
+            invocation_id,
+            authenticated_actor_id,
+            name,
+            crate::workload_profile::SMALL_OPERATIONAL_PROFILE_ID,
+            retention_deadline_us,
+            audit_event,
+        )
+    }
+
+    /// Create a LOGIN user with an explicit workload profile.
+    pub fn create_user_with_profile(
+        &self,
+        invocation_id: [u8; 16],
+        authenticated_actor_id: [u8; 16],
+        name: &str,
+        workload_profile_id: [u8; 16],
+        retention_deadline_us: i64,
+        audit_event: AuditEvent,
+    ) -> Result<CreatedUser, IdentityLifecycleError> {
         let (user_id, commit_sequence) = self.create_identity(
             invocation_id,
             authenticated_actor_id,
             name,
             NewPrincipalKind::User,
+            Some(workload_profile_id),
             retention_deadline_us,
             audit_event,
         )?;
@@ -238,11 +259,32 @@ impl<'db> StorageManager<'db> {
         retention_deadline_us: i64,
         audit_event: AuditEvent,
     ) -> Result<CreatedUser, IdentityLifecycleError> {
+        self.create_user_no_login_with_profile(
+            invocation_id,
+            authenticated_actor_id,
+            name,
+            crate::workload_profile::SMALL_OPERATIONAL_PROFILE_ID,
+            retention_deadline_us,
+            audit_event,
+        )
+    }
+
+    /// Create a NOLOGIN user with an explicit workload profile.
+    pub fn create_user_no_login_with_profile(
+        &self,
+        invocation_id: [u8; 16],
+        authenticated_actor_id: [u8; 16],
+        name: &str,
+        workload_profile_id: [u8; 16],
+        retention_deadline_us: i64,
+        audit_event: AuditEvent,
+    ) -> Result<CreatedUser, IdentityLifecycleError> {
         let (user_id, commit_sequence) = self.create_identity(
             invocation_id,
             authenticated_actor_id,
             name,
             NewPrincipalKind::UserNoLogin,
+            Some(workload_profile_id),
             retention_deadline_us,
             audit_event,
         )?;
@@ -266,6 +308,7 @@ impl<'db> StorageManager<'db> {
             authenticated_actor_id,
             name,
             NewPrincipalKind::Role,
+            None,
             retention_deadline_us,
             audit_event,
         )?;
@@ -677,6 +720,25 @@ impl<'db> StorageManager<'db> {
             },
         ];
         if kind == 1 {
+            if let Some(profile_field) = principal
+                .fields
+                .iter()
+                .find(|field| field.tag == 5 && field.wire_type == WireType::Id)
+                && let Ok(profile_id) = <[u8; 16]>::try_from(profile_field.payload.as_slice())
+            {
+                let dep_key = dependency_catalog_key(identity_id, profile_id, 6);
+                if let Some(dep_current) = catalog
+                    .get(dep_key.as_slice())
+                    .map_err(|_| IdentityLifecycleError::Storage)?
+                    .map(|value| value.value().to_vec())
+                {
+                    writes.push(CatalogWrite {
+                        key: dep_key,
+                        expected_value: Some(dep_current),
+                        payload: None,
+                    });
+                }
+            }
             let revoked_at_us = now_unix_micros().ok_or(IdentityLifecycleError::InvalidRequest)?;
             let prefix = 16u16.to_be_bytes();
             let mut count = 0usize;
@@ -728,12 +790,14 @@ impl<'db> StorageManager<'db> {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn create_identity(
         &self,
         invocation_id: [u8; 16],
         authenticated_actor_id: [u8; 16],
         name: &str,
         kind: NewPrincipalKind,
+        workload_profile_id: Option<[u8; 16]>,
         retention_deadline_us: i64,
         mut audit_event: AuditEvent,
     ) -> Result<([u8; 16], u64), IdentityLifecycleError> {
@@ -749,6 +813,11 @@ impl<'db> StorageManager<'db> {
         {
             return Err(IdentityLifecycleError::InvalidRequest);
         }
+        if let Some(profile_id) = workload_profile_id
+            && (profile_id == [0; 16] || self.load_workload_profile(profile_id).is_err())
+        {
+            return Err(IdentityLifecycleError::InvalidRequest);
+        }
         if audit_event.actor_id != Some(authenticated_actor_id)
             || audit_event.correlation_id != invocation_id
             || audit_event.action != AuditAction::Ddl
@@ -760,31 +829,39 @@ impl<'db> StorageManager<'db> {
         let user_id = self.generate_identity_id()?;
         let principal_key = principal_catalog_key(user_id);
         let object_key = identity_object_catalog_key(user_id);
+        let mut principal_fields = vec![
+            CatalogField {
+                tag: 1,
+                wire_type: WireType::U16,
+                payload: principal_kind.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 2,
+                wire_type: WireType::Text,
+                payload: name.as_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 3,
+                wire_type: WireType::Bool,
+                payload: vec![u8::from(login_enabled)],
+            },
+            CatalogField {
+                tag: 4,
+                wire_type: WireType::U64,
+                payload: 1u64.to_le_bytes().to_vec(),
+            },
+        ];
+        if let Some(profile_id) = workload_profile_id {
+            principal_fields.push(CatalogField {
+                tag: 5,
+                wire_type: WireType::Id,
+                payload: profile_id.to_vec(),
+            });
+        }
         let principal_payload = encode_envelope(
             &family_schema(10).ok_or(IdentityLifecycleError::Storage)?,
             &principal_key,
-            &[
-                CatalogField {
-                    tag: 1,
-                    wire_type: WireType::U16,
-                    payload: principal_kind.to_le_bytes().to_vec(),
-                },
-                CatalogField {
-                    tag: 2,
-                    wire_type: WireType::Text,
-                    payload: name.as_bytes().to_vec(),
-                },
-                CatalogField {
-                    tag: 3,
-                    wire_type: WireType::Bool,
-                    payload: vec![u8::from(login_enabled)],
-                },
-                CatalogField {
-                    tag: 4,
-                    wire_type: WireType::U64,
-                    payload: 1u64.to_le_bytes().to_vec(),
-                },
-            ],
+            &principal_fields,
         )
         .map_err(|_| IdentityLifecycleError::InvalidRequest)?;
         let object_payload = encode_envelope(
@@ -820,7 +897,7 @@ impl<'db> StorageManager<'db> {
         )
         .map_err(|_| IdentityLifecycleError::InvalidRequest)?;
         audit_event.target_ids = vec![user_id];
-        let writes = [
+        let mut writes = vec![
             CatalogWrite {
                 key: principal_key,
                 expected_value: None,
@@ -832,6 +909,20 @@ impl<'db> StorageManager<'db> {
                 payload: Some(object_payload),
             },
         ];
+        if let Some(profile_id) = workload_profile_id {
+            let dep_key = dependency_catalog_key(user_id, profile_id, 6);
+            let dep_payload = encode_envelope(
+                &family_schema(15).ok_or(IdentityLifecycleError::Storage)?,
+                &dep_key,
+                &[],
+            )
+            .map_err(|_| IdentityLifecycleError::InvalidRequest)?;
+            writes.push(CatalogWrite {
+                key: dep_key,
+                expected_value: None,
+                payload: Some(dep_payload),
+            });
+        }
         let commit_sequence = self
             .commit_authorized_identity_ddl(
                 invocation_id,

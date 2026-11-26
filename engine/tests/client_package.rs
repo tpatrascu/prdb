@@ -13,7 +13,7 @@ use prdb_engine::submission_manifest::{
     ArtifactCompatibilityProfile, VersionedSubmissionMetadataValidator, decode_elf_dynamic_info,
     decode_manifest_v1,
 };
-use prdb_engine::supervisor::{SubmissionMetadata, SubmissionMetadataValidator, WorkloadClass};
+use prdb_engine::supervisor::{SubmissionMetadata, SubmissionMetadataValidator};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{Read, Write};
@@ -979,7 +979,8 @@ fn packager_compiles_and_atomically_publishes_metadata_without_loading_query() {
         scope_version: 1,
         requested_scope: scope_bytes.clone(),
         deadline_ms: 30_000,
-        workload_class: WorkloadClass::Operational,
+        workload_profile_id: prdb_engine::workload_profile::SMALL_OPERATIONAL_PROFILE_ID,
+        workload_profile: prdb_engine::workload_profile::WorkloadProfileLimits::small_operational(),
     };
     let profile = ArtifactCompatibilityProfile::new(
         manifest.cpu_baseline.clone(),
@@ -1149,12 +1150,7 @@ fn packager_compiles_and_atomically_publishes_metadata_without_loading_query() {
     assert_eq!(token_secret, [0; 32]);
     assert_eq!(
         client
-            .upload_and_seal(
-                &package,
-                &parameters,
-                30_000,
-                prdb_engine::supervisor::WorkloadClass::Operational,
-            )
+            .upload_and_seal(&package, &parameters, 30_000)
             .unwrap(),
         [1; 16]
     );

@@ -33,12 +33,20 @@ pub fn parse_create_identity(sql: &str) -> Result<CreateIdentitySql, DdlSqlError
     } else {
         false
     };
+    let workload_profile = if kind == CreateIdentityKind::User && parser.peek_word("workload") {
+        parser.word("workload")?;
+        parser.word("profile")?;
+        Some(parser.identifier()?)
+    } else {
+        None
+    };
     finish_statement(&mut parser)?;
     Ok(CreateIdentitySql {
         kind,
         if_not_exists,
         name,
         login_enabled,
+        workload_profile,
     })
 }
 
@@ -479,4 +487,137 @@ pub fn parse_drop_policy(sql: &str) -> Result<DropPolicySql, DdlSqlError> {
         is_cell,
         if_exists,
     })
+}
+
+/// Parse `ALTER USER name WORKLOAD PROFILE profile_name`.
+pub fn parse_set_user_workload_profile(
+    sql: &str,
+) -> Result<SetUserWorkloadProfileSql, DdlSqlError> {
+    let mut parser = statement_parser(sql)?;
+    parser.word("alter")?;
+    parser.word("user")?;
+    let user_name = parser.identifier()?;
+    parser.word("workload")?;
+    parser.word("profile")?;
+    let profile_name = parser.identifier()?;
+    finish_statement(&mut parser)?;
+    Ok(SetUserWorkloadProfileSql {
+        user_name,
+        profile_name,
+    })
+}
+
+fn parse_profile_settings(parser: &mut Parser) -> Result<Vec<(String, u64)>, DdlSqlError> {
+    parser.take(Token::LeftParen)?;
+    let mut settings = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        let key = parser.identifier()?;
+        if !seen.insert(key.clone()) {
+            return Err(DdlSqlError::InvalidStatement);
+        }
+        parser.take(Token::Equal)?;
+        let value = match parser.peek().cloned() {
+            Some(Token::Number(value)) => {
+                parser.position += 1;
+                value
+                    .parse::<u64>()
+                    .map_err(|_| DdlSqlError::InvalidStatement)?
+            }
+            _ => return Err(DdlSqlError::InvalidStatement),
+        };
+        settings.push((key, value));
+        if matches!(parser.peek(), Some(Token::Comma)) {
+            parser.take(Token::Comma)?;
+        } else {
+            break;
+        }
+    }
+    parser.take(Token::RightParen)?;
+    if settings.is_empty() {
+        return Err(DdlSqlError::InvalidStatement);
+    }
+    Ok(settings)
+}
+
+/// Parse `CREATE WORKLOAD PROFILE [IF NOT EXISTS] name [FROM base] [WITH (k = v, ...)]`.
+pub fn parse_create_workload_profile(sql: &str) -> Result<CreateWorkloadProfileSql, DdlSqlError> {
+    let mut parser = statement_parser(sql)?;
+    parser.word("create")?;
+    parser.word("workload")?;
+    parser.word("profile")?;
+    let if_not_exists = if parser.peek_word("if") {
+        parser.word("if")?;
+        parser.word("not")?;
+        parser.word("exists")?;
+        true
+    } else {
+        false
+    };
+    let name = parser.identifier()?;
+    let base_profile = if parser.peek_word("from") {
+        parser.word("from")?;
+        Some(parser.identifier()?)
+    } else {
+        None
+    };
+    let settings = if parser.peek_word("with") {
+        parser.word("with")?;
+        parse_profile_settings(&mut parser)?
+    } else {
+        Vec::new()
+    };
+    finish_statement(&mut parser)?;
+    Ok(CreateWorkloadProfileSql {
+        if_not_exists,
+        name,
+        base_profile,
+        settings,
+    })
+}
+
+/// Parse `ALTER WORKLOAD PROFILE name SET (k = v, ...)`.
+pub fn parse_alter_workload_profile(sql: &str) -> Result<AlterWorkloadProfileSql, DdlSqlError> {
+    let mut parser = statement_parser(sql)?;
+    parser.word("alter")?;
+    parser.word("workload")?;
+    parser.word("profile")?;
+    let name = parser.identifier()?;
+    parser.word("set")?;
+    let settings = parse_profile_settings(&mut parser)?;
+    finish_statement(&mut parser)?;
+    Ok(AlterWorkloadProfileSql { name, settings })
+}
+
+/// Parse `ALTER WORKLOAD PROFILE old_name RENAME TO new_name`.
+pub fn parse_rename_workload_profile(sql: &str) -> Result<RenameWorkloadProfileSql, DdlSqlError> {
+    let mut parser = statement_parser(sql)?;
+    parser.word("alter")?;
+    parser.word("workload")?;
+    parser.word("profile")?;
+    let old_name = parser.identifier()?;
+    parser.word("rename")?;
+    parser.word("to")?;
+    let new_name = parser.identifier()?;
+    finish_statement(&mut parser)?;
+    Ok(RenameWorkloadProfileSql { old_name, new_name })
+}
+
+/// Parse `DROP WORKLOAD PROFILE [IF EXISTS] name RESTRICT`.
+pub fn parse_drop_workload_profile(sql: &str) -> Result<DropWorkloadProfileSql, DdlSqlError> {
+    let mut parser = statement_parser(sql)?;
+    parser.word("drop")?;
+    parser.word("workload")?;
+    parser.word("profile")?;
+    let if_exists = if parser.peek_word("if") {
+        parser.word("if")?;
+        parser.word("exists")?;
+        true
+    } else {
+        false
+    };
+    let name = parser.identifier()?;
+    parser.word("restrict")?;
+    finish_statement(&mut parser)?;
+    Ok(DropWorkloadProfileSql { name, if_exists })
 }

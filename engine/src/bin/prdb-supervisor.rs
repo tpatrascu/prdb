@@ -61,35 +61,21 @@ mod service {
         max_rows: Option<usize>,
         max_bytes: Option<usize>,
         max_total_result_bytes: Option<u64>,
-        analytical_max_total_result_bytes: Option<u64>,
         max_sql_index_probe_candidates: Option<u32>,
-        analytical_max_sql_index_probe_candidates: Option<u32>,
         max_sql_index_range_bytes: Option<usize>,
-        analytical_max_sql_index_range_bytes: Option<usize>,
         max_principal_reservations: Option<usize>,
-        max_pending_operational: Option<usize>,
-        max_pending_analytical: Option<usize>,
-        max_active_operational: Option<usize>,
-        max_active_analytical: Option<usize>,
+        max_pending_submissions: Option<usize>,
+        max_active_invocations: Option<usize>,
         max_storage_active_snapshots: Option<usize>,
-        max_storage_active_analytical_snapshots: Option<usize>,
         max_invocation_scan_work: Option<usize>,
-        analytical_max_invocation_scan_work: Option<usize>,
         max_planner_estimate_requests: Option<usize>,
-        analytical_max_planner_estimate_requests: Option<usize>,
         max_planner_estimate_candidates: Option<usize>,
-        analytical_max_planner_estimate_candidates: Option<usize>,
         max_statistics_collection_rows: Option<usize>,
-        max_active_operational_per_principal: Option<usize>,
-        max_active_analytical_per_principal: Option<usize>,
+        max_active_per_principal: Option<usize>,
         cpu_quota_us: Option<u64>,
         cpu_period_us: Option<u64>,
         memory_max_bytes: Option<u64>,
         max_processes: Option<u64>,
-        analytical_cpu_quota_us: Option<u64>,
-        analytical_cpu_period_us: Option<u64>,
-        analytical_memory_max_bytes: Option<u64>,
-        analytical_max_processes: Option<u64>,
     }
 
     pub fn main() {
@@ -178,10 +164,6 @@ mod service {
                 .unwrap_or(prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES),
             "--max-total-result-bytes",
         )?;
-        let analytical_max_total_result_bytes = options
-            .analytical_max_total_result_bytes
-            .map(|value| positive(value, "--analytical-max-total-result-bytes"))
-            .transpose()?;
         let max_sql_index_probe_candidates = options
             .max_sql_index_probe_candidates
             .unwrap_or(prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES);
@@ -195,19 +177,6 @@ mod service {
             )
             .into());
         }
-        let analytical_max_sql_index_probe_candidates = options
-            .analytical_max_sql_index_probe_candidates
-            .map(|value| {
-                if value == 0 || value > prdb_engine::query_abi::MAX_SQL_INDEX_PROBE_CANDIDATES {
-                    Err(format!(
-                        "--analytical-max-sql-index-probe-candidates must be in 1..={}",
-                        prdb_engine::query_abi::MAX_SQL_INDEX_PROBE_CANDIDATES
-                    ))
-                } else {
-                    Ok(value)
-                }
-            })
-            .transpose()?;
         let resource_limits = WorkerResourceLimits {
             cpu_quota_micros: positive(
                 required(options.cpu_quota_us, "--cpu-quota-us")?,
@@ -226,39 +195,6 @@ mod service {
                 "--max-processes",
             )?,
         };
-        let analytical_values = [
-            options.analytical_cpu_quota_us,
-            options.analytical_cpu_period_us,
-            options.analytical_memory_max_bytes,
-            options.analytical_max_processes,
-        ];
-        let analytical_resource_limits =
-            match analytical_values.iter().filter(|v| v.is_some()).count() {
-                0 => None,
-                4 => Some(WorkerResourceLimits {
-                    cpu_quota_micros: positive(
-                        options.analytical_cpu_quota_us.unwrap(),
-                        "--analytical-cpu-quota-us",
-                    )?,
-                    cpu_period_micros: positive(
-                        options.analytical_cpu_period_us.unwrap(),
-                        "--analytical-cpu-period-us",
-                    )?,
-                    memory_max_bytes: positive(
-                        options.analytical_memory_max_bytes.unwrap(),
-                        "--analytical-memory-max-bytes",
-                    )?,
-                    max_processes: positive(
-                        options.analytical_max_processes.unwrap(),
-                        "--analytical-max-processes",
-                    )?,
-                }),
-                _ => {
-                    return Err(
-                        "all four --analytical-* resource flags must be supplied together".into(),
-                    );
-                }
-            };
         if options.runtime_read_execute.is_empty() {
             return Err("at least one --runtime-read-execute path is required".into());
         }
@@ -291,17 +227,11 @@ mod service {
         let validator = Arc::new(validator);
         let default_staging_limits = StagingLimits::default();
         let staging_limits = StagingLimits {
-            max_pending_operational: positive(
+            max_pending_submissions: positive(
                 options
-                    .max_pending_operational
-                    .unwrap_or(default_staging_limits.max_pending_operational),
-                "--max-pending-operational",
-            )?,
-            max_pending_analytical: positive(
-                options
-                    .max_pending_analytical
-                    .unwrap_or(default_staging_limits.max_pending_analytical),
-                "--max-pending-analytical",
+                    .max_pending_submissions
+                    .unwrap_or(default_staging_limits.max_pending_submissions),
+                "--max-pending-submissions",
             )?,
             max_live_reservations_per_principal: positive(
                 options
@@ -309,29 +239,17 @@ mod service {
                     .unwrap_or(default_staging_limits.max_live_reservations_per_principal),
                 "--max-principal-reservations",
             )?,
-            max_active_operational: positive(
+            max_active_invocations: positive(
                 options
-                    .max_active_operational
-                    .unwrap_or(default_staging_limits.max_active_operational),
-                "--max-active-operational",
+                    .max_active_invocations
+                    .unwrap_or(default_staging_limits.max_active_invocations),
+                "--max-active-invocations",
             )?,
-            max_active_analytical: positive(
+            max_active_per_principal: positive(
                 options
-                    .max_active_analytical
-                    .unwrap_or(default_staging_limits.max_active_analytical),
-                "--max-active-analytical",
-            )?,
-            max_active_operational_per_principal: positive(
-                options
-                    .max_active_operational_per_principal
-                    .unwrap_or(default_staging_limits.max_active_operational_per_principal),
-                "--max-active-operational-per-principal",
-            )?,
-            max_active_analytical_per_principal: positive(
-                options
-                    .max_active_analytical_per_principal
-                    .unwrap_or(default_staging_limits.max_active_analytical_per_principal),
-                "--max-active-analytical-per-principal",
+                    .max_active_per_principal
+                    .unwrap_or(default_staging_limits.max_active_per_principal),
+                "--max-active-per-principal",
             )?,
             ..default_staging_limits
         };
@@ -348,7 +266,6 @@ mod service {
             executor: GatewayExecutorConfig {
                 cgroup_parent,
                 resource_limits,
-                analytical_resource_limits,
                 launch: ExecutorLaunchConfig {
                     executor_path,
                     optimizer_path,
@@ -357,9 +274,7 @@ mod service {
                     runtime_read_only: options.runtime_read_only,
                     spill_broker: spill_broker.clone(),
                     max_total_result_bytes,
-                    analytical_max_total_result_bytes,
                     max_sql_index_probe_candidates,
-                    analytical_max_sql_index_probe_candidates,
                     cleanup_timeout: Duration::from_secs(2),
                 },
             },
@@ -560,103 +475,43 @@ mod service {
                 "--max-total-result-bytes" => {
                     set!(max_total_result_bytes, value.parse::<u64>()?)
                 }
-                "--analytical-max-total-result-bytes" => {
-                    set!(analytical_max_total_result_bytes, value.parse::<u64>()?)
-                }
                 "--max-sql-index-probe-candidates" => {
                     set!(max_sql_index_probe_candidates, value.parse::<u32>()?)
-                }
-                "--analytical-max-sql-index-probe-candidates" => {
-                    set!(
-                        analytical_max_sql_index_probe_candidates,
-                        value.parse::<u32>()?
-                    )
                 }
                 "--max-sql-index-range-bytes" => {
                     set!(max_sql_index_range_bytes, value.parse::<usize>()?)
                 }
-                "--analytical-max-sql-index-range-bytes" => {
-                    set!(
-                        analytical_max_sql_index_range_bytes,
-                        value.parse::<usize>()?
-                    )
-                }
                 "--max-principal-reservations" => {
                     set!(max_principal_reservations, value.parse::<usize>()?)
                 }
-                "--max-pending-operational" => {
-                    set!(max_pending_operational, value.parse::<usize>()?)
+                "--max-pending-submissions" => {
+                    set!(max_pending_submissions, value.parse::<usize>()?)
                 }
-                "--max-pending-analytical" => {
-                    set!(max_pending_analytical, value.parse::<usize>()?)
-                }
-                "--max-active-operational" => {
-                    set!(max_active_operational, value.parse::<usize>()?)
-                }
-                "--max-active-analytical" => {
-                    set!(max_active_analytical, value.parse::<usize>()?)
+                "--max-active-invocations" => {
+                    set!(max_active_invocations, value.parse::<usize>()?)
                 }
                 "--max-storage-active-snapshots" => {
                     set!(max_storage_active_snapshots, value.parse::<usize>()?)
                 }
-                "--max-storage-active-analytical-snapshots" => {
-                    set!(
-                        max_storage_active_analytical_snapshots,
-                        value.parse::<usize>()?
-                    )
-                }
                 "--max-invocation-scan-work" => {
                     set!(max_invocation_scan_work, value.parse::<usize>()?)
-                }
-                "--analytical-max-invocation-scan-work" => {
-                    set!(analytical_max_invocation_scan_work, value.parse::<usize>()?)
                 }
                 "--max-planner-estimate-requests" => {
                     set!(max_planner_estimate_requests, value.parse::<usize>()?)
                 }
-                "--analytical-max-planner-estimate-requests" => {
-                    set!(
-                        analytical_max_planner_estimate_requests,
-                        value.parse::<usize>()?
-                    )
-                }
                 "--max-planner-estimate-candidates" => {
                     set!(max_planner_estimate_candidates, value.parse::<usize>()?)
-                }
-                "--analytical-max-planner-estimate-candidates" => {
-                    set!(
-                        analytical_max_planner_estimate_candidates,
-                        value.parse::<usize>()?
-                    )
                 }
                 "--max-statistics-collection-rows" => {
                     set!(max_statistics_collection_rows, value.parse::<usize>()?)
                 }
-                "--max-active-operational-per-principal" => {
-                    set!(
-                        max_active_operational_per_principal,
-                        value.parse::<usize>()?
-                    )
-                }
-                "--max-active-analytical-per-principal" => {
-                    set!(max_active_analytical_per_principal, value.parse::<usize>()?)
+                "--max-active-per-principal" => {
+                    set!(max_active_per_principal, value.parse::<usize>()?)
                 }
                 "--cpu-quota-us" => set!(cpu_quota_us, value.parse::<u64>()?),
                 "--cpu-period-us" => set!(cpu_period_us, value.parse::<u64>()?),
                 "--memory-max-bytes" => set!(memory_max_bytes, value.parse::<u64>()?),
                 "--max-processes" => set!(max_processes, value.parse::<u64>()?),
-                "--analytical-cpu-quota-us" => {
-                    set!(analytical_cpu_quota_us, value.parse::<u64>()?)
-                }
-                "--analytical-cpu-period-us" => {
-                    set!(analytical_cpu_period_us, value.parse::<u64>()?)
-                }
-                "--analytical-memory-max-bytes" => {
-                    set!(analytical_memory_max_bytes, value.parse::<u64>()?)
-                }
-                "--analytical-max-processes" => {
-                    set!(analytical_max_processes, value.parse::<u64>()?)
-                }
                 _ => return Err(format!("unknown option {flag}").into()),
             }
         }
@@ -743,10 +598,6 @@ mod service {
                 .unwrap_or(defaults.max_invocation_scan_work),
             "--max-invocation-scan-work",
         )?;
-        let analytical_max_invocation_scan_work = options
-            .analytical_max_invocation_scan_work
-            .map(|value| positive(value, "--analytical-max-invocation-scan-work"))
-            .transpose()?;
         let max_authorized_index_range_candidates = positive(
             options
                 .max_sql_index_probe_candidates
@@ -754,30 +605,14 @@ mod service {
                 .unwrap_or(defaults.max_authorized_index_range_candidates),
             "--max-sql-index-probe-candidates",
         )?;
-        let analytical_max_authorized_index_range_candidates = options
-            .analytical_max_sql_index_probe_candidates
-            .map(|value| {
-                positive(
-                    value as usize,
-                    "--analytical-max-sql-index-probe-candidates",
-                )
-            })
-            .transpose()?;
         let max_authorized_index_range_bytes = positive(
             options
                 .max_sql_index_range_bytes
                 .unwrap_or(defaults.max_authorized_index_range_bytes),
             "--max-sql-index-range-bytes",
         )?;
-        let analytical_max_authorized_index_range_bytes = options
-            .analytical_max_sql_index_range_bytes
-            .map(|value| positive(value, "--analytical-max-sql-index-range-bytes"))
-            .transpose()?;
         if max_authorized_index_range_candidates
             > prdb_engine::query_abi::MAX_SQL_INDEX_PROBE_CANDIDATES as usize
-            || analytical_max_authorized_index_range_candidates.is_some_and(|value| {
-                value > prdb_engine::query_abi::MAX_SQL_INDEX_PROBE_CANDIDATES as usize
-            })
         {
             return Err(format!(
                 "SQL index probe candidates must not exceed {}",
@@ -790,31 +625,19 @@ mod service {
                 .unwrap_or(defaults.max_planner_estimate_requests),
             "--max-planner-estimate-requests",
         )?;
-        let analytical_max_planner_estimate_requests = options
-            .analytical_max_planner_estimate_requests
-            .map(|value| positive(value, "--analytical-max-planner-estimate-requests"))
-            .transpose()?;
         let max_planner_estimate_candidates = positive(
             options
                 .max_planner_estimate_candidates
                 .unwrap_or(prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES),
             "--max-planner-estimate-candidates",
         )?;
-        let analytical_max_planner_estimate_candidates = options
-            .analytical_max_planner_estimate_candidates
-            .map(|value| positive(value, "--analytical-max-planner-estimate-candidates"))
-            .transpose()?;
         let max_statistics_collection_rows = positive(
             options
                 .max_statistics_collection_rows
                 .unwrap_or(defaults.max_statistics_collection_rows),
             "--max-statistics-collection-rows",
         )?;
-        if max_planner_estimate_requests > prdb_engine::transaction::MAX_PLANNER_ESTIMATE_REQUESTS
-            || analytical_max_planner_estimate_requests.is_some_and(|value| {
-                value > prdb_engine::transaction::MAX_PLANNER_ESTIMATE_REQUESTS
-            })
-        {
+        if max_planner_estimate_requests > prdb_engine::transaction::MAX_PLANNER_ESTIMATE_REQUESTS {
             return Err(format!(
                 "planner estimate requests must not exceed {}",
                 prdb_engine::transaction::MAX_PLANNER_ESTIMATE_REQUESTS
@@ -822,9 +645,6 @@ mod service {
         }
         if max_planner_estimate_candidates
             > prdb_engine::statistics::MAX_CONFIGURABLE_ESTIMATE_CANDIDATES
-            || analytical_max_planner_estimate_candidates.is_some_and(|value| {
-                value > prdb_engine::statistics::MAX_CONFIGURABLE_ESTIMATE_CANDIDATES
-            })
         {
             return Err(format!(
                 "planner estimate candidates must not exceed {}",
@@ -846,24 +666,11 @@ mod service {
                     .unwrap_or(defaults.max_active_invocations),
                 "--max-storage-active-snapshots",
             )?,
-            max_active_analytical_invocations: positive(
-                options
-                    .max_storage_active_analytical_snapshots
-                    .unwrap_or(defaults.max_active_analytical_invocations),
-                "--max-storage-active-analytical-snapshots",
-            )?,
             max_invocation_scan_work,
-            max_analytical_invocation_scan_work: analytical_max_invocation_scan_work,
             max_authorized_index_range_candidates,
-            max_analytical_authorized_index_range_candidates:
-                analytical_max_authorized_index_range_candidates,
             max_authorized_index_range_bytes,
-            max_analytical_authorized_index_range_bytes:
-                analytical_max_authorized_index_range_bytes,
             max_planner_estimate_requests,
-            max_analytical_planner_estimate_requests: analytical_max_planner_estimate_requests,
             max_planner_estimate_candidates,
-            max_analytical_planner_estimate_candidates: analytical_max_planner_estimate_candidates,
             max_statistics_collection_rows,
             ..defaults
         })
@@ -873,19 +680,10 @@ mod service {
         staging: &StagingLimits,
         storage: &prdb_engine::storage_manager::StorageManagerConfig,
     ) -> Result<(), String> {
-        if storage.max_active_analytical_invocations < staging.max_active_analytical {
+        if storage.max_active_invocations < staging.max_active_invocations {
             return Err(format!(
-                "--max-storage-active-analytical-snapshots must be at least --max-active-analytical ({})",
-                staging.max_active_analytical
-            ));
-        }
-        let combined_active_limit = staging
-            .max_active_operational
-            .checked_add(staging.max_active_analytical)
-            .ok_or_else(|| "combined supervisor active admission limit overflows".to_owned())?;
-        if storage.max_active_invocations < combined_active_limit {
-            return Err(format!(
-                "--max-storage-active-snapshots must be at least the combined --max-active-operational and --max-active-analytical limit ({combined_active_limit})"
+                "--max-storage-active-snapshots must be at least --max-active-invocations ({})",
+                staging.max_active_invocations
             ));
         }
         Ok(())
@@ -988,24 +786,14 @@ mod service {
             let storage = StorageManagerConfig::default();
             assert!(validate_storage_admission_capacity(&staging, &storage).is_ok());
 
-            let insufficient_analytical = StorageManagerConfig {
-                max_active_analytical_invocations: 7,
-                ..storage
-            };
-            assert!(
-                validate_storage_admission_capacity(&staging, &insufficient_analytical)
-                    .unwrap_err()
-                    .contains("analytical")
-            );
-
             let insufficient_global = StorageManagerConfig {
-                max_active_invocations: 71,
+                max_active_invocations: 63,
                 ..storage
             };
             assert!(
                 validate_storage_admission_capacity(&staging, &insufficient_global)
                     .unwrap_err()
-                    .contains("combined")
+                    .contains("--max-active-invocations")
             );
         }
 
@@ -1013,72 +801,36 @@ mod service {
         fn storage_snapshot_limits_use_cli_values_and_documented_defaults() {
             let defaults = storage_manager_config(&Options::default()).expect("default config");
             assert_eq!(defaults.max_active_invocations, 128);
-            assert_eq!(defaults.max_active_analytical_invocations, 8);
             assert_eq!(defaults.max_planner_estimate_requests, 16);
-            assert_eq!(defaults.max_analytical_planner_estimate_requests, None);
             assert_eq!(defaults.max_invocation_scan_work, 65_536);
-            assert_eq!(defaults.max_analytical_invocation_scan_work, None);
             assert_eq!(
                 defaults.max_authorized_index_range_candidates,
                 prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES as usize
             );
-            assert_eq!(
-                defaults.max_analytical_authorized_index_range_candidates,
-                None
-            );
             assert_eq!(defaults.max_authorized_index_range_bytes, 16 * 1024 * 1024);
-            assert_eq!(defaults.max_analytical_authorized_index_range_bytes, None);
             assert_eq!(defaults.max_planner_estimate_candidates, 16_384);
-            assert_eq!(defaults.max_analytical_planner_estimate_candidates, None);
             assert_eq!(defaults.max_statistics_collection_rows, 16_384);
 
             let configured = storage_manager_config(&Options {
                 max_storage_active_snapshots: Some(48),
-                max_storage_active_analytical_snapshots: Some(6),
                 max_invocation_scan_work: Some(131_072),
-                analytical_max_invocation_scan_work: Some(2_097_152),
                 max_sql_index_probe_candidates: Some(512),
-                analytical_max_sql_index_probe_candidates: Some(2048),
                 max_sql_index_range_bytes: Some(64 * 1024 * 1024),
-                analytical_max_sql_index_range_bytes: Some(512 * 1024 * 1024),
                 max_planner_estimate_requests: Some(64),
-                analytical_max_planner_estimate_requests: Some(1024),
                 max_planner_estimate_candidates: Some(32_768),
-                analytical_max_planner_estimate_candidates: Some(131_072),
                 max_statistics_collection_rows: Some(65_536),
                 ..Options::default()
             })
             .expect("configured limits");
             assert_eq!(configured.max_active_invocations, 48);
-            assert_eq!(configured.max_active_analytical_invocations, 6);
             assert_eq!(configured.max_invocation_scan_work, 131_072);
-            assert_eq!(
-                configured.max_analytical_invocation_scan_work,
-                Some(2_097_152)
-            );
             assert_eq!(configured.max_authorized_index_range_candidates, 512);
-            assert_eq!(
-                configured.max_analytical_authorized_index_range_candidates,
-                Some(2048)
-            );
             assert_eq!(
                 configured.max_authorized_index_range_bytes,
                 64 * 1024 * 1024
             );
-            assert_eq!(
-                configured.max_analytical_authorized_index_range_bytes,
-                Some(512 * 1024 * 1024)
-            );
             assert_eq!(configured.max_planner_estimate_requests, 64);
-            assert_eq!(
-                configured.max_analytical_planner_estimate_requests,
-                Some(1024)
-            );
             assert_eq!(configured.max_planner_estimate_candidates, 32_768);
-            assert_eq!(
-                configured.max_analytical_planner_estimate_candidates,
-                Some(131_072)
-            );
             assert_eq!(configured.max_statistics_collection_rows, 65_536);
         }
 
@@ -1091,58 +843,12 @@ mod service {
             .expect_err("zero global storage limit must fail");
             assert!(error.contains("--max-storage-active-snapshots must be positive"));
 
-            let error = storage_manager_config(&Options {
-                max_storage_active_analytical_snapshots: Some(0),
-                ..Options::default()
-            })
-            .expect_err("zero analytical storage limit must fail");
-            assert!(error.contains("--max-storage-active-analytical-snapshots must be positive"));
-
-            let estimate_error = storage_manager_config(&Options {
-                analytical_max_planner_estimate_requests: Some(0),
-                ..Options::default()
-            })
-            .expect_err("zero analytical estimate allowance must fail");
-            assert!(
-                estimate_error
-                    .contains("--analytical-max-planner-estimate-requests must be positive")
-            );
-
-            let scan_work_error = storage_manager_config(&Options {
-                analytical_max_invocation_scan_work: Some(0),
-                ..Options::default()
-            })
-            .expect_err("zero analytical scan-work allowance must fail");
-            assert!(
-                scan_work_error.contains("--analytical-max-invocation-scan-work must be positive")
-            );
-
             let candidate_error = storage_manager_config(&Options {
                 max_sql_index_probe_candidates: Some(0),
                 ..Options::default()
             })
             .expect_err("zero candidate limit must fail");
             assert!(candidate_error.contains("--max-sql-index-probe-candidates must be positive"));
-
-            let range_bytes_error = storage_manager_config(&Options {
-                analytical_max_sql_index_range_bytes: Some(0),
-                ..Options::default()
-            })
-            .expect_err("zero analytical range-byte budget must fail");
-            assert!(
-                range_bytes_error
-                    .contains("--analytical-max-sql-index-range-bytes must be positive")
-            );
-
-            let candidate_error = storage_manager_config(&Options {
-                analytical_max_planner_estimate_candidates: Some(0),
-                ..Options::default()
-            })
-            .expect_err("zero analytical estimate candidate limit must fail");
-            assert!(
-                candidate_error
-                    .contains("--analytical-max-planner-estimate-candidates must be positive")
-            );
 
             let maintenance_error = storage_manager_config(&Options {
                 max_statistics_collection_rows: Some(0),

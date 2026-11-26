@@ -6,7 +6,6 @@
 //! the worker channel and must destroy it on every terminal package path.
 
 use crate::query_abi::MAX_IPC_REQUEST_BYTES;
-use crate::supervisor::WorkloadClass;
 use getrandom::fill as random_fill;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
@@ -44,7 +43,26 @@ pub struct SpillConfig {
     pub max_service_bytes: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SpillInvocationLimits {
+    pub max_bytes: u64,
+    pub max_io_bytes: u64,
+    pub max_streams: u64,
+    pub max_operations: u64,
+    pub max_response_bytes: u64,
+}
+
 impl SpillConfig {
+    pub fn invocation_limits(&self) -> SpillInvocationLimits {
+        SpillInvocationLimits {
+            max_bytes: self.max_bytes_per_invocation,
+            max_io_bytes: self.max_io_bytes_per_invocation,
+            max_streams: self.max_streams_per_invocation,
+            max_operations: self.max_operations_per_invocation,
+            max_response_bytes: self.max_response_bytes,
+        }
+    }
+
     pub fn validate(&self) -> Result<(), SpillError> {
         if self.max_bytes_per_invocation == 0
             || self.max_io_bytes_per_invocation == 0
@@ -135,7 +153,7 @@ struct BrokerState {
 }
 
 struct SessionState {
-    workload: WorkloadClass,
+    limits: SpillInvocationLimits,
     deadline: Instant,
     cancelled: Arc<AtomicBool>,
     closed: bool,
@@ -232,17 +250,34 @@ impl SpillBroker {
         })))
     }
 
-    /// Bind a worker channel to trusted invocation/package state. Operational
-    /// invocations are denied regardless of worker requests.
+    /// Bind a worker channel to trusted invocation/package state.
     pub fn open_package(
         &self,
         package: SpillPackage,
-        workload: WorkloadClass,
+        limits: Option<SpillInvocationLimits>,
         deadline: Instant,
     ) -> Result<(), SpillError> {
-        if workload != WorkloadClass::Analytical {
-            return Err(SpillError::DisabledForWorkload);
-        }
+        let host_limits = self.0.config.invocation_limits();
+        let effective_limits = match limits {
+            Some(l) => {
+                if l.max_bytes == 0
+                    || l.max_io_bytes == 0
+                    || l.max_streams == 0
+                    || l.max_operations == 0
+                    || l.max_response_bytes == 0
+                {
+                    return Err(SpillError::DisabledForWorkload);
+                }
+                SpillInvocationLimits {
+                    max_bytes: l.max_bytes.min(host_limits.max_bytes),
+                    max_io_bytes: l.max_io_bytes.min(host_limits.max_io_bytes),
+                    max_streams: l.max_streams.min(host_limits.max_streams),
+                    max_operations: l.max_operations.min(host_limits.max_operations),
+                    max_response_bytes: l.max_response_bytes.min(host_limits.max_response_bytes),
+                }
+            }
+            None => host_limits,
+        };
         let c_name = random_name(DIRECTORY_NAME_BYTES)?;
         let mut state = self
             .0
@@ -283,7 +318,7 @@ impl SpillBroker {
         state.sessions.insert(
             package,
             SessionState {
-                workload,
+                limits: effective_limits,
                 deadline,
                 cancelled,
                 closed: false,
@@ -305,8 +340,8 @@ impl SpillBroker {
             .lock()
             .map_err(|_| SpillError::AccountingFailure)?;
         let session = session_mut(&mut state, package)?;
-        charge_operation(session, &self.0.config)?;
-        if session.streams.len() as u64 >= self.0.config.max_streams_per_invocation {
+        charge_operation(session)?;
+        if session.streams.len() as u64 >= session.limits.max_streams {
             return Err(SpillError::StreamLimit);
         }
         let directory = session
@@ -385,11 +420,11 @@ impl SpillBroker {
                 return Err(SpillError::AccountingFailure);
             }
             let service_cap = self.0.config.max_service_bytes;
-            let per_invocation_cap = self.0.config.max_bytes_per_invocation;
             let service_reserved = state.service_reserved;
             let session = session_mut(&mut state, package)?;
-            charge_operation(session, &self.0.config)?;
-            charge_io(session, bytes.len() as u64, &self.0.config)?;
+            let per_invocation_cap = session.limits.max_bytes;
+            charge_operation(session)?;
+            charge_io(session, bytes.len() as u64)?;
             let stream = session
                 .streams
                 .get_mut(&handle)
@@ -547,7 +582,7 @@ impl SpillBroker {
                 .lock()
                 .map_err(|_| SpillError::AccountingFailure)?;
             let session = session_mut(&mut state, package)?;
-            charge_operation(session, &self.0.config)?;
+            charge_operation(session)?;
             let stream = session
                 .streams
                 .get(&handle)
@@ -585,9 +620,6 @@ impl SpillBroker {
         offset: u64,
         out: &mut [u8],
     ) -> Result<usize, SpillError> {
-        if out.len() as u64 > self.0.config.max_response_bytes {
-            return Err(SpillError::ResponseLimit);
-        }
         let io_lock = self.stream_io_lock(package, handle)?;
         let _io_guard = io_lock.lock().map_err(|_| SpillError::AccountingFailure)?;
         let (file, count) = {
@@ -597,7 +629,10 @@ impl SpillBroker {
                 .lock()
                 .map_err(|_| SpillError::AccountingFailure)?;
             let session = session_mut(&mut state, package)?;
-            charge_operation(session, &self.0.config)?;
+            if out.len() as u64 > session.limits.max_response_bytes {
+                return Err(SpillError::ResponseLimit);
+            }
+            charge_operation(session)?;
             let stream = session
                 .streams
                 .get(&handle)
@@ -615,7 +650,7 @@ impl SpillBroker {
             let count = usize::try_from(available.min(out.len() as u64))
                 .map_err(|_| SpillError::InvalidRange)?;
             let file = stream.file.try_clone().map_err(|_| SpillError::Io)?;
-            charge_io(session, count as u64, &self.0.config)?;
+            charge_io(session, count as u64)?;
             (file, count)
         };
         let mut read = 0usize;
@@ -639,7 +674,7 @@ impl SpillBroker {
             .lock()
             .map_err(|_| SpillError::AccountingFailure)?;
         let session = session_mut(&mut state, package)?;
-        charge_operation(session, &self.0.config)?;
+        charge_operation(session)?;
         if !session
             .streams
             .get(&handle)
@@ -1165,9 +1200,6 @@ fn session_mut(
     if session.closed {
         return Err(SpillError::ClosedSession);
     }
-    if session.workload != WorkloadClass::Analytical {
-        return Err(SpillError::DisabledForWorkload);
-    }
     if session.cancelled.load(Ordering::Acquire) {
         return Err(SpillError::Cancelled);
     }
@@ -1177,27 +1209,23 @@ fn session_mut(
     Ok(session)
 }
 
-fn charge_operation(session: &mut SessionState, config: &SpillConfig) -> Result<(), SpillError> {
+fn charge_operation(session: &mut SessionState) -> Result<(), SpillError> {
     session.operations = session
         .operations
         .checked_add(1)
         .ok_or(SpillError::OperationLimit)?;
-    if session.operations > config.max_operations_per_invocation {
+    if session.operations > session.limits.max_operations {
         return Err(SpillError::OperationLimit);
     }
     Ok(())
 }
 
-fn charge_io(
-    session: &mut SessionState,
-    bytes: u64,
-    config: &SpillConfig,
-) -> Result<(), SpillError> {
+fn charge_io(session: &mut SessionState, bytes: u64) -> Result<(), SpillError> {
     let next = session
         .io_bytes
         .checked_add(bytes)
         .ok_or(SpillError::IoLimit)?;
-    if next > config.max_io_bytes_per_invocation {
+    if next > session.limits.max_io_bytes {
         return Err(SpillError::IoLimit);
     }
     session.io_bytes = next;
@@ -1281,12 +1309,8 @@ mod tests {
         let owner = package(1);
         let other = package(2);
         let deadline = Instant::now() + Duration::from_secs(10);
-        broker
-            .open_package(owner, WorkloadClass::Analytical, deadline)
-            .unwrap();
-        broker
-            .open_package(other, WorkloadClass::Analytical, deadline)
-            .unwrap();
+        broker.open_package(owner, None, deadline).unwrap();
+        broker.open_package(other, None, deadline).unwrap();
         let stream = broker.create(owner).unwrap();
         broker.append(owner, stream, b"authorized bytes").unwrap();
         broker.seal(owner, stream).unwrap();
@@ -1330,12 +1354,20 @@ mod tests {
         let operational = package(4);
         let deadline = Instant::now() + Duration::from_secs(10);
         assert_eq!(
-            broker.open_package(operational, WorkloadClass::Operational, deadline),
+            broker.open_package(
+                operational,
+                Some(SpillInvocationLimits {
+                    max_bytes: 0,
+                    max_io_bytes: 0,
+                    max_streams: 0,
+                    max_operations: 0,
+                    max_response_bytes: 0,
+                }),
+                deadline,
+            ),
             Err(SpillError::DisabledForWorkload)
         );
-        broker
-            .open_package(analytical, WorkloadClass::Analytical, deadline)
-            .unwrap();
+        broker.open_package(analytical, None, deadline).unwrap();
         let stream = broker.create(analytical).unwrap();
         assert_eq!(
             broker.append(analytical, stream, &vec![7; 4097]),
@@ -1373,9 +1405,7 @@ mod tests {
         let owners = [package(31), package(32)];
         let deadline = Instant::now() + Duration::from_secs(10);
         let handles = owners.map(|owner| {
-            broker
-                .open_package(owner, WorkloadClass::Analytical, deadline)
-                .unwrap();
+            broker.open_package(owner, None, deadline).unwrap();
             broker.create(owner).unwrap()
         });
         let barrier = Arc::new(std::sync::Barrier::new(3));
@@ -1425,11 +1455,7 @@ mod tests {
         let broker = SpillBroker::open(config(&scratch.0)).unwrap();
         let owner = package(5);
         broker
-            .open_package(
-                owner,
-                WorkloadClass::Analytical,
-                Instant::now() + Duration::from_secs(10),
-            )
+            .open_package(owner, None, Instant::now() + Duration::from_secs(10))
             .unwrap();
         let stream = broker.create(owner).unwrap();
         broker.cancel(owner).unwrap();
@@ -1452,11 +1478,9 @@ mod tests {
         let active_package = package(14);
         let deadline = Instant::now() + Duration::from_secs(10);
         broker
-            .open_package(stalled_package, WorkloadClass::Analytical, deadline)
+            .open_package(stalled_package, None, deadline)
             .unwrap();
-        broker
-            .open_package(active_package, WorkloadClass::Analytical, deadline)
-            .unwrap();
+        broker.open_package(active_package, None, deadline).unwrap();
 
         let (mut stalled_client, stalled_server) = std::os::unix::net::UnixStream::pair().unwrap();
         let serving_broker = broker.clone();
@@ -1508,11 +1532,9 @@ mod tests {
         let active_package = package(16);
         let deadline = Instant::now() + Duration::from_secs(10);
         broker
-            .open_package(blocked_package, WorkloadClass::Analytical, deadline)
+            .open_package(blocked_package, None, deadline)
             .unwrap();
-        broker
-            .open_package(active_package, WorkloadClass::Analytical, deadline)
-            .unwrap();
+        broker.open_package(active_package, None, deadline).unwrap();
         let blocked_handle = broker.create(blocked_package).unwrap();
 
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
@@ -1560,11 +1582,7 @@ mod tests {
         let broker = SpillBroker::open(limits).unwrap();
         let owner = package(17);
         broker
-            .open_package(
-                owner,
-                WorkloadClass::Analytical,
-                Instant::now() + Duration::from_secs(10),
-            )
+            .open_package(owner, None, Instant::now() + Duration::from_secs(10))
             .unwrap();
         let handle = broker.create(owner).unwrap();
 
@@ -1626,11 +1644,7 @@ mod tests {
         *broker.0.append_io_hook.lock().unwrap() = None;
 
         broker
-            .open_package(
-                owner,
-                WorkloadClass::Analytical,
-                Instant::now() + Duration::from_secs(10),
-            )
+            .open_package(owner, None, Instant::now() + Duration::from_secs(10))
             .unwrap();
         let replacement = broker.create(owner).unwrap();
         assert_eq!(
@@ -1669,11 +1683,7 @@ mod tests {
         });
         let owner = package(23);
         broker
-            .open_package(
-                owner,
-                WorkloadClass::Analytical,
-                Instant::now() + Duration::from_secs(10),
-            )
+            .open_package(owner, None, Instant::now() + Duration::from_secs(10))
             .unwrap();
         let handle = broker.create(owner).unwrap();
         let expected = [0xA7; 8192];
@@ -1717,9 +1727,7 @@ mod tests {
         for round in 0..4 {
             let deadline = Instant::now() + Duration::from_secs(60);
             let handles = owners.map(|owner| {
-                broker
-                    .open_package(owner, WorkloadClass::Analytical, deadline)
-                    .unwrap();
+                broker.open_package(owner, None, deadline).unwrap();
                 broker.create(owner).unwrap()
             });
             let barrier = Arc::new(std::sync::Barrier::new(3));
@@ -1826,11 +1834,7 @@ mod tests {
         let broker = SpillBroker::open(config(&scratch.0)).unwrap();
         let owner = package(9);
         broker
-            .open_package(
-                owner,
-                WorkloadClass::Analytical,
-                Instant::now() + Duration::from_secs(10),
-            )
+            .open_package(owner, None, Instant::now() + Duration::from_secs(10))
             .unwrap();
         let (mut client, server) = std::os::unix::net::UnixStream::pair().unwrap();
         let serving_broker = broker.clone();
@@ -1868,11 +1872,7 @@ mod tests {
         let (mut client, server) = std::os::unix::net::UnixStream::pair().unwrap();
         let second = package(10);
         broker
-            .open_package(
-                second,
-                WorkloadClass::Analytical,
-                Instant::now() + Duration::from_secs(10),
-            )
+            .open_package(second, None, Instant::now() + Duration::from_secs(10))
             .unwrap();
         let serving_broker = broker.clone();
         let server_thread =
@@ -1896,11 +1896,7 @@ mod tests {
         let broker = SpillBroker::open(config(&scratch.0)).unwrap();
         let owner = package(12);
         broker
-            .open_package(
-                owner,
-                WorkloadClass::Analytical,
-                Instant::now() + Duration::from_secs(10),
-            )
+            .open_package(owner, None, Instant::now() + Duration::from_secs(10))
             .unwrap();
         let (mut client, server) = std::os::unix::net::UnixStream::pair().unwrap();
         let serving_broker = broker.clone();
@@ -1928,11 +1924,7 @@ mod tests {
         let broker = SpillBroker::open(config(&scratch.0)).unwrap();
         let owner = package(11);
         broker
-            .open_package(
-                owner,
-                WorkloadClass::Analytical,
-                Instant::now() + Duration::from_secs(10),
-            )
+            .open_package(owner, None, Instant::now() + Duration::from_secs(10))
             .unwrap();
         let (mut client, server) = std::os::unix::net::UnixStream::pair().unwrap();
         let serving_broker = broker.clone();

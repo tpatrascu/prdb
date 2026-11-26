@@ -23,7 +23,7 @@ pub struct SupervisorInvocation<'db> {
     pub(super) abort_on_drop: bool,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct SupervisorAdmissionRequest {
     pub invocation_id: [u8; 16],
     pub token_id: [u8; 16],
@@ -31,7 +31,7 @@ pub struct SupervisorAdmissionRequest {
     pub max_rows: usize,
     pub max_bytes: usize,
     pub deadline: Option<std::time::Instant>,
-    pub workload_class: crate::supervisor::WorkloadClass,
+    pub workload_profile: Option<crate::workload_profile::WorkloadProfileLimits>,
 }
 
 #[derive(Default)]
@@ -722,7 +722,7 @@ impl<'db> StorageManager<'db> {
                 max_rows,
                 max_bytes,
                 deadline: None,
-                workload_class: crate::supervisor::WorkloadClass::Operational,
+                workload_profile: None,
             },
             token_secret,
             None,
@@ -764,7 +764,7 @@ impl<'db> StorageManager<'db> {
     ) -> Result<SupervisorInvocation<'db>, TransactionError> {
         let principal_id = lookup_credential_principal(self.database, request.token_id)?;
         let (mut transaction, role_ids) =
-            self.begin_token_authenticated_invocation_in_class(request, token_secret)?;
+            self.begin_token_authenticated_invocation_with_profile(request.clone(), token_secret)?;
         if let Some(requested_scope) = requested_scope {
             transaction.restrict_to_requested_scope(requested_scope);
         }

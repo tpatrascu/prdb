@@ -275,9 +275,19 @@ impl AdminClient {
     ) -> Result<AdminIdentityResult, ClientSubmitError> {
         match statement.kind {
             crate::ddl_sql::CreateIdentityKind::User if statement.login_enabled => {
-                self.create_user(&statement.name)
+                match statement.workload_profile.as_deref() {
+                    Some(profile) => self.create_user_with_profile(&statement.name, profile),
+                    None => self.create_user(&statement.name),
+                }
             }
-            crate::ddl_sql::CreateIdentityKind::User => self.create_user_no_login(&statement.name),
+            crate::ddl_sql::CreateIdentityKind::User => {
+                match statement.workload_profile.as_deref() {
+                    Some(profile) => {
+                        self.create_user_no_login_with_profile(&statement.name, profile)
+                    }
+                    None => self.create_user_no_login(&statement.name),
+                }
+            }
             crate::ddl_sql::CreateIdentityKind::Role => self.create_role(&statement.name),
         }
     }
@@ -395,6 +405,108 @@ impl AdminClient {
         let user_id = response_id(&fields, "identity_id")
             .map_err(|_| ClientSubmitError::InvalidAdministrativeRequest)?;
         self.set_user_login(user_id, statement.enabled)
+    }
+
+    pub fn execute_set_user_workload_profile_sql(
+        &mut self,
+        sql: &str,
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        let statement = crate::ddl_sql::parse_set_user_workload_profile(sql)
+            .map_err(|_| ClientSubmitError::InvalidAdministrativeRequest)?;
+        let user_id = self.resolve_identity_sql_name(
+            &statement.user_name,
+            crate::metadata_discovery::AdministrativeIdentityKind::User,
+        )?;
+        self.execute_admin_operation(
+            "users.set_workload_profile",
+            format!(
+                "{{\"user_id\":\"{}\",\"profile_name\":\"{}\"}}",
+                lower_hex(&user_id),
+                statement.profile_name
+            ),
+            None,
+        )
+        .map(|(result, _)| result)
+    }
+
+    pub fn execute_create_workload_profile_sql(
+        &mut self,
+        sql: &str,
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        let statement = crate::ddl_sql::parse_create_workload_profile(sql)
+            .map_err(|_| ClientSubmitError::InvalidAdministrativeRequest)?;
+        let settings = statement
+            .settings
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let args = match statement.base_profile {
+            Some(base) => format!(
+                "{{\"name\":\"{}\",\"base_profile\":\"{}\",\"settings\":\"{}\"}}",
+                statement.name, base, settings
+            ),
+            None => format!(
+                "{{\"name\":\"{}\",\"settings\":\"{}\"}}",
+                statement.name, settings
+            ),
+        };
+        self.execute_admin_operation("workload_profiles.create", args, Some("profile_id"))
+            .map(|(result, _)| result)
+    }
+
+    pub fn execute_alter_workload_profile_sql(
+        &mut self,
+        sql: &str,
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        let statement = crate::ddl_sql::parse_alter_workload_profile(sql)
+            .map_err(|_| ClientSubmitError::InvalidAdministrativeRequest)?;
+        let settings = statement
+            .settings
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        self.execute_admin_operation(
+            "workload_profiles.alter",
+            format!(
+                "{{\"name\":\"{}\",\"settings\":\"{}\"}}",
+                statement.name, settings
+            ),
+            None,
+        )
+        .map(|(result, _)| result)
+    }
+
+    pub fn execute_rename_workload_profile_sql(
+        &mut self,
+        sql: &str,
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        let statement = crate::ddl_sql::parse_rename_workload_profile(sql)
+            .map_err(|_| ClientSubmitError::InvalidAdministrativeRequest)?;
+        self.execute_admin_operation(
+            "workload_profiles.rename",
+            format!(
+                "{{\"old_name\":\"{}\",\"new_name\":\"{}\"}}",
+                statement.old_name, statement.new_name
+            ),
+            None,
+        )
+        .map(|(result, _)| result)
+    }
+
+    pub fn execute_drop_workload_profile_sql(
+        &mut self,
+        sql: &str,
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        let statement = crate::ddl_sql::parse_drop_workload_profile(sql)
+            .map_err(|_| ClientSubmitError::InvalidAdministrativeRequest)?;
+        self.execute_admin_operation(
+            "workload_profiles.drop",
+            format!("{{\"name\":\"{}\"}}", statement.name),
+            None,
+        )
+        .map(|(result, _)| result)
     }
 
     /// Grant or revoke one role membership using authenticated name resolution

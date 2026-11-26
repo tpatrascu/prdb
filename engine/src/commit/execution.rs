@@ -1251,7 +1251,7 @@ pub(super) fn commit_storage_changes_inner_unchecked(
                 || write.key[2] != 1
                 || write.key[19] != 1
                 || write.key[36] != 1
-                || !matches!(u16::from_be_bytes([write.key[37], write.key[38]]), 1..=5)
+                || !matches!(u16::from_be_bytes([write.key[37], write.key[38]]), 1..=6)
             {
                 return Err(CommitError::InvalidCatalog);
             }

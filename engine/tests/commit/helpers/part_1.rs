@@ -429,7 +429,7 @@ pub fn run_sandboxed_forged_handle_client(
     use prdb_engine::ipc::{Operation, read_frame};
     use prdb_engine::supervisor::{
         ChunkKind, PrepareSubmission, StagingLimits, StagingStore, SubmissionMetadata,
-        SubmissionMetadataValidator, WorkloadClass,
+        SubmissionMetadataValidator,
     };
     use prdb_engine::supervisor_ipc::{
         GatewayAdmissionConfig, GatewayExecutorConfig, GatewayTerminalDecision,
@@ -494,7 +494,9 @@ pub fn run_sandboxed_forged_handle_client(
             sql_data_bytes: 0,
             sql_data_sha256: Sha256::digest([]).into(),
             deadline_ms: 30_000,
-            workload_class: WorkloadClass::Operational,
+            workload_profile_id: prdb_engine::workload_profile::SMALL_OPERATIONAL_PROFILE_ID,
+            workload_profile:
+                prdb_engine::workload_profile::WorkloadProfileLimits::small_operational(),
         },
     )?;
     let mut offset = 0;
@@ -521,7 +523,6 @@ pub fn run_sandboxed_forged_handle_client(
             memory_max_bytes: 256 * 1024 * 1024,
             max_processes: 32,
         },
-        analytical_resource_limits: None,
         launch: prdb_engine::executor_launcher::ExecutorLaunchConfig {
             executor_path: PathBuf::from(env!("CARGO_BIN_EXE_prdb-executor")),
             optimizer_path: PathBuf::from(env!("CARGO_BIN_EXE_prdb-optimizer")),
@@ -530,10 +531,8 @@ pub fn run_sandboxed_forged_handle_client(
             runtime_read_only: required_paths("PRDB_TEST_RUNTIME_READ_ONLY")?,
             spill_broker: None,
             max_total_result_bytes: prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
-            analytical_max_total_result_bytes: None,
             max_sql_index_probe_candidates:
                 prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
-            analytical_max_sql_index_probe_candidates: None,
             cleanup_timeout: Duration::from_secs(2),
         },
     };
@@ -1276,6 +1275,51 @@ pub fn initialize_database(database: &Database) -> Result<(), Box<dyn std::error
                 .open_table(CATALOG)?
                 .insert(&record.key[..], record.payload.as_ref().unwrap().as_slice())?;
         }
+    }
+    for preset in prdb_engine::workload_profile::builtin_presets() {
+        let mut wp_key = 18u16.to_be_bytes().to_vec();
+        wp_key.push(1);
+        wp_key.extend_from_slice(&preset.profile_id);
+        let wp_payload = prdb_engine::catalog::encode_envelope(
+            &prdb_engine::catalog::family_schema(18).ok_or("missing family 18 schema")?,
+            &wp_key,
+            &[
+                prdb_engine::catalog::CatalogField {
+                    tag: 1,
+                    wire_type: prdb_engine::catalog::WireType::Text,
+                    payload: preset.name.as_bytes().to_vec(),
+                },
+                prdb_engine::catalog::CatalogField {
+                    tag: 2,
+                    wire_type: prdb_engine::catalog::WireType::U64,
+                    payload: preset.definition_epoch.to_le_bytes().to_vec(),
+                },
+                prdb_engine::catalog::CatalogField {
+                    tag: 3,
+                    wire_type: prdb_engine::catalog::WireType::Bool,
+                    payload: vec![u8::from(preset.is_builtin)],
+                },
+                prdb_engine::catalog::CatalogField {
+                    tag: 4,
+                    wire_type: prdb_engine::catalog::WireType::U32,
+                    payload: prdb_engine::workload_profile::WORKLOAD_PROFILE_LIMITS_VERSION
+                        .to_le_bytes()
+                        .to_vec(),
+                },
+                prdb_engine::catalog::CatalogField {
+                    tag: 5,
+                    wire_type: prdb_engine::catalog::WireType::Bytes,
+                    payload: preset.limits.encode(),
+                },
+            ],
+        )?;
+        let obj = object_write_with_name(preset.profile_id, 11, &preset.name);
+        transaction
+            .open_table(CATALOG)?
+            .insert(&wp_key[..], &wp_payload[..])?;
+        transaction
+            .open_table(CATALOG)?
+            .insert(&obj.key[..], obj.payload.as_ref().unwrap().as_slice())?;
     }
     let metadata = EngineMetadata {
         database_id: [0x33; 16],

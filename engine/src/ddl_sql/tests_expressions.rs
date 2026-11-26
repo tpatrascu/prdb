@@ -338,6 +338,7 @@ fn parses_bounded_identity_creation_sql() {
             if_not_exists: false,
             name: "analyst".into(),
             login_enabled: true,
+            workload_profile: None,
         }
     );
     assert_eq!(
@@ -347,6 +348,7 @@ fn parses_bounded_identity_creation_sql() {
             if_not_exists: false,
             name: "reporting".into(),
             login_enabled: false,
+            workload_profile: None,
         }
     );
     assert!(
@@ -985,4 +987,52 @@ fn rejects_defaults_with_loss_or_type_mismatch() {
     ] {
         assert!(parse_create_table(sql).is_err(), "accepted {sql}");
     }
+}
+
+#[test]
+fn parses_workload_profile_and_user_profile_ddl() {
+    use super::statements_identity_policy::{
+        parse_alter_workload_profile, parse_create_identity, parse_create_workload_profile,
+        parse_drop_workload_profile, parse_rename_workload_profile,
+        parse_set_user_workload_profile,
+    };
+
+    let created = parse_create_workload_profile(
+        "CREATE WORKLOAD PROFILE erp_batch FROM small_operational WITH (memory_max_bytes = 536870912, max_processes = 64);",
+    )
+    .unwrap();
+    assert_eq!(created.name, "erp_batch");
+    assert_eq!(created.base_profile.as_deref(), Some("small_operational"));
+    assert_eq!(created.settings.len(), 2);
+
+    let altered = parse_alter_workload_profile(
+        "ALTER WORKLOAD PROFILE erp_batch SET (max_sql_index_probe_candidates = 2048);",
+    )
+    .unwrap();
+    assert_eq!(altered.name, "erp_batch");
+    assert_eq!(
+        altered.settings,
+        vec![("max_sql_index_probe_candidates".to_owned(), 2048)]
+    );
+
+    let renamed =
+        parse_rename_workload_profile("ALTER WORKLOAD PROFILE erp_batch RENAME TO erp_batch_v2;")
+            .unwrap();
+    assert_eq!(renamed.old_name, "erp_batch");
+    assert_eq!(renamed.new_name, "erp_batch_v2");
+
+    let dropped =
+        parse_drop_workload_profile("DROP WORKLOAD PROFILE erp_batch_v2 RESTRICT;").unwrap();
+    assert_eq!(dropped.name, "erp_batch_v2");
+
+    let user =
+        parse_create_identity("CREATE USER batch_svc LOGIN WORKLOAD PROFILE erp_batch;").unwrap();
+    assert_eq!(user.name, "batch_svc");
+    assert_eq!(user.workload_profile.as_deref(), Some("erp_batch"));
+
+    let set_user =
+        parse_set_user_workload_profile("ALTER USER batch_svc WORKLOAD PROFILE large_analytical;")
+            .unwrap();
+    assert_eq!(set_user.user_name, "batch_svc");
+    assert_eq!(set_user.profile_name, "large_analytical");
 }
