@@ -3,6 +3,8 @@
 #include "prdb_sdk_sql_dispatch_v1.h"
 #include "prdb_sdk_planner_v1.h"
 #include "prdb_sdk_batch_v1.h"
+#include "prdb_sdk_sql_spill_sort_v1.h"
+#include "prdb_sdk_sql_spill_join_v1.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -1477,6 +1479,835 @@ static int cmp_sort_items(const void *va, const void *vb) {
     return a->row_idx < b->row_idx ? -1 : (a->row_idx > b->row_idx ? 1 : 0);
 }
 
+/* --- Streaming & Spill Execution Helpers --- */
+
+static int is_cte_ref(const exec_ctx *ec, const prdb_sql_table_ref *ref) {
+    if (ref == NULL || ref->kind != PRDB_SQL_TREF_BASE ||
+        ref->u.base.schema != NULL) {
+        return 0;
+    }
+    for (uint32_t i = 0; i < ec->cte_count; ++i) {
+        if (bytes_ieq(ref->u.base.name, ref->u.base.name_len,
+                      ec->ctes[i].name, ec->ctes[i].name_len)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int32_t resolve_base_relation_meta(
+    exec_ctx *ec, const uint8_t *schema, uint32_t schema_len,
+    const uint8_t *rel_name, uint32_t rel_len,
+    prdb_sdk_executor_relation_v1 *rel_out, mat_table *meta_out) {
+    prdb_sdk_sql_column_shape_v1 *cols =
+        (prdb_sdk_sql_column_shape_v1 *)calloc(
+            PRDB_SDK_SQL_MAX_RELATION_COLUMNS, sizeof(*cols));
+    if (cols == NULL) return PRDB_SDK_SQL_DISPATCH_RESOURCE_ERROR;
+    uint64_t resp_len = 0;
+    int32_t status = prdb_sdk_executor_resolve_relation_v1(
+        ec->host, schema, schema_len, rel_name, rel_len, ec->resp_buf,
+        EXEC_RESP_BYTES, &resp_len, rel_out, sizeof(*rel_out), cols,
+        PRDB_SDK_SQL_MAX_RELATION_COLUMNS);
+    if (status != PRDB_SDK_EXECUTOR_OK) {
+        free(cols);
+        return PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR;
+    }
+    meta_out->col_count = rel_out->column_count;
+    meta_out->cols = (prdb_sdk_sql_column_shape_v1 *)calloc(
+        rel_out->column_count == 0 ? 1 : rel_out->column_count,
+        sizeof(prdb_sdk_sql_column_shape_v1));
+    if (meta_out->cols == NULL) {
+        free(cols);
+        return PRDB_SDK_SQL_DISPATCH_RESOURCE_ERROR;
+    }
+    for (uint32_t c = 0; c < rel_out->column_count; ++c) {
+        meta_out->cols[c] = cols[c];
+        meta_out->cols[c].name = (const uint8_t *)prdb_sql_arena_strdup(
+            &meta_out->arena, cols[c].name, cols[c].name_len);
+        if (meta_out->cols[c].name == NULL) {
+            free(cols);
+            return PRDB_SDK_SQL_DISPATCH_RESOURCE_ERROR;
+        }
+    }
+    free(cols);
+    return PRDB_SDK_SQL_DISPATCH_OK;
+}
+
+typedef int32_t (*stream_row_consumer_fn)(void *ctx,
+                                          const prdb_sdk_value_v1 *cells,
+                                          uint32_t col_count,
+                                          uint8_t *stop_out);
+
+typedef struct base_scan_stream {
+    exec_ctx *ec;
+    uint8_t cursor[16];
+    uint8_t cursor_open;
+    uint8_t eof;
+    uint32_t col_count;
+    uint32_t max_pages;
+    uint32_t page_idx;
+    uint8_t *batch_buf;
+    prdb_sdk_batch_v1 batch;
+    prdb_sdk_row_iterator_v1 riter;
+    uint32_t row_idx;
+    prdb_sdk_value_v1 *cells;
+} base_scan_stream;
+
+static int32_t base_scan_stream_open(exec_ctx *ec,
+                                     const prdb_sdk_executor_relation_v1 *rel,
+                                     base_scan_stream *s) {
+    memset(s, 0, sizeof(*s));
+    s->ec = ec;
+    s->col_count = rel->column_count;
+    s->max_pages = ec->budgets.sql_exec_max_scan_pages;
+    if (s->max_pages == 0) s->max_pages = 1000000;
+    s->batch_buf = (uint8_t *)malloc(EXEC_RESP_BYTES);
+    s->cells = (prdb_sdk_value_v1 *)calloc(
+        rel->column_count == 0 ? 1 : rel->column_count,
+        sizeof(prdb_sdk_value_v1));
+    if (s->batch_buf == NULL || s->cells == NULL) {
+        free(s->batch_buf);
+        free(s->cells);
+        s->batch_buf = NULL;
+        s->cells = NULL;
+        return PRDB_SDK_SQL_DISPATCH_RESOURCE_ERROR;
+    }
+    uint64_t resp_len = 0;
+    if (prdb_sdk_executor_open_full_scan_v1(
+            ec->host, rel->executor_handle, ec->resp_buf, EXEC_RESP_BYTES,
+            &resp_len, s->cursor) != PRDB_SDK_EXECUTOR_OK) {
+        free(s->batch_buf);
+        free(s->cells);
+        s->batch_buf = NULL;
+        s->cells = NULL;
+        return PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR;
+    }
+    s->cursor_open = 1;
+    return PRDB_SDK_SQL_DISPATCH_OK;
+}
+
+static void base_scan_stream_close(base_scan_stream *s) {
+    if (s->cursor_open) {
+        uint64_t resp_len = 0;
+        prdb_sdk_executor_close_cursor_v1(s->ec->host, s->cursor,
+                                          s->ec->resp_buf, EXEC_RESP_BYTES,
+                                          &resp_len);
+        s->cursor_open = 0;
+    }
+    free(s->batch_buf);
+    free(s->cells);
+    s->batch_buf = NULL;
+    s->cells = NULL;
+}
+
+static int32_t base_scan_stream_next(base_scan_stream *s, uint8_t *has_row_out) {
+    *has_row_out = 0;
+    while (!s->eof) {
+        if (s->row_idx >= s->batch.row_count) {
+            if (!s->cursor_open || s->page_idx >= s->max_pages) {
+                s->eof = 1;
+                break;
+            }
+            if ((s->page_idx & 15U) == 0U) {
+                int32_t cancelled = 0;
+                if (prdb_sdk_executor_check_cancelled_v1(s->ec->host,
+                                                         &cancelled) !=
+                        PRDB_SDK_EXECUTOR_OK ||
+                    cancelled != 0) {
+                    return PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR;
+                }
+            }
+            uint64_t resp_len = 0;
+            if (prdb_sdk_executor_next_batch_v1(
+                    s->ec->host, s->cursor, PRDB_SDK_BATCH_MAX_ROWS,
+                    (uint32_t)EXEC_RESP_BYTES, s->batch_buf, EXEC_RESP_BYTES,
+                    &resp_len, &s->batch, sizeof(s->batch)) !=
+                PRDB_SDK_EXECUTOR_OK) {
+                return PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR;
+            }
+            ++s->page_idx;
+            s->row_idx = 0;
+            if (prdb_sdk_batch_rows_begin_v1(&s->batch, &s->riter,
+                                             sizeof(s->riter)) !=
+                PRDB_SDK_BATCH_OK) {
+                return PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR;
+            }
+            if (s->batch.finished || s->batch.continuation == NULL) {
+                s->cursor_open = 0;
+            } else {
+                memcpy(s->cursor, s->batch.continuation, 16);
+            }
+            if (s->batch.row_count == 0) {
+                if (!s->cursor_open) {
+                    s->eof = 1;
+                    break;
+                }
+                continue;
+            }
+        }
+        prdb_sdk_row_v1 row = {0};
+        if (prdb_sdk_batch_row_next_v1(&s->riter, &row, sizeof(row)) !=
+                PRDB_SDK_BATCH_OK ||
+            row.cell_count != s->col_count) {
+            return PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR;
+        }
+        prdb_sdk_cell_iterator_v1 citer = {0};
+        if (prdb_sdk_row_cells_begin_v1(&row, &citer, sizeof(citer)) !=
+            PRDB_SDK_BATCH_OK) {
+            return PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR;
+        }
+        for (uint32_t c = 0; c < s->col_count; ++c) {
+            if (prdb_sdk_cell_next_v1(&citer, &s->cells[c],
+                                      sizeof(s->cells[c])) !=
+                PRDB_SDK_BATCH_OK) {
+                return PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR;
+            }
+        }
+        ++s->row_idx;
+        if (s->row_idx >= s->batch.row_count && !s->cursor_open) {
+            s->eof = 1;
+        }
+        *has_row_out = 1;
+        return PRDB_SDK_SQL_DISPATCH_OK;
+    }
+    return PRDB_SDK_SQL_DISPATCH_OK;
+}
+
+static int32_t stream_base_relation(exec_ctx *ec,
+                                    const prdb_sdk_executor_relation_v1 *rel,
+                                    stream_row_consumer_fn consumer,
+                                    void *consumer_ctx) {
+    base_scan_stream s;
+    int32_t st = base_scan_stream_open(ec, rel, &s);
+    if (st != PRDB_SDK_SQL_DISPATCH_OK) return st;
+    uint8_t has_row = 0;
+    uint8_t stop = 0;
+    while (!stop) {
+        st = base_scan_stream_next(&s, &has_row);
+        if (st != PRDB_SDK_SQL_DISPATCH_OK || !has_row) break;
+        st = consumer(consumer_ctx, s.cells, rel->column_count, &stop);
+        if (st != PRDB_SDK_SQL_DISPATCH_OK) break;
+    }
+    base_scan_stream_close(&s);
+    return st;
+}
+
+static int pack_spill_join_record(uint8_t side, const prdb_sdk_value_v1 *cells,
+                                  uint32_t col_count, uint8_t *buf,
+                                  uint32_t capacity) {
+    if (capacity < 5) return 0;
+    memset(buf, 0, capacity);
+    buf[0] = side;
+    memcpy(buf + 1, &col_count, 4);
+    uint32_t off = 5;
+    for (uint32_t c = 0; c < col_count; ++c) {
+        if (off + 7 > capacity) return 0;
+        buf[off++] = (uint8_t)cells[c].state;
+        memcpy(buf + off, &cells[c].type_code, 4);
+        off += 4;
+        uint16_t dlen = 0;
+        if (cells[c].state == PRDB_SDK_VALUE_STATE_VALUE &&
+            cells[c].data_len > 0 && cells[c].data != NULL) {
+            if (cells[c].data_len > UINT16_MAX) return 0;
+            dlen = (uint16_t)cells[c].data_len;
+        }
+        memcpy(buf + off, &dlen, 2);
+        off += 2;
+        if (dlen > 0) {
+            if (off + dlen > capacity) return 0;
+            memcpy(buf + off, cells[c].data, dlen);
+            off += dlen;
+        }
+    }
+    return 1;
+}
+
+static int unpack_spill_join_record(const uint8_t *buf, uint32_t capacity,
+                                    uint32_t expected_cols,
+                                    prdb_sdk_value_v1 *cells_out) {
+    if (capacity < 5) return 0;
+    uint32_t col_count = 0;
+    memcpy(&col_count, buf + 1, 4);
+    if (col_count != expected_cols) return 0;
+    uint32_t off = 5;
+    for (uint32_t c = 0; c < col_count; ++c) {
+        if (off + 7 > capacity) return 0;
+        uint8_t state = buf[off++];
+        uint32_t tc = 0;
+        memcpy(&tc, buf + off, 4);
+        off += 4;
+        uint16_t dlen = 0;
+        memcpy(&dlen, buf + off, 2);
+        off += 2;
+        if (off + dlen > capacity) return 0;
+        cells_out[c] = (prdb_sdk_value_v1){
+            sizeof(prdb_sdk_value_v1),
+            PRDB_SDK_VALUE_ABI_V1_VERSION,
+            state,
+            tc,
+            dlen > 0 ? (buf + off) : NULL,
+            dlen};
+        off += dlen;
+    }
+    return 1;
+}
+
+typedef struct spill_join_side_ctx {
+    base_scan_stream stream;
+    uint8_t side;
+    int32_t error_status;
+} spill_join_side_ctx;
+
+typedef struct spill_join_exec_ctx {
+    exec_ctx *ec;
+    uint32_t left_cols;
+    uint32_t right_cols;
+    uint32_t total_cols;
+    prdb_sdk_value_v1 *combined;
+    prdb_sql_eval_scope *eval_scopes;
+    uint32_t outer_scope_count;
+    prdb_sql_expr *eq_left;
+    prdb_sql_expr *eq_right;
+    prdb_sql_expr *on_cond;
+    subq_runtime *sub_rt;
+    stream_row_consumer_fn consumer;
+    void *consumer_ctx;
+    int32_t error_status;
+    uint8_t stop;
+} spill_join_exec_ctx;
+
+static int32_t spill_join_source_cb(void *vctx, uint8_t *record,
+                                    uint32_t capacity,
+                                    uint8_t *has_record_out) {
+    spill_join_side_ctx *sc = (spill_join_side_ctx *)vctx;
+    uint8_t has_row = 0;
+    int32_t st = base_scan_stream_next(&sc->stream, &has_row);
+    if (st != PRDB_SDK_SQL_DISPATCH_OK) {
+        sc->error_status = st;
+        return -1;
+    }
+    if (!has_row) {
+        *has_record_out = 0;
+        return 0;
+    }
+    if (!pack_spill_join_record(sc->side, sc->stream.cells, sc->stream.col_count,
+                                record, capacity)) {
+        sc->error_status = PRDB_SDK_SQL_DISPATCH_RESOURCE_ERROR;
+        return -1;
+    }
+    *has_record_out = 1;
+    return 0;
+}
+
+static int32_t spill_join_hash_cb(void *vctx, const uint8_t *record,
+                                  uint32_t record_bytes, uint64_t *hash_out) {
+    spill_join_exec_ctx *jc = (spill_join_exec_ctx *)vctx;
+    uint8_t side = record[0];
+    prdb_sql_expr *key_expr = side == 0 ? jc->eq_left : jc->eq_right;
+    uint32_t expected = side == 0 ? jc->left_cols : jc->right_cols;
+    prdb_sdk_value_v1 *dst =
+        side == 0 ? jc->combined : (jc->combined + jc->left_cols);
+    if (!unpack_spill_join_record(record, record_bytes, expected, dst)) {
+        jc->error_status = PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR;
+        return -1;
+    }
+    prdb_sql_eval_row_set rctx = {
+        jc->eval_scopes, 1 + jc->outer_scope_count, jc->ec->params,
+        jc->ec->param_count, jc->ec->param_meta, NULL, 0, eval_subquery_cb,
+        jc->sub_rt};
+    prdb_sql_owned_val kv = {0};
+    if (prdb_sql_eval_expr_v1(key_expr, &rctx, &kv) != PRDB_SDK_SQL_EVAL_OK) {
+        prdb_sql_owned_val_free(&kv);
+        jc->error_status = PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR;
+        return -1;
+    }
+    *hash_out = kv.val.state == PRDB_SDK_VALUE_STATE_VALUE
+                    ? hash_value(&kv.val, key_expr->bound_scale)
+                    : 0;
+    prdb_sql_owned_val_free(&kv);
+    return 0;
+}
+
+static int32_t spill_join_equal_cb(void *vctx, const uint8_t *left,
+                                   const uint8_t *right, uint32_t record_bytes,
+                                   uint8_t *equal_out) {
+    spill_join_exec_ctx *jc = (spill_join_exec_ctx *)vctx;
+    if (!unpack_spill_join_record(left, record_bytes, jc->left_cols,
+                                  jc->combined) ||
+        !unpack_spill_join_record(right, record_bytes, jc->right_cols,
+                                  jc->combined + jc->left_cols)) {
+        jc->error_status = PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR;
+        return -1;
+    }
+    prdb_sql_eval_row_set rctx = {
+        jc->eval_scopes, 1 + jc->outer_scope_count, jc->ec->params,
+        jc->ec->param_count, jc->ec->param_meta, NULL, 0, eval_subquery_cb,
+        jc->sub_rt};
+    prdb_sql_owned_val lk = {0}, rk = {0};
+    if (prdb_sql_eval_expr_v1(jc->eq_left, &rctx, &lk) != PRDB_SDK_SQL_EVAL_OK ||
+        prdb_sql_eval_expr_v1(jc->eq_right, &rctx, &rk) != PRDB_SDK_SQL_EVAL_OK) {
+        prdb_sql_owned_val_free(&lk);
+        prdb_sql_owned_val_free(&rk);
+        jc->error_status = PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR;
+        return -1;
+    }
+    uint8_t sc = jc->eq_left->bound_scale > jc->eq_right->bound_scale
+                     ? jc->eq_left->bound_scale
+                     : jc->eq_right->bound_scale;
+    *equal_out =
+        (lk.val.state == PRDB_SDK_VALUE_STATE_VALUE &&
+         rk.val.state == PRDB_SDK_VALUE_STATE_VALUE &&
+         values_equal_for_key(&lk.val, &rk.val, sc, 0))
+            ? 1
+            : 0;
+    prdb_sql_owned_val_free(&lk);
+    prdb_sql_owned_val_free(&rk);
+    return 0;
+}
+
+static int32_t spill_join_output_cb(void *vctx, const uint8_t *left,
+                                    const uint8_t *right,
+                                    uint32_t record_bytes) {
+    spill_join_exec_ctx *jc = (spill_join_exec_ctx *)vctx;
+    if (jc->stop) return 0;
+    if (!unpack_spill_join_record(left, record_bytes, jc->left_cols,
+                                  jc->combined) ||
+        !unpack_spill_join_record(right, record_bytes, jc->right_cols,
+                                  jc->combined + jc->left_cols)) {
+        jc->error_status = PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR;
+        return -1;
+    }
+    if (jc->on_cond != NULL) {
+        prdb_sql_eval_row_set rctx = {
+            jc->eval_scopes, 1 + jc->outer_scope_count, jc->ec->params,
+            jc->ec->param_count, jc->ec->param_meta, NULL, 0,
+            eval_subquery_cb, jc->sub_rt};
+        uint32_t truth = 0;
+        if (prdb_sql_eval_truth_v1(jc->on_cond, &rctx, &truth) !=
+            PRDB_SDK_SQL_EVAL_OK) {
+            jc->error_status = PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR;
+            return -1;
+        }
+        if (truth != PRDB_SDK_SQL_TRUTH_TRUE) return 0;
+    }
+    int32_t st = jc->consumer(jc->consumer_ctx, jc->combined, jc->total_cols,
+                              &jc->stop);
+    if (st != PRDB_SDK_SQL_DISPATCH_OK) {
+        jc->error_status = st;
+        return -1;
+    }
+    return 0;
+}
+
+static int32_t spill_join_cancel_cb(void *vctx) {
+    spill_join_exec_ctx *jc = (spill_join_exec_ctx *)vctx;
+    if (jc->stop) return 1;
+    int32_t cancelled = 0;
+    if (prdb_sdk_executor_check_cancelled_v1(jc->ec->host, &cancelled) !=
+        PRDB_SDK_EXECUTOR_OK) {
+        return 1;
+    }
+    return cancelled != 0 ? 1 : 0;
+}
+
+typedef struct mem_join_probe_ctx {
+    exec_ctx *ec;
+    const mat_table *left_t;
+    uint32_t right_cols;
+    uint32_t total_cols;
+    prdb_sdk_value_v1 *combined;
+    prdb_sql_eval_scope *eval_scopes;
+    uint32_t outer_scope_count;
+    prdb_sql_expr *eq_left;
+    prdb_sql_expr *eq_right;
+    prdb_sql_expr *on_cond;
+    subq_runtime *sub_rt;
+    const uint32_t *buckets;
+    const uint32_t *next_idx;
+    const prdb_sql_owned_val *lkeys;
+    uint32_t nbuckets;
+    uint8_t cmp_scale;
+    stream_row_consumer_fn consumer;
+    void *consumer_ctx;
+} mem_join_probe_ctx;
+
+static int32_t mem_join_probe_row_cb(void *vctx, const prdb_sdk_value_v1 *cells,
+                                     uint32_t col_count, uint8_t *stop_out) {
+    mem_join_probe_ctx *mc = (mem_join_probe_ctx *)vctx;
+    if (col_count != mc->right_cols) return PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR;
+    if (mc->right_cols > 0) {
+        memcpy(mc->combined + mc->left_t->col_count, cells,
+               mc->right_cols * sizeof(prdb_sdk_value_v1));
+    }
+    prdb_sql_eval_row_set rctx = {
+        mc->eval_scopes, 1 + mc->outer_scope_count, mc->ec->params,
+        mc->ec->param_count, mc->ec->param_meta, NULL, 0, eval_subquery_cb,
+        mc->sub_rt};
+    prdb_sql_owned_val rk = {0};
+    if (prdb_sql_eval_expr_v1(mc->eq_right, &rctx, &rk) !=
+        PRDB_SDK_SQL_EVAL_OK) {
+        prdb_sql_owned_val_free(&rk);
+        return PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR;
+    }
+    int32_t st = PRDB_SDK_SQL_DISPATCH_OK;
+    if (rk.val.state == PRDB_SDK_VALUE_STATE_VALUE) {
+        uint64_t h = hash_value(&rk.val, mc->eq_right->bound_scale);
+        uint32_t b = (uint32_t)(h & (mc->nbuckets - 1));
+        for (uint32_t l = mc->buckets[b]; l != UINT32_MAX;
+             l = mc->next_idx[l]) {
+            if (!values_equal_for_key(&mc->lkeys[l].val, &rk.val,
+                                      mc->cmp_scale, 0)) {
+                continue;
+            }
+            if (mc->left_t->col_count > 0) {
+                memcpy(mc->combined, mc->left_t->rows[l].cells,
+                       mc->left_t->col_count * sizeof(prdb_sdk_value_v1));
+            }
+            if (mc->on_cond != NULL) {
+                uint32_t truth = 0;
+                if (prdb_sql_eval_truth_v1(mc->on_cond, &rctx, &truth) !=
+                    PRDB_SDK_SQL_EVAL_OK) {
+                    st = PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR;
+                    break;
+                }
+                if (truth != PRDB_SDK_SQL_TRUTH_TRUE) continue;
+            }
+            st = mc->consumer(mc->consumer_ctx, mc->combined, mc->total_cols,
+                              stop_out);
+            if (st != PRDB_SDK_SQL_DISPATCH_OK || *stop_out) break;
+        }
+    }
+    prdb_sql_owned_val_free(&rk);
+    return st;
+}
+
+/* --- Streaming SELECT row consumer --- */
+
+typedef struct stream_agg_acc {
+    uint64_t count;
+    int64_t int_sum;
+    uint8_t dec_sum[16];
+    prdb_sql_owned_val best;
+    uint8_t has_best;
+} stream_agg_acc;
+
+typedef struct stream_group_entry {
+    prdb_sql_owned_val *gkeys;
+    prdb_sdk_value_v1 *rep_cells;
+    stream_agg_acc *accs;
+    uint64_t hash;
+} stream_group_entry;
+
+typedef struct stream_select_ctx {
+    exec_ctx *ec;
+    prdb_sql_select_ast *sel;
+    const prdb_sdk_sql_column_shape_v1 *from_cols;
+    uint32_t from_col_count;
+    prdb_sql_eval_scope *eval_scopes;
+    uint32_t outer_scope_count;
+    subq_runtime *sub_rt;
+    prdb_sql_select_item *proj;
+    uint32_t proj_cnt;
+    agg_collector *aggs;
+    int is_grouped;
+    mat_table *out_table;
+    mat_table *pre_sort_t;
+    sort_row_item **sort_items;
+    uint32_t *sort_cap;
+    uint64_t matched_cnt;
+    prdb_sdk_value_v1 *pvals;
+    prdb_sql_owned_val *povals;
+    /* Streaming group hash table */
+    stream_group_entry *groups;
+    uint32_t g_cnt;
+    uint32_t g_cap;
+    uint32_t *ht;
+    uint32_t *next_g;
+    uint32_t nbuckets;
+    prdb_sql_arena rep_arena;
+} stream_select_ctx;
+
+static int32_t stream_select_consume_row(void *vctx,
+                                         const prdb_sdk_value_v1 *cells,
+                                         uint32_t col_count,
+                                         uint8_t *stop_out) {
+    stream_select_ctx *sc = (stream_select_ctx *)vctx;
+    prdb_sql_select_ast *sel = sc->sel;
+    sc->eval_scopes[0] =
+        (prdb_sql_eval_scope){sc->from_cols, cells, col_count};
+    prdb_sql_eval_row_set rctx = {
+        sc->eval_scopes, 1 + sc->outer_scope_count, sc->ec->params,
+        sc->ec->param_count, sc->ec->param_meta, NULL, 0, eval_subquery_cb,
+        sc->sub_rt};
+
+    if (sel->where_expr != NULL) {
+        uint32_t truth = 0;
+        if (prdb_sql_eval_truth_v1(sel->where_expr, &rctx, &truth) !=
+            PRDB_SDK_SQL_EVAL_OK) {
+            return PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR;
+        }
+        if (truth != PRDB_SDK_SQL_TRUTH_TRUE) return PRDB_SDK_SQL_DISPATCH_OK;
+    }
+
+    if (!sc->is_grouped) {
+        if (!sel->distinct && sel->order_by_count == 0) {
+            if (sel->has_offset && sc->matched_cnt < sel->offset) {
+                ++sc->matched_cnt;
+                return PRDB_SDK_SQL_DISPATCH_OK;
+            }
+            ++sc->matched_cnt;
+            if (sel->has_limit && sc->out_table->row_count >= sel->limit) {
+                *stop_out = 1;
+                return PRDB_SDK_SQL_DISPATCH_OK;
+            }
+            for (uint32_t p = 0; p < sc->proj_cnt; ++p) {
+                if (prdb_sql_eval_expr_v1(sc->proj[p].expr, &rctx,
+                                          &sc->povals[p]) !=
+                    PRDB_SDK_SQL_EVAL_OK) {
+                    for (uint32_t k = 0; k <= p; ++k)
+                        prdb_sql_owned_val_free(&sc->povals[k]);
+                    return PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR;
+                }
+                sc->pvals[p] = sc->povals[p].val;
+                if (sc->pvals[p].state == PRDB_SDK_VALUE_STATE_VALUE &&
+                    sc->out_table->cols[p].type_code !=
+                        sc->pvals[p].type_code) {
+                    sc->out_table->cols[p].type_code = sc->pvals[p].type_code;
+                }
+            }
+            int ok = mat_table_append_row(sc->out_table, sc->pvals, NULL);
+            for (uint32_t p = 0; p < sc->proj_cnt; ++p)
+                prdb_sql_owned_val_free(&sc->povals[p]);
+            if (!ok) return PRDB_SDK_SQL_DISPATCH_RESOURCE_ERROR;
+            if (sel->has_limit && sc->out_table->row_count >= sel->limit) {
+                *stop_out = 1;
+            }
+            return PRDB_SDK_SQL_DISPATCH_OK;
+        }
+
+        for (uint32_t p = 0; p < sc->proj_cnt; ++p) {
+            if (prdb_sql_eval_expr_v1(sc->proj[p].expr, &rctx,
+                                      &sc->povals[p]) != PRDB_SDK_SQL_EVAL_OK) {
+                for (uint32_t k = 0; k <= p; ++k)
+                    prdb_sql_owned_val_free(&sc->povals[k]);
+                return PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR;
+            }
+            sc->pvals[p] = sc->povals[p].val;
+            if (sc->pvals[p].state == PRDB_SDK_VALUE_STATE_VALUE &&
+                sc->out_table->cols[p].type_code != sc->pvals[p].type_code) {
+                sc->out_table->cols[p].type_code = sc->pvals[p].type_code;
+            }
+        }
+        int ok = mat_table_append_row(sc->pre_sort_t, sc->pvals, NULL);
+        for (uint32_t p = 0; p < sc->proj_cnt; ++p)
+            prdb_sql_owned_val_free(&sc->povals[p]);
+        if (!ok) return PRDB_SDK_SQL_DISPATCH_RESOURCE_ERROR;
+
+        if (sel->order_by_count > 0) {
+            if (sc->pre_sort_t->row_count > *sc->sort_cap) {
+                uint32_t ncap = *sc->sort_cap == 0 ? 64 : *sc->sort_cap * 2;
+                sort_row_item *ns = (sort_row_item *)realloc(
+                    *sc->sort_items, ncap * sizeof(sort_row_item));
+                if (ns == NULL) return PRDB_SDK_SQL_DISPATCH_RESOURCE_ERROR;
+                *sc->sort_items = ns;
+                *sc->sort_cap = ncap;
+            }
+            sort_row_item *si =
+                &(*sc->sort_items)[sc->pre_sort_t->row_count - 1];
+            si->row_idx = sc->pre_sort_t->row_count - 1;
+            si->keys = (prdb_sql_owned_val *)calloc(
+                sel->order_by_count, sizeof(prdb_sql_owned_val));
+            if (si->keys == NULL) return PRDB_SDK_SQL_DISPATCH_RESOURCE_ERROR;
+            for (uint32_t k = 0; k < sel->order_by_count; ++k) {
+                prdb_sql_eval_expr_v1(sel->order_by[k].expr, &rctx,
+                                      &si->keys[k]);
+            }
+        }
+        return PRDB_SDK_SQL_DISPATCH_OK;
+    }
+
+    /* Streaming GROUP BY / Aggregate update */
+    uint32_t gb_cnt = sel->group_by_count;
+    prdb_sql_owned_val *gkeys =
+        gb_cnt == 0
+            ? NULL
+            : (prdb_sql_owned_val *)calloc(gb_cnt, sizeof(prdb_sql_owned_val));
+    if (gb_cnt > 0 && gkeys == NULL)
+        return PRDB_SDK_SQL_DISPATCH_RESOURCE_ERROR;
+    uint64_t h = 0;
+    for (uint32_t g = 0; g < gb_cnt; ++g) {
+        if (prdb_sql_eval_expr_v1(sel->group_by[g], &rctx, &gkeys[g]) !=
+            PRDB_SDK_SQL_EVAL_OK) {
+            for (uint32_t k = 0; k <= g; ++k)
+                prdb_sql_owned_val_free(&gkeys[k]);
+            free(gkeys);
+            return PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR;
+        }
+        h ^= hash_value(&gkeys[g].val, sel->group_by[g]->bound_scale) +
+             0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+    }
+    uint32_t b = (uint32_t)(h & (sc->nbuckets - 1));
+    uint32_t found_g = UINT32_MAX;
+    for (uint32_t g = sc->ht[b]; g != UINT32_MAX; g = sc->next_g[g]) {
+        if (sc->groups[g].hash != h) continue;
+        int eq = 1;
+        for (uint32_t k = 0; k < gb_cnt; ++k) {
+            if (!values_equal_for_key(&gkeys[k].val,
+                                      &sc->groups[g].gkeys[k].val,
+                                      sel->group_by[k]->bound_scale, 1)) {
+                eq = 0;
+                break;
+            }
+        }
+        if (eq) {
+            found_g = g;
+            break;
+        }
+    }
+    if (found_g != UINT32_MAX) {
+        for (uint32_t k = 0; k < gb_cnt; ++k)
+            prdb_sql_owned_val_free(&gkeys[k]);
+        free(gkeys);
+    } else {
+        if (sc->g_cnt == sc->g_cap) {
+            uint32_t ncap = sc->g_cap == 0 ? 16 : sc->g_cap * 2;
+            stream_group_entry *ng = (stream_group_entry *)realloc(
+                sc->groups, ncap * sizeof(stream_group_entry));
+            uint32_t *nn =
+                (uint32_t *)realloc(sc->next_g, ncap * sizeof(uint32_t));
+            if (ng == NULL || nn == NULL) {
+                free(ng ? ng : sc->groups);
+                free(nn ? nn : sc->next_g);
+                for (uint32_t k = 0; k < gb_cnt; ++k)
+                    prdb_sql_owned_val_free(&gkeys[k]);
+                free(gkeys);
+                return PRDB_SDK_SQL_DISPATCH_RESOURCE_ERROR;
+            }
+            sc->groups = ng;
+            sc->next_g = nn;
+            sc->g_cap = ncap;
+            if (sc->g_cnt * 2 >= sc->nbuckets) {
+                uint32_t nnb = sc->nbuckets * 2;
+                uint32_t *nht = (uint32_t *)realloc(sc->ht, nnb * sizeof(uint32_t));
+                if (nht == NULL) {
+                    for (uint32_t k = 0; k < gb_cnt; ++k)
+                        prdb_sql_owned_val_free(&gkeys[k]);
+                    free(gkeys);
+                    return PRDB_SDK_SQL_DISPATCH_RESOURCE_ERROR;
+                }
+                sc->ht = nht;
+                sc->nbuckets = nnb;
+                memset(sc->ht, 0xff, sc->nbuckets * sizeof(uint32_t));
+                for (uint32_t k = 0; k < sc->g_cnt; ++k) {
+                    uint32_t kb =
+                        (uint32_t)(sc->groups[k].hash & (sc->nbuckets - 1));
+                    sc->next_g[k] = sc->ht[kb];
+                    sc->ht[kb] = k;
+                }
+                b = (uint32_t)(h & (sc->nbuckets - 1));
+            }
+        }
+        found_g = sc->g_cnt++;
+        stream_group_entry *ge = &sc->groups[found_g];
+        memset(ge, 0, sizeof(*ge));
+        ge->gkeys = gkeys;
+        ge->hash = h;
+        ge->accs = (stream_agg_acc *)calloc(
+            sc->aggs->count == 0 ? 1 : sc->aggs->count,
+            sizeof(stream_agg_acc));
+        if (col_count > 0) {
+            ge->rep_cells = (prdb_sdk_value_v1 *)prdb_sql_arena_alloc(
+                &sc->rep_arena, col_count * sizeof(prdb_sdk_value_v1), 8);
+            if (ge->rep_cells != NULL) {
+                for (uint32_t c = 0; c < col_count; ++c) {
+                    ge->rep_cells[c] = cells[c];
+                    if (cells[c].state == PRDB_SDK_VALUE_STATE_VALUE &&
+                        cells[c].data_len > 0 && cells[c].data != NULL) {
+                        uint8_t *db = (uint8_t *)prdb_sql_arena_alloc(
+                            &sc->rep_arena, (size_t)cells[c].data_len, 1);
+                        if (db != NULL) {
+                            memcpy(db, cells[c].data, (size_t)cells[c].data_len);
+                            ge->rep_cells[c].data = db;
+                        }
+                    }
+                }
+            }
+        }
+        sc->next_g[found_g] = sc->ht[b];
+        sc->ht[b] = found_g;
+    }
+
+    stream_group_entry *ge = &sc->groups[found_g];
+    for (uint32_t a = 0; a < sc->aggs->count; ++a) {
+        prdb_sql_expr *ae = sc->aggs->aggs[a];
+        uint32_t ak = ae->u.agg.agg_kind;
+        stream_agg_acc *acc = &ge->accs[a];
+        if (ak == PRDB_SDK_SQL_AGGREGATE_COUNT_STAR) {
+            ++acc->count;
+            continue;
+        }
+        prdb_sql_owned_val v = {0};
+        if (prdb_sql_eval_expr_v1(ae->u.agg.arg, &rctx, &v) !=
+            PRDB_SDK_SQL_EVAL_OK) {
+            prdb_sql_owned_val_free(&v);
+            return PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR;
+        }
+        if (v.val.state == PRDB_SDK_VALUE_STATE_NULL) {
+            prdb_sql_owned_val_free(&v);
+            continue;
+        }
+        ++acc->count;
+        if (ak == PRDB_SDK_SQL_AGGREGATE_COUNT_COLUMN) {
+            prdb_sql_owned_val_free(&v);
+        } else if (ak == PRDB_SDK_SQL_AGGREGATE_MIN ||
+                   ak == PRDB_SDK_SQL_AGGREGATE_MAX) {
+            if (!acc->has_best) {
+                acc->best = v;
+                if (acc->best.val.data == v.inline_buf)
+                    acc->best.val.data = acc->best.inline_buf;
+                acc->has_best = 1;
+            } else {
+                uint8_t asc = ae->u.agg.arg->bound_scale;
+                uint32_t cmp_op = ak == PRDB_SDK_SQL_AGGREGATE_MIN
+                                      ? PRDB_SDK_SQL_COMPARE_LESS
+                                      : PRDB_SDK_SQL_COMPARE_GREATER;
+                uint32_t tr = 0;
+                prdb_sdk_sql_compare_v1(&v.val, &acc->best.val, cmp_op, asc,
+                                        asc, &tr);
+                if (tr == PRDB_SDK_SQL_TRUTH_TRUE) {
+                    prdb_sql_owned_val_free(&acc->best);
+                    acc->best = v;
+                    if (acc->best.val.data == v.inline_buf)
+                        acc->best.val.data = acc->best.inline_buf;
+                } else {
+                    prdb_sql_owned_val_free(&v);
+                }
+            }
+        } else {
+            uint32_t at = ae->u.agg.arg->bound_type;
+            if (at != PRDB_SDK_VALUE_TYPE_DECIMAL) {
+                int64_t iv = 0;
+                if (v.val.type_code == PRDB_SDK_VALUE_TYPE_SMALLINT) {
+                    int16_t x = 0;
+                    prdb_sdk_value_get_smallint_v1(&v.val, &x);
+                    iv = x;
+                } else if (v.val.type_code == PRDB_SDK_VALUE_TYPE_INTEGER) {
+                    int32_t x = 0;
+                    prdb_sdk_value_get_integer_v1(&v.val, &x);
+                    iv = x;
+                } else {
+                    prdb_sdk_value_get_bigint_v1(&v.val, &iv);
+                }
+                acc->int_sum += iv;
+            } else {
+                be128_add(acc->dec_sum, v.val.data);
+            }
+            prdb_sql_owned_val_free(&v);
+        }
+    }
+    return PRDB_SDK_SQL_DISPATCH_OK;
+}
+
 /* --- SELECT execution --- */
 
 static int32_t exec_select_to_table(exec_ctx *ec, prdb_sql_select_ast *sel,
@@ -1515,15 +2346,183 @@ static int32_t exec_select_to_table(exec_ctx *ec, prdb_sql_select_ast *sel,
     mat_table_init(&from_t, 64 * 1024 * 1024);
     table_slice *slices = NULL;
     uint32_t slice_cnt = 0;
+    int use_stream = 0;
+    int is_stream_join = 0;
+    prdb_sdk_executor_relation_v1 rel_l = {0}, rel_r = {0};
+    uint32_t join_left_cols = 0, join_right_cols = 0;
+    prdb_sql_expr *join_eq_left = NULL, *join_eq_right = NULL;
 
     if (sel->from != NULL) {
-        st = materialize_from_ref(ec, sel->from, outer_scopes,
-                                  outer_scope_count, &from_t, &slices,
-                                  &slice_cnt);
-        if (st != PRDB_SDK_SQL_DISPATCH_OK) {
-            mat_table_free(&from_t);
-            free(slices);
-            goto cleanup_ctes;
+        if (sel->from->kind == PRDB_SQL_TREF_BASE &&
+            !is_cte_ref(ec, sel->from)) {
+            const uint8_t *sc = sel->from->u.base.schema != NULL
+                                    ? sel->from->u.base.schema
+                                    : ec->schema;
+            uint32_t sc_len = sel->from->u.base.schema != NULL
+                                  ? sel->from->u.base.schema_len
+                                  : ec->schema_len;
+            st = resolve_base_relation_meta(
+                ec, sc, sc_len, sel->from->u.base.name,
+                sel->from->u.base.name_len, &rel_l, &from_t);
+            if (st != PRDB_SDK_SQL_DISPATCH_OK) {
+                mat_table_free(&from_t);
+                goto cleanup_ctes;
+            }
+            slices = (table_slice *)calloc(1, sizeof(*slices));
+            if (slices == NULL) {
+                mat_table_free(&from_t);
+                st = PRDB_SDK_SQL_DISPATCH_RESOURCE_ERROR;
+                goto cleanup_ctes;
+            }
+            slices[0] = (table_slice){
+                sel->from->u.base.name, sel->from->u.base.name_len,
+                sel->from->u.base.alias, sel->from->u.base.alias_len,
+                0, from_t.col_count};
+            slice_cnt = 1;
+            use_stream = 1;
+        } else if (sel->from->kind == PRDB_SQL_TREF_JOIN &&
+                   sel->from->u.join.join_kind == PRDB_SQL_JOIN_INNER &&
+                   sel->from->u.join.left->kind == PRDB_SQL_TREF_BASE &&
+                   !is_cte_ref(ec, sel->from->u.join.left) &&
+                   sel->from->u.join.right->kind == PRDB_SQL_TREF_BASE &&
+                   !is_cte_ref(ec, sel->from->u.join.right)) {
+            const prdb_sql_table_ref *lref = sel->from->u.join.left;
+            const prdb_sql_table_ref *rref = sel->from->u.join.right;
+            mat_table lmeta, rmeta;
+            mat_table_init(&lmeta, 4 * 1024 * 1024);
+            mat_table_init(&rmeta, 4 * 1024 * 1024);
+            const uint8_t *lsc =
+                lref->u.base.schema != NULL ? lref->u.base.schema : ec->schema;
+            uint32_t lsc_len = lref->u.base.schema != NULL
+                                   ? lref->u.base.schema_len
+                                   : ec->schema_len;
+            const uint8_t *rsc =
+                rref->u.base.schema != NULL ? rref->u.base.schema : ec->schema;
+            uint32_t rsc_len = rref->u.base.schema != NULL
+                                   ? rref->u.base.schema_len
+                                   : ec->schema_len;
+            st = resolve_base_relation_meta(ec, lsc, lsc_len, lref->u.base.name,
+                                            lref->u.base.name_len, &rel_l,
+                                            &lmeta);
+            if (st == PRDB_SDK_SQL_DISPATCH_OK) {
+                st = resolve_base_relation_meta(
+                    ec, rsc, rsc_len, rref->u.base.name, rref->u.base.name_len,
+                    &rel_r, &rmeta);
+            }
+            if (st != PRDB_SDK_SQL_DISPATCH_OK) {
+                mat_table_free(&lmeta);
+                mat_table_free(&rmeta);
+                mat_table_free(&from_t);
+                goto cleanup_ctes;
+            }
+            join_left_cols = lmeta.col_count;
+            join_right_cols = rmeta.col_count;
+            uint32_t total_cols = join_left_cols + join_right_cols;
+            from_t.col_count = total_cols;
+            from_t.cols = (prdb_sdk_sql_column_shape_v1 *)calloc(
+                total_cols == 0 ? 1 : total_cols,
+                sizeof(prdb_sdk_sql_column_shape_v1));
+            slices = (table_slice *)calloc(2, sizeof(table_slice));
+            if (from_t.cols == NULL || slices == NULL) {
+                mat_table_free(&lmeta);
+                mat_table_free(&rmeta);
+                mat_table_free(&from_t);
+                free(slices);
+                st = PRDB_SDK_SQL_DISPATCH_RESOURCE_ERROR;
+                goto cleanup_ctes;
+            }
+            for (uint32_t c = 0; c < join_left_cols; ++c) {
+                from_t.cols[c] = lmeta.cols[c];
+                from_t.cols[c].name = (const uint8_t *)prdb_sql_arena_strdup(
+                    &from_t.arena, lmeta.cols[c].name, lmeta.cols[c].name_len);
+            }
+            for (uint32_t c = 0; c < join_right_cols; ++c) {
+                from_t.cols[join_left_cols + c] = rmeta.cols[c];
+                from_t.cols[join_left_cols + c].name =
+                    (const uint8_t *)prdb_sql_arena_strdup(
+                        &from_t.arena, rmeta.cols[c].name,
+                        rmeta.cols[c].name_len);
+            }
+            slices[0] = (table_slice){
+                lref->u.base.name, lref->u.base.name_len,
+                lref->u.base.alias, lref->u.base.alias_len,
+                0, join_left_cols};
+            slices[1] = (table_slice){
+                rref->u.base.name, rref->u.base.name_len,
+                rref->u.base.alias, rref->u.base.alias_len,
+                join_left_cols, join_right_cols};
+            slice_cnt = 2;
+            mat_table_free(&lmeta);
+            mat_table_free(&rmeta);
+
+            bind_scope *jscopes = (bind_scope *)calloc(
+                1 + outer_scope_count, sizeof(bind_scope));
+            if (jscopes != NULL) {
+                jscopes[0] = (bind_scope){from_t.cols, total_cols, slices, 2};
+                for (uint32_t i = 0; i < outer_scope_count; ++i) {
+                    jscopes[1 + i] = (bind_scope){
+                        outer_scopes[i].columns, outer_scopes[i].column_count,
+                        NULL, 0};
+                }
+                bind_env jbenv = {
+                    jscopes, 1 + outer_scope_count, NULL, 0, NULL, 0};
+                if (sel->from->u.join.on_cond == NULL ||
+                    bind_expr(sel->from->u.join.on_cond, &jbenv) ==
+                        PRDB_SDK_SQL_BIND_OK) {
+                    prdb_sql_expr **conjs = NULL;
+                    uint32_t conj_cnt = 0, conj_cap = 0;
+                    collect_conjuncts(sel->from->u.join.on_cond, &conjs,
+                                      &conj_cnt, &conj_cap);
+                    for (uint32_t i = 0; i < conj_cnt; ++i) {
+                        prdb_sql_expr *c = conjs[i];
+                        if (c->kind == PRDB_SQL_EXPR_BINARY &&
+                            c->u.binary.op == PRDB_SQL_BOP_EQ) {
+                            int lm = expr_side_mask(c->u.binary.left,
+                                                    join_left_cols);
+                            int rm = expr_side_mask(c->u.binary.right,
+                                                    join_left_cols);
+                            if (lm == 1 && rm == 2) {
+                                join_eq_left = c->u.binary.left;
+                                join_eq_right = c->u.binary.right;
+                                break;
+                            } else if (lm == 2 && rm == 1) {
+                                join_eq_left = c->u.binary.right;
+                                join_eq_right = c->u.binary.left;
+                                break;
+                            }
+                        }
+                    }
+                    free(conjs);
+                }
+                free(jscopes);
+            }
+            if (join_eq_left != NULL && join_eq_right != NULL) {
+                use_stream = 1;
+                is_stream_join = 1;
+            } else {
+                mat_table_free(&from_t);
+                mat_table_init(&from_t, 64 * 1024 * 1024);
+                free(slices);
+                slices = NULL;
+                slice_cnt = 0;
+                st = materialize_from_ref(ec, sel->from, outer_scopes,
+                                          outer_scope_count, &from_t, &slices,
+                                          &slice_cnt);
+                if (st != PRDB_SDK_SQL_DISPATCH_OK) {
+                    mat_table_free(&from_t);
+                    free(slices);
+                    goto cleanup_ctes;
+                }
+            }
+        } else {
+            st = materialize_from_ref(ec, sel->from, outer_scopes,
+                                      outer_scope_count, &from_t, &slices,
+                                      &slice_cnt);
+            if (st != PRDB_SDK_SQL_DISPATCH_OK) {
+                mat_table_free(&from_t);
+                free(slices);
+                goto cleanup_ctes;
+            }
         }
     } else {
         /* SELECT without FROM: 1 empty row */
@@ -1630,13 +2629,37 @@ static int32_t exec_select_to_table(exec_ctx *ec, prdb_sql_select_ast *sel,
         }
     }
 
-    /* Filter rows via WHERE */
-    uint32_t *filtered_rows = (uint32_t *)malloc(
-        (from_t.row_count == 0 ? 1 : from_t.row_count) * sizeof(uint32_t));
+    int has_distinct_agg = 0;
+    for (uint32_t a = 0; a < aggs.count; ++a) {
+        if (aggs.aggs[a]->u.agg.distinct) {
+            has_distinct_agg = 1;
+            break;
+        }
+    }
+    if (use_stream && has_distinct_agg) {
+        mat_table_free(&from_t);
+        mat_table_init(&from_t, 64 * 1024 * 1024);
+        free(slices);
+        slices = NULL;
+        slice_cnt = 0;
+        st = materialize_from_ref(ec, sel->from, outer_scopes,
+                                  outer_scope_count, &from_t, &slices,
+                                  &slice_cnt);
+        if (st != PRDB_SDK_SQL_DISPATCH_OK) goto cleanup_bind;
+        use_stream = 0;
+        is_stream_join = 0;
+    }
+
+    /* Filter rows via WHERE (non-streaming fallback) */
+    uint32_t *filtered_rows =
+        use_stream ? NULL
+                   : (uint32_t *)malloc(
+                         (from_t.row_count == 0 ? 1 : from_t.row_count) *
+                         sizeof(uint32_t));
     uint32_t filtered_cnt = 0;
     prdb_sql_eval_scope *eval_scopes = (prdb_sql_eval_scope *)calloc(
         1 + outer_scope_count, sizeof(prdb_sql_eval_scope));
-    if (filtered_rows == NULL || eval_scopes == NULL) {
+    if ((!use_stream && filtered_rows == NULL) || eval_scopes == NULL) {
         free(filtered_rows); free(eval_scopes);
         st = PRDB_SDK_SQL_DISPATCH_RESOURCE_ERROR;
         goto cleanup_bind;
@@ -1645,22 +2668,25 @@ static int32_t exec_select_to_table(exec_ctx *ec, prdb_sql_select_ast *sel,
         eval_scopes[1 + i] = outer_scopes[i];
     subq_runtime sub_rt = {ec, NULL, 0, 0};
 
-    for (uint32_t r = 0; r < from_t.row_count; ++r) {
-        if (sel->where_expr != NULL) {
-            eval_scopes[0] = (prdb_sql_eval_scope){
-                from_t.cols, from_t.rows[r].cells, from_t.col_count};
-            prdb_sql_eval_row_set rctx = {
-                eval_scopes, 1 + outer_scope_count, ec->params, ec->param_count,
-                ec->param_meta, NULL, 0, eval_subquery_cb, &sub_rt};
-            uint32_t truth = 0;
-            if (prdb_sql_eval_truth_v1(sel->where_expr, &rctx, &truth) !=
-                PRDB_SDK_SQL_EVAL_OK) {
-                st = PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR;
-                goto cleanup_eval;
+    if (!use_stream) {
+        for (uint32_t r = 0; r < from_t.row_count; ++r) {
+            if (sel->where_expr != NULL) {
+                eval_scopes[0] = (prdb_sql_eval_scope){
+                    from_t.cols, from_t.rows[r].cells, from_t.col_count};
+                prdb_sql_eval_row_set rctx = {
+                    eval_scopes, 1 + outer_scope_count, ec->params,
+                    ec->param_count, ec->param_meta, NULL, 0,
+                    eval_subquery_cb, &sub_rt};
+                uint32_t truth = 0;
+                if (prdb_sql_eval_truth_v1(sel->where_expr, &rctx, &truth) !=
+                    PRDB_SDK_SQL_EVAL_OK) {
+                    st = PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR;
+                    goto cleanup_eval;
+                }
+                if (truth != PRDB_SDK_SQL_TRUTH_TRUE) continue;
             }
-            if (truth != PRDB_SDK_SQL_TRUTH_TRUE) continue;
+            filtered_rows[filtered_cnt++] = r;
         }
-        filtered_rows[filtered_cnt++] = r;
     }
 
     /* Set up output table columns */
@@ -1723,7 +2749,360 @@ static int32_t exec_select_to_table(exec_ctx *ec, prdb_sql_select_ast *sel,
     sort_row_item *sort_items = NULL;
     uint32_t sort_cap = 0;
 
-    if (!is_grouped) {
+    if (use_stream) {
+        prdb_sdk_value_v1 *pvals = (prdb_sdk_value_v1 *)calloc(
+            proj_cnt == 0 ? 1 : proj_cnt, sizeof(prdb_sdk_value_v1));
+        prdb_sql_owned_val *povals = (prdb_sql_owned_val *)calloc(
+            proj_cnt == 0 ? 1 : proj_cnt, sizeof(prdb_sql_owned_val));
+        uint32_t *sht =
+            is_grouped ? (uint32_t *)malloc(16 * sizeof(uint32_t)) : NULL;
+        if (pvals == NULL || povals == NULL || (is_grouped && sht == NULL)) {
+            free(pvals); free(povals); free(sht);
+            mat_table_free(&pre_sort_t);
+            st = PRDB_SDK_SQL_DISPATCH_RESOURCE_ERROR;
+            goto cleanup_eval;
+        }
+        if (sht != NULL) memset(sht, 0xff, 16 * sizeof(uint32_t));
+        stream_select_ctx sctx = {
+            ec, sel, from_t.cols, from_t.col_count, eval_scopes,
+            outer_scope_count, &sub_rt, proj, proj_cnt, &aggs, is_grouped,
+            out_table, &pre_sort_t, &sort_items, &sort_cap, 0, pvals, povals,
+            NULL, 0, 0, sht, NULL, is_grouped ? 16 : 0, {0}};
+        prdb_sql_arena_init(&sctx.rep_arena, 256 * 1024 * 1024);
+
+        if (!is_stream_join) {
+            st = stream_base_relation(ec, &rel_l, stream_select_consume_row,
+                                      &sctx);
+        } else {
+            prdb_sdk_value_v1 *jcombined = (prdb_sdk_value_v1 *)calloc(
+                from_t.col_count == 0 ? 1 : from_t.col_count,
+                sizeof(prdb_sdk_value_v1));
+            prdb_sql_eval_scope *jeval_scopes = (prdb_sql_eval_scope *)calloc(
+                1 + outer_scope_count, sizeof(prdb_sql_eval_scope));
+            if (jcombined == NULL || jeval_scopes == NULL) {
+                free(jcombined); free(jeval_scopes);
+                st = PRDB_SDK_SQL_DISPATCH_RESOURCE_ERROR;
+            } else {
+                jeval_scopes[0] = (prdb_sql_eval_scope){
+                    from_t.cols, jcombined, from_t.col_count};
+                for (uint32_t i = 0; i < outer_scope_count; ++i)
+                    jeval_scopes[1 + i] = outer_scopes[i];
+
+                /* Try streaming left into bounded build table (64K rows / 16 MiB)
+                 * and probing right in a single streaming pass; fall back to
+                 * external spill hash join if left exceeds the build budget. */
+                mat_table left_build;
+                mat_table_init(&left_build, 16 * 1024 * 1024);
+                left_build.col_count = join_left_cols;
+                base_scan_stream lstream;
+                int fell_back_to_spill = 0;
+                uint32_t build_row_limit = 65536U;
+                st = base_scan_stream_open(ec, &rel_l, &lstream);
+                if (st == PRDB_SDK_SQL_DISPATCH_OK) {
+                    uint8_t has_row = 0;
+                    while (1) {
+                        st = base_scan_stream_next(&lstream, &has_row);
+                        if (st != PRDB_SDK_SQL_DISPATCH_OK || !has_row) break;
+                        if (left_build.row_count >= build_row_limit ||
+                            !mat_table_append_row(&left_build, lstream.cells,
+                                                  NULL)) {
+                            fell_back_to_spill = 1;
+                            break;
+                        }
+                    }
+                    base_scan_stream_close(&lstream);
+                }
+
+                if (st == PRDB_SDK_SQL_DISPATCH_OK && !fell_back_to_spill) {
+                    uint32_t nbuckets = 16;
+                    while (nbuckets < left_build.row_count * 2) nbuckets *= 2;
+                    uint32_t *buckets =
+                        (uint32_t *)malloc(nbuckets * sizeof(uint32_t));
+                    uint32_t *next_idx = (uint32_t *)malloc(
+                        (left_build.row_count == 0 ? 1 : left_build.row_count) *
+                        sizeof(uint32_t));
+                    prdb_sql_owned_val *lkeys = (prdb_sql_owned_val *)calloc(
+                        left_build.row_count == 0 ? 1 : left_build.row_count,
+                        sizeof(prdb_sql_owned_val));
+                    if (buckets == NULL || next_idx == NULL || lkeys == NULL) {
+                        st = PRDB_SDK_SQL_DISPATCH_RESOURCE_ERROR;
+                    } else {
+                        memset(buckets, 0xff, nbuckets * sizeof(uint32_t));
+                        prdb_sql_eval_row_set lrctx = {
+                            jeval_scopes, 1 + outer_scope_count, ec->params,
+                            ec->param_count, ec->param_meta, NULL, 0,
+                            eval_subquery_cb, &sub_rt};
+                        for (uint32_t l = 0; l < left_build.row_count; ++l) {
+                            if (join_left_cols > 0) {
+                                memcpy(jcombined, left_build.rows[l].cells,
+                                       join_left_cols *
+                                           sizeof(prdb_sdk_value_v1));
+                            }
+                            if (prdb_sql_eval_expr_v1(join_eq_left, &lrctx,
+                                                      &lkeys[l]) ==
+                                    PRDB_SDK_SQL_EVAL_OK &&
+                                lkeys[l].val.state ==
+                                    PRDB_SDK_VALUE_STATE_VALUE) {
+                                uint64_t h = hash_value(
+                                    &lkeys[l].val, join_eq_left->bound_scale);
+                                uint32_t b = (uint32_t)(h & (nbuckets - 1));
+                                next_idx[l] = buckets[b];
+                                buckets[b] = l;
+                            } else {
+                                next_idx[l] = UINT32_MAX;
+                            }
+                        }
+                        uint8_t cscale = join_eq_left->bound_scale >
+                                                 join_eq_right->bound_scale
+                                             ? join_eq_left->bound_scale
+                                             : join_eq_right->bound_scale;
+                        mem_join_probe_ctx mctx = {
+                            ec, &left_build, join_right_cols, from_t.col_count,
+                            jcombined, jeval_scopes, outer_scope_count,
+                            join_eq_left, join_eq_right,
+                            sel->from->u.join.on_cond, &sub_rt, buckets,
+                            next_idx, lkeys, nbuckets, cscale,
+                            stream_select_consume_row, &sctx};
+                        st = stream_base_relation(ec, &rel_r,
+                                                  mem_join_probe_row_cb, &mctx);
+                        for (uint32_t l = 0; l < left_build.row_count; ++l)
+                            prdb_sql_owned_val_free(&lkeys[l]);
+                    }
+                    free(buckets);
+                    free(next_idx);
+                    free(lkeys);
+                    left_build.cols = NULL;
+                    mat_table_free(&left_build);
+                } else {
+                    left_build.cols = NULL;
+                    mat_table_free(&left_build);
+                    if (st == PRDB_SDK_SQL_DISPATCH_OK) {
+                        spill_join_side_ctx lside = {.side = 0};
+                        spill_join_side_ctx rside = {.side = 1};
+                        st = base_scan_stream_open(ec, &rel_l, &lside.stream);
+                        if (st == PRDB_SDK_SQL_DISPATCH_OK) {
+                            st = base_scan_stream_open(ec, &rel_r,
+                                                       &rside.stream);
+                            if (st == PRDB_SDK_SQL_DISPATCH_OK) {
+                                spill_join_exec_ctx jctx = {
+                                    ec, join_left_cols, join_right_cols,
+                                    from_t.col_count, jcombined, jeval_scopes,
+                                    outer_scope_count, join_eq_left,
+                                    join_eq_right, sel->from->u.join.on_cond,
+                                    &sub_rt, stream_select_consume_row, &sctx,
+                                    PRDB_SDK_SQL_DISPATCH_OK, 0};
+                                int32_t jst = prdb_sdk_sql_spill_hash_join_v1(
+                                    ec->host,
+                                    PRDB_SDK_SQL_SPILL_JOIN_MAX_RECORD_BYTES,
+                                    spill_join_source_cb, &lside,
+                                    spill_join_source_cb, &rside,
+                                    spill_join_hash_cb, &jctx,
+                                    spill_join_equal_cb, &jctx,
+                                    spill_join_output_cb, &jctx,
+                                    spill_join_cancel_cb, &jctx);
+                                if (jst != PRDB_SDK_SQL_SPILL_JOIN_OK) {
+                                    if (lside.error_status != 0)
+                                        st = lside.error_status;
+                                    else if (rside.error_status != 0)
+                                        st = rside.error_status;
+                                    else if (jctx.error_status != 0)
+                                        st = jctx.error_status;
+                                    else
+                                        st = PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR;
+                                }
+                                base_scan_stream_close(&rside.stream);
+                            }
+                            base_scan_stream_close(&lside.stream);
+                        }
+                    }
+                }
+                free(jcombined);
+                free(jeval_scopes);
+            }
+        }
+
+        if (st == PRDB_SDK_SQL_DISPATCH_OK && is_grouped) {
+            if (sctx.g_cnt == 0 && sel->group_by_count == 0) {
+                sctx.groups = (stream_group_entry *)calloc(
+                    1, sizeof(stream_group_entry));
+                if (sctx.groups != NULL) {
+                    sctx.groups[0].accs = (stream_agg_acc *)calloc(
+                        aggs.count == 0 ? 1 : aggs.count,
+                        sizeof(stream_agg_acc));
+                    sctx.g_cnt = 1;
+                } else {
+                    st = PRDB_SDK_SQL_DISPATCH_RESOURCE_ERROR;
+                }
+            }
+            prdb_sdk_value_v1 *agg_vals = (prdb_sdk_value_v1 *)calloc(
+                aggs.count == 0 ? 1 : aggs.count, sizeof(prdb_sdk_value_v1));
+            prdb_sql_owned_val *agg_ovals = (prdb_sql_owned_val *)calloc(
+                aggs.count == 0 ? 1 : aggs.count, sizeof(prdb_sql_owned_val));
+            if (agg_vals == NULL || agg_ovals == NULL) {
+                st = PRDB_SDK_SQL_DISPATCH_RESOURCE_ERROR;
+            }
+            for (uint32_t g = 0; g < sctx.g_cnt && st == PRDB_SDK_SQL_DISPATCH_OK;
+                 ++g) {
+                stream_group_entry *ge = &sctx.groups[g];
+                for (uint32_t a = 0; a < aggs.count; ++a) {
+                    prdb_sql_expr *ae = aggs.aggs[a];
+                    uint32_t ak = ae->u.agg.agg_kind;
+                    stream_agg_acc *acc = &ge->accs[a];
+                    if (ak == PRDB_SDK_SQL_AGGREGATE_COUNT_STAR ||
+                        ak == PRDB_SDK_SQL_AGGREGATE_COUNT_COLUMN) {
+                        int64_t cnt = (int64_t)acc->count;
+                        for (int k = 0; k < 8; ++k)
+                            agg_ovals[a].inline_buf[k] =
+                                (uint8_t)((uint64_t)cnt >> (56 - k * 8));
+                        agg_ovals[a].val = (prdb_sdk_value_v1){
+                            sizeof(prdb_sdk_value_v1),
+                            PRDB_SDK_VALUE_ABI_V1_VERSION,
+                            PRDB_SDK_VALUE_STATE_VALUE,
+                            PRDB_SDK_VALUE_TYPE_BIGINT,
+                            agg_ovals[a].inline_buf, 8};
+                    } else if (acc->count == 0) {
+                        agg_ovals[a].val = (prdb_sdk_value_v1){
+                            sizeof(prdb_sdk_value_v1),
+                            PRDB_SDK_VALUE_ABI_V1_VERSION,
+                            PRDB_SDK_VALUE_STATE_NULL, 0, NULL, 0};
+                    } else if (ak == PRDB_SDK_SQL_AGGREGATE_MIN ||
+                               ak == PRDB_SDK_SQL_AGGREGATE_MAX) {
+                        agg_ovals[a] = acc->best;
+                        acc->best.heap_buf = NULL;
+                        if (agg_ovals[a].val.data == acc->best.inline_buf)
+                            agg_ovals[a].val.data = agg_ovals[a].inline_buf;
+                        acc->has_best = 0;
+                    } else {
+                        uint32_t at = ae->u.agg.arg->bound_type;
+                        uint8_t as = ae->u.agg.arg->bound_scale;
+                        if (at != PRDB_SDK_VALUE_TYPE_DECIMAL) {
+                            if (ak == PRDB_SDK_SQL_AGGREGATE_SUM) {
+                                for (int k = 0; k < 8; ++k)
+                                    agg_ovals[a].inline_buf[k] =
+                                        (uint8_t)((uint64_t)acc->int_sum >>
+                                                  (56 - k * 8));
+                                agg_ovals[a].val = (prdb_sdk_value_v1){
+                                    sizeof(prdb_sdk_value_v1),
+                                    PRDB_SDK_VALUE_ABI_V1_VERSION,
+                                    PRDB_SDK_VALUE_STATE_VALUE,
+                                    PRDB_SDK_VALUE_TYPE_BIGINT,
+                                    agg_ovals[a].inline_buf, 8};
+                            } else {
+                                uint8_t *b = agg_ovals[a].inline_buf;
+                                be128_from_i64(acc->int_sum, b);
+                                be128_mul_u32_signed(b, 1000000U);
+                                be128_div_u32_signed(b, (uint32_t)acc->count);
+                                agg_ovals[a].val = (prdb_sdk_value_v1){
+                                    sizeof(prdb_sdk_value_v1),
+                                    PRDB_SDK_VALUE_ABI_V1_VERSION,
+                                    PRDB_SDK_VALUE_STATE_VALUE,
+                                    PRDB_SDK_VALUE_TYPE_DECIMAL, b, 16};
+                            }
+                        } else {
+                            if (ak == PRDB_SDK_SQL_AGGREGATE_SUM) {
+                                uint8_t *b = agg_ovals[a].inline_buf;
+                                memcpy(b, acc->dec_sum, 16);
+                                agg_ovals[a].val = (prdb_sdk_value_v1){
+                                    sizeof(prdb_sdk_value_v1),
+                                    PRDB_SDK_VALUE_ABI_V1_VERSION,
+                                    PRDB_SDK_VALUE_STATE_VALUE,
+                                    PRDB_SDK_VALUE_TYPE_DECIMAL, b, 16};
+                            } else {
+                                uint8_t rscale = ae->bound_scale;
+                                uint8_t *b = agg_ovals[a].inline_buf;
+                                memcpy(b, acc->dec_sum, 16);
+                                for (uint8_t s = as; s < rscale; ++s)
+                                    be128_mul_u32_signed(b, 10U);
+                                be128_div_u32_signed(b, (uint32_t)acc->count);
+                                agg_ovals[a].val = (prdb_sdk_value_v1){
+                                    sizeof(prdb_sdk_value_v1),
+                                    PRDB_SDK_VALUE_ABI_V1_VERSION,
+                                    PRDB_SDK_VALUE_STATE_VALUE,
+                                    PRDB_SDK_VALUE_TYPE_DECIMAL, b, 16};
+                            }
+                        }
+                    }
+                    agg_vals[a] = agg_ovals[a].val;
+                }
+                eval_scopes[0] = (prdb_sql_eval_scope){
+                    from_t.cols, ge->rep_cells,
+                    ge->rep_cells != NULL ? from_t.col_count : 0};
+                prdb_sql_eval_row_set rctx = {
+                    eval_scopes, 1 + outer_scope_count, ec->params,
+                    ec->param_count, ec->param_meta, agg_vals, aggs.count,
+                    eval_subquery_cb, &sub_rt};
+                if (sel->having_expr != NULL) {
+                    uint32_t htruth = 0;
+                    if (prdb_sql_eval_truth_v1(sel->having_expr, &rctx,
+                                               &htruth) !=
+                        PRDB_SDK_SQL_EVAL_OK) {
+                        st = PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR;
+                        for (uint32_t a = 0; a < aggs.count; ++a)
+                            prdb_sql_owned_val_free(&agg_ovals[a]);
+                        break;
+                    }
+                    if (htruth != PRDB_SDK_SQL_TRUTH_TRUE) {
+                        for (uint32_t a = 0; a < aggs.count; ++a)
+                            prdb_sql_owned_val_free(&agg_ovals[a]);
+                        continue;
+                    }
+                }
+                for (uint32_t p = 0; p < proj_cnt; ++p) {
+                    if (prdb_sql_eval_expr_v1(proj[p].expr, &rctx,
+                                              &povals[p]) !=
+                        PRDB_SDK_SQL_EVAL_OK) {
+                        st = PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR;
+                        break;
+                    }
+                    pvals[p] = povals[p].val;
+                }
+                if (st == PRDB_SDK_SQL_DISPATCH_OK) {
+                    mat_table_append_row(&pre_sort_t, pvals, NULL);
+                    if (sel->order_by_count > 0) {
+                        if (pre_sort_t.row_count > sort_cap) {
+                            uint32_t ncap =
+                                sort_cap == 0 ? 64 : sort_cap * 2;
+                            sort_items = (sort_row_item *)realloc(
+                                sort_items, ncap * sizeof(sort_row_item));
+                            sort_cap = ncap;
+                        }
+                        sort_row_item *si =
+                            &sort_items[pre_sort_t.row_count - 1];
+                        si->row_idx = pre_sort_t.row_count - 1;
+                        si->keys = (prdb_sql_owned_val *)calloc(
+                            sel->order_by_count, sizeof(prdb_sql_owned_val));
+                        for (uint32_t k = 0; k < sel->order_by_count; ++k) {
+                            prdb_sql_eval_expr_v1(sel->order_by[k].expr, &rctx,
+                                                  &si->keys[k]);
+                        }
+                    }
+                }
+                for (uint32_t p = 0; p < proj_cnt; ++p)
+                    prdb_sql_owned_val_free(&povals[p]);
+                for (uint32_t a = 0; a < aggs.count; ++a)
+                    prdb_sql_owned_val_free(&agg_ovals[a]);
+            }
+            free(agg_vals);
+            free(agg_ovals);
+        }
+
+        for (uint32_t g = 0; g < sctx.g_cnt; ++g) {
+            for (uint32_t k = 0; k < sel->group_by_count; ++k)
+                prdb_sql_owned_val_free(&sctx.groups[g].gkeys[k]);
+            free(sctx.groups[g].gkeys);
+            for (uint32_t a = 0; a < aggs.count; ++a) {
+                if (sctx.groups[g].accs[a].has_best)
+                    prdb_sql_owned_val_free(&sctx.groups[g].accs[a].best);
+            }
+            free(sctx.groups[g].accs);
+        }
+        prdb_sql_arena_free(&sctx.rep_arena);
+        free(sctx.groups);
+        free(sctx.ht);
+        free(sctx.next_g);
+        free(pvals);
+        free(povals);
+    } else if (!is_grouped) {
         prdb_sdk_value_v1 *pvals = (prdb_sdk_value_v1 *)calloc(
             proj_cnt == 0 ? 1 : proj_cnt, sizeof(prdb_sdk_value_v1));
         prdb_sql_owned_val *povals = (prdb_sql_owned_val *)calloc(
@@ -1937,33 +3316,34 @@ static int32_t exec_select_to_table(exec_ctx *ec, prdb_sql_select_ast *sel,
                         eval_scopes, 1 + outer_scope_count, ec->params,
                         ec->param_count, ec->param_meta, NULL, 0,
                         eval_subquery_cb, &sub_rt};
-                    prdb_sql_owned_val v = {0};
-                    if (prdb_sql_eval_expr_v1(ae->u.agg.arg, &rctx, &v) !=
+                    prdb_sql_owned_val *v = &vals[non_null];
+                    memset(v, 0, sizeof(*v));
+                    if (prdb_sql_eval_expr_v1(ae->u.agg.arg, &rctx, v) !=
                         PRDB_SDK_SQL_EVAL_OK) {
-                        prdb_sql_owned_val_free(&v);
+                        prdb_sql_owned_val_free(v);
                         st = PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR;
                         break;
                     }
-                    if (v.val.state == PRDB_SDK_VALUE_STATE_NULL) {
-                        prdb_sql_owned_val_free(&v);
+                    if (v->val.state == PRDB_SDK_VALUE_STATE_NULL) {
+                        prdb_sql_owned_val_free(v);
                         continue;
                     }
                     if (ae->u.agg.distinct) {
                         int dup = 0;
                         uint8_t sc = ae->u.agg.arg->bound_scale;
                         for (uint32_t k = 0; k < non_null; ++k) {
-                            if (values_equal_for_key(&v.val, &vals[k].val, sc,
+                            if (values_equal_for_key(&v->val, &vals[k].val, sc,
                                                      0)) {
                                 dup = 1;
                                 break;
                             }
                         }
                         if (dup) {
-                            prdb_sql_owned_val_free(&v);
+                            prdb_sql_owned_val_free(v);
                             continue;
                         }
                     }
-                    vals[non_null++] = v;
+                    ++non_null;
                 }
                 if (st != PRDB_SDK_SQL_DISPATCH_OK) {
                     for (uint32_t k = 0; k < non_null; ++k)
@@ -2151,17 +3531,19 @@ static int32_t exec_select_to_table(exec_ctx *ec, prdb_sql_select_ast *sel,
         free(povals);
     }
 
-    if (st == PRDB_SDK_SQL_DISPATCH_OK) {
+    if (st == PRDB_SDK_SQL_DISPATCH_OK &&
+        !(use_stream && !is_grouped && !sel->distinct &&
+          sel->order_by_count == 0)) {
+        uint64_t start_row = sel->has_offset ? sel->offset : 0;
+        uint64_t end_row = pre_sort_t.row_count;
+        if (sel->has_limit && start_row + sel->limit < end_row) {
+            end_row = start_row + sel->limit;
+        }
         if (sel->order_by_count > 0 && pre_sort_t.row_count > 1) {
             g_sort_specs = sel->order_by;
             g_sort_spec_count = sel->order_by_count;
             qsort(sort_items, pre_sort_t.row_count, sizeof(sort_row_item),
                   cmp_sort_items);
-        }
-        uint64_t start_row = sel->has_offset ? sel->offset : 0;
-        uint64_t end_row = pre_sort_t.row_count;
-        if (sel->has_limit && start_row + sel->limit < end_row) {
-            end_row = start_row + sel->limit;
         }
         for (uint64_t i = start_row; i < end_row; ++i) {
             uint32_t r = sel->order_by_count > 0 ? sort_items[i].row_idx

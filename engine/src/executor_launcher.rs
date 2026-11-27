@@ -8,14 +8,16 @@ use crate::linux_sandbox::{
 };
 use crate::storage_manager::{SupervisorInvocation, SupervisorInvocationError};
 use crate::supervisor::SealedSubmission;
+use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 const COOPERATIVE_CANCELLATION_GRACE: Duration = Duration::from_millis(500);
@@ -711,6 +713,23 @@ pub fn start_and_launch_executor_selected<T, E>(
     config: &ExecutorLaunchConfig,
     admit: impl FnOnce(&SealedSubmission) -> Result<T, E>,
 ) -> Result<(T, RunningExecutor), crate::supervisor::StartError<ExecutorStartError<E>>> {
+    let cgroup_parent = cgroup_parent.as_ref();
+    if should_use_prewarmed_pool(config) {
+        let pool_key = PrewarmedPoolKey::new(cgroup_parent, config);
+        if let Some(worker) = pop_prewarmed_worker(&pool_key, config) {
+            return launch_on_prewarmed_worker(
+                staging,
+                owner,
+                invocation_id,
+                select_limits,
+                config,
+                admit,
+                worker,
+            );
+        }
+        trigger_pool_replenish(&pool_key, config);
+    }
+
     staging.start_with_worker_cgroup_selected(
         owner,
         invocation_id,
@@ -1074,12 +1093,7 @@ struct PrivateArtifactDirectory {
 }
 
 impl PrivateArtifactDirectory {
-    fn create(
-        parent: &Path,
-        invocation_id: [u8; 16],
-        artifact: &[u8],
-        sdk_library_pin: Option<&crate::sdk_registry::SdkLibraryPin>,
-    ) -> io::Result<Self> {
+    fn create_empty(parent: &Path, invocation_id: [u8; 16]) -> io::Result<Self> {
         let parent = parent.canonicalize()?;
         if !parent.is_dir() {
             return Err(io::Error::new(
@@ -1097,21 +1111,29 @@ impl PrivateArtifactDirectory {
         builder.mode(0o700);
         builder.create(&path)?;
         let artifact_path = path.join("query.so");
-        let directory = Self {
+        Ok(Self {
             path,
             artifact_path,
-            _sdk_library_pin: sdk_library_pin.cloned(),
-        };
+            _sdk_library_pin: None,
+        })
+    }
+
+    fn populate(
+        &mut self,
+        artifact: &[u8],
+        sdk_library_pin: Option<&crate::sdk_registry::SdkLibraryPin>,
+    ) -> io::Result<()> {
+        self._sdk_library_pin = sdk_library_pin.cloned();
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o500)
-            .open(&directory.artifact_path)?;
+            .open(&self.artifact_path)?;
         file.write_all(artifact)?;
         file.sync_all()?;
-        fs::set_permissions(&directory.artifact_path, fs::Permissions::from_mode(0o500))?;
+        fs::set_permissions(&self.artifact_path, fs::Permissions::from_mode(0o500))?;
         if let Some(pin) = sdk_library_pin {
-            let staged_library_path = directory.path.join(pin.soname());
+            let staged_library_path = self.path.join(pin.soname());
             let mut source = File::open(pin.library_path())?;
             let mut staged_library = OpenOptions::new()
                 .write(true)
@@ -1122,8 +1144,439 @@ impl PrivateArtifactDirectory {
             staged_library.sync_all()?;
             fs::set_permissions(&staged_library_path, fs::Permissions::from_mode(0o500))?;
         }
+        Ok(())
+    }
+
+    fn create(
+        parent: &Path,
+        invocation_id: [u8; 16],
+        artifact: &[u8],
+        sdk_library_pin: Option<&crate::sdk_registry::SdkLibraryPin>,
+    ) -> io::Result<Self> {
+        let mut directory = Self::create_empty(parent, invocation_id)?;
+        directory.populate(artifact, sdk_library_pin)?;
         Ok(directory)
     }
+}
+
+#[derive(Clone, Eq, PartialEq, Hash)]
+struct PrewarmedPoolKey {
+    cgroup_parent: PathBuf,
+    executor_path: PathBuf,
+    optimizer_path: PathBuf,
+    scratch_parent: PathBuf,
+    runtime_read_execute: Vec<PathBuf>,
+    runtime_read_only: Vec<PathBuf>,
+}
+
+impl PrewarmedPoolKey {
+    fn new(cgroup_parent: &Path, config: &ExecutorLaunchConfig) -> Self {
+        Self {
+            cgroup_parent: cgroup_parent.to_path_buf(),
+            executor_path: config.executor_path.clone(),
+            optimizer_path: config.optimizer_path.clone(),
+            scratch_parent: config.scratch_parent.clone(),
+            runtime_read_execute: config.runtime_read_execute.clone(),
+            runtime_read_only: config.runtime_read_only.clone(),
+        }
+    }
+}
+
+struct PrewarmedWorker {
+    child: Option<Child>,
+    optimizer_child: Option<Child>,
+    ctrl_stream: Option<UnixStream>,
+    cgroup: Option<WorkerCgroup>,
+    artifact_directory: Option<PrivateArtifactDirectory>,
+    channels: Option<WorkerChannelPair>,
+    cleanup_timeout: Duration,
+}
+
+impl Drop for PrewarmedWorker {
+    fn drop(&mut self) {
+        if let Some(cgroup) = self.cgroup.take() {
+            let _ = cgroup.kill_all();
+            if let Some(mut child) = self.child.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            if let Some(mut opt) = self.optimizer_child.take() {
+                let _ = opt.kill();
+                let _ = opt.wait();
+            }
+            let _ = cgroup.cleanup(self.cleanup_timeout);
+        }
+        self.ctrl_stream.take();
+        self.artifact_directory.take();
+        self.channels.take();
+    }
+}
+
+struct PoolQueueState {
+    workers: VecDeque<PrewarmedWorker>,
+    in_flight: usize,
+}
+
+static PREWARMED_POOLS: OnceLock<Mutex<HashMap<PrewarmedPoolKey, Arc<Mutex<PoolQueueState>>>>> =
+    OnceLock::new();
+static POOL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn configured_prewarm_pool_size() -> usize {
+    static SIZE: OnceLock<usize> = OnceLock::new();
+    *SIZE.get_or_init(|| {
+        std::env::var("PRDB_PREWARM_POOL_SIZE")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(4)
+            .min(16)
+    })
+}
+
+fn should_use_prewarmed_pool(config: &ExecutorLaunchConfig) -> bool {
+    configured_prewarm_pool_size() > 0
+        && config
+            .executor_path
+            .file_name()
+            .is_some_and(|name| name == "prdb-executor")
+}
+
+fn pool_queue_for(key: &PrewarmedPoolKey) -> Arc<Mutex<PoolQueueState>> {
+    let pools = PREWARMED_POOLS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = pools.lock().expect("prewarmed pool mutex");
+    map.entry(key.clone())
+        .or_insert_with(|| {
+            Arc::new(Mutex::new(PoolQueueState {
+                workers: VecDeque::new(),
+                in_flight: 0,
+            }))
+        })
+        .clone()
+}
+
+fn trigger_pool_replenish(key: &PrewarmedPoolKey, config: &ExecutorLaunchConfig) {
+    let target = configured_prewarm_pool_size();
+    if target == 0 {
+        return;
+    }
+    let queue = pool_queue_for(key);
+    let to_spawn = {
+        let mut guard = queue.lock().expect("pool queue mutex");
+        let current = guard.workers.len() + guard.in_flight;
+        if current >= target {
+            0
+        } else {
+            let needed = target - current;
+            guard.in_flight += needed;
+            needed
+        }
+    };
+    if to_spawn == 0 {
+        return;
+    }
+    let key = key.clone();
+    let config = config.clone();
+    std::thread::spawn(move || {
+        for _ in 0..to_spawn {
+            let spawned = spawn_prewarmed_worker(&key, &config);
+            let mut guard = queue.lock().expect("pool queue mutex");
+            guard.in_flight = guard.in_flight.saturating_sub(1);
+            if let Ok(worker) = spawned {
+                guard.workers.push_back(worker);
+            }
+        }
+    });
+}
+
+fn pop_prewarmed_worker(
+    key: &PrewarmedPoolKey,
+    config: &ExecutorLaunchConfig,
+) -> Option<PrewarmedWorker> {
+    let queue = pool_queue_for(key);
+    let mut selected = None;
+    {
+        let mut guard = queue.lock().expect("pool queue mutex");
+        while let Some(mut worker) = guard.workers.pop_front() {
+            let child_alive = worker
+                .child
+                .as_mut()
+                .and_then(|c| c.try_wait().ok())
+                .is_some_and(|s| s.is_none());
+            let opt_alive = worker
+                .optimizer_child
+                .as_mut()
+                .and_then(|c| c.try_wait().ok())
+                .is_some_and(|s| s.is_none());
+            if child_alive && opt_alive {
+                selected = Some(worker);
+                break;
+            }
+        }
+    }
+    trigger_pool_replenish(key, config);
+    selected
+}
+
+fn spawn_prewarmed_worker(
+    key: &PrewarmedPoolKey,
+    config: &ExecutorLaunchConfig,
+) -> io::Result<PrewarmedWorker> {
+    let seq = POOL_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut slot_id = [0u8; 16];
+    slot_id[0] = 0x50;
+    slot_id[1..9].copy_from_slice(&seq.to_le_bytes());
+    slot_id[9..13].copy_from_slice(&std::process::id().to_le_bytes());
+
+    let cgroup = WorkerCgroup::create(
+        &key.cgroup_parent,
+        slot_id,
+        crate::linux_sandbox::WorkerResourceLimits {
+            cpu_quota_micros: 100_000,
+            cpu_period_micros: 100_000,
+            memory_max_bytes: 256 * 1024 * 1024,
+            max_processes: 16,
+        },
+    )?;
+    let channels = WorkerChannelPair::new()?;
+    let (ctrl_supervisor, ctrl_worker) = UnixStream::pair()?;
+    let artifact_directory = PrivateArtifactDirectory::create_empty(&key.scratch_parent, slot_id)?;
+
+    let executor_path = key.executor_path.canonicalize()?;
+    let optimizer_path = key.optimizer_path.canonicalize()?;
+
+    let mut policy = LandlockPolicy::default();
+    policy.allow_read_execute(&executor_path)?;
+    policy.allow_read_execute(&artifact_directory.path)?;
+    allow_runtime_paths(&mut policy, &key.runtime_read_execute, true)?;
+    allow_runtime_paths(&mut policy, &key.runtime_read_only, false)?;
+    let ruleset = LandlockRuleset::new(&policy)?;
+
+    let [planner_fd, executor_fd, optimizer_fd, result_fd, _spill_fd] = channels.worker_fds();
+    let ctrl_fd = ctrl_worker.as_raw_fd();
+    let mut command = Command::new(&executor_path);
+    command
+        .arg("--standby-fd")
+        .arg(ctrl_fd.to_string())
+        .arg("--planner-fd")
+        .arg(planner_fd.to_string())
+        .arg("--executor-fd")
+        .arg(executor_fd.to_string())
+        .arg("--optimizer-fd")
+        .arg(optimizer_fd.to_string())
+        .arg("--result-fd")
+        .arg(result_fd.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut inherited_fds = vec![ctrl_fd, planner_fd, executor_fd, optimizer_fd, result_fd];
+    inherited_fds.sort_unstable();
+    inherited_fds.dedup();
+    configure_worker_command(&mut command, cgroup.path(), &ruleset, &inherited_fds)?;
+
+    let mut opt_policy = LandlockPolicy::default();
+    opt_policy.allow_read_execute(&optimizer_path)?;
+    allow_runtime_paths(&mut opt_policy, &key.runtime_read_execute, true)?;
+    allow_runtime_paths(&mut opt_policy, &key.runtime_read_only, false)?;
+    let opt_ruleset = LandlockRuleset::new(&opt_policy)?;
+    let [opt_sub_fd, opt_plan_fd] = channels.optimizer_fds();
+    let mut opt_cmd = Command::new(&optimizer_path);
+    opt_cmd
+        .arg("--submission-fd")
+        .arg(opt_sub_fd.to_string())
+        .arg("--planner-fd")
+        .arg(opt_plan_fd.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    configure_worker_command(
+        &mut opt_cmd,
+        cgroup.path(),
+        &opt_ruleset,
+        &[opt_sub_fd, opt_plan_fd],
+    )?;
+
+    let mut optimizer_child = opt_cmd.spawn()?;
+    let child = match command.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = optimizer_child.kill();
+            let _ = optimizer_child.wait();
+            let _ = cgroup.cleanup(config.cleanup_timeout);
+            return Err(e);
+        }
+    };
+    drop(ctrl_worker);
+
+    Ok(PrewarmedWorker {
+        child: Some(child),
+        optimizer_child: Some(optimizer_child),
+        ctrl_stream: Some(ctrl_supervisor),
+        cgroup: Some(cgroup),
+        artifact_directory: Some(artifact_directory),
+        channels: Some(channels),
+        cleanup_timeout: config.cleanup_timeout,
+    })
+}
+
+fn send_standby_invocation(stream: &UnixStream, payload: &[u8], fds: &[i32]) -> io::Result<()> {
+    let mut iov = libc::iovec {
+        iov_base: payload.as_ptr() as *mut libc::c_void,
+        iov_len: payload.len(),
+    };
+    let cmsg_len_bytes = std::mem::size_of_val(fds);
+    let cmsg_space = unsafe { libc::CMSG_SPACE(cmsg_len_bytes as u32) };
+    let mut cmsg_buf = vec![0u8; cmsg_space as usize];
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = cmsg_buf.as_mut_ptr().cast();
+    msg.msg_controllen = unsafe { libc::CMSG_LEN(cmsg_len_bytes as u32) } as _;
+
+    let cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg) };
+    unsafe {
+        (*cmsg).cmsg_level = libc::SOL_SOCKET;
+        (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+        (*cmsg).cmsg_len = libc::CMSG_LEN(cmsg_len_bytes as u32) as _;
+        let data_ptr = libc::CMSG_DATA(cmsg);
+        std::ptr::copy_nonoverlapping(fds.as_ptr().cast::<u8>(), data_ptr, cmsg_len_bytes);
+    }
+
+    loop {
+        let sent = unsafe { libc::sendmsg(stream.as_raw_fd(), &msg, 0) };
+        if sent < 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+        return Ok(());
+    }
+}
+
+fn launch_on_prewarmed_worker<T, E>(
+    staging: &crate::supervisor::StagingStore,
+    owner: crate::supervisor::StagingOwner,
+    invocation_id: [u8; 16],
+    select_limits: impl FnOnce(
+        &crate::supervisor::SubmissionMetadata,
+    ) -> crate::linux_sandbox::WorkerResourceLimits,
+    config: &ExecutorLaunchConfig,
+    admit: impl FnOnce(&SealedSubmission) -> Result<T, E>,
+    mut worker: PrewarmedWorker,
+) -> Result<(T, RunningExecutor), crate::supervisor::StartError<ExecutorStartError<E>>> {
+    staging.start_with(owner, invocation_id, |submission| {
+        let effective_profile = config.clamp_profile(&submission.metadata().workload_profile);
+        let limits = select_limits(submission.metadata());
+        let cgroup = worker.cgroup.as_ref().expect("worker cgroup");
+        cgroup.apply_limits(limits).map_err(|error| {
+            ExecutorStartError::Launch(ExecutorLaunchError {
+                launch_error: error,
+                cleanup_error: None,
+            })
+        })?;
+
+        let spill_session = create_spill_session(submission, config).map_err(|error| {
+            ExecutorStartError::Launch(ExecutorLaunchError {
+                launch_error: error,
+                cleanup_error: None,
+            })
+        })?;
+
+        let artifact_dir = worker
+            .artifact_directory
+            .as_mut()
+            .expect("worker artifact dir");
+        artifact_dir
+            .populate(submission.artifact(), submission.sdk_library_pin())
+            .map_err(|error| {
+                ExecutorStartError::Launch(ExecutorLaunchError {
+                    launch_error: error,
+                    cleanup_error: None,
+                })
+            })?;
+
+        let parameters = create_sealed_memfd(c"prdb-query-parameters", submission.parameters())
+            .map_err(|error| {
+                ExecutorStartError::Launch(ExecutorLaunchError {
+                    launch_error: error,
+                    cleanup_error: None,
+                })
+            })?;
+        let sql_data = create_sealed_memfd(c"prdb-query-sql-data", submission.sql_data()).map_err(
+            |error| {
+                ExecutorStartError::Launch(ExecutorLaunchError {
+                    launch_error: error,
+                    cleanup_error: None,
+                })
+            },
+        )?;
+        let profile_bytes = effective_profile.encode();
+        let profile_file =
+            create_sealed_memfd(c"prdb-query-profile", &profile_bytes).map_err(|error| {
+                ExecutorStartError::Launch(ExecutorLaunchError {
+                    launch_error: error,
+                    cleanup_error: None,
+                })
+            })?;
+
+        let admitted = match admit(submission) {
+            Ok(admitted) => admitted,
+            Err(error) => {
+                return Err(ExecutorStartError::Admission {
+                    error,
+                    cleanup_error: None,
+                });
+            }
+        };
+
+        let channels = worker.channels.take().expect("worker channels");
+        let [_, _, _, _, spill_fd] = channels.worker_fds();
+        let mut fds = vec![
+            parameters.as_raw_fd(),
+            sql_data.as_raw_fd(),
+            profile_file.as_raw_fd(),
+        ];
+        if spill_session.is_some() {
+            fds.push(spill_fd);
+        }
+
+        let path_bytes = artifact_dir.artifact_path.as_os_str().as_bytes();
+        let mut payload = Vec::with_capacity(17 + path_bytes.len());
+        payload.extend_from_slice(&effective_profile.max_total_result_bytes.to_le_bytes());
+        payload.extend_from_slice(
+            &effective_profile
+                .max_sql_index_probe_candidates
+                .to_le_bytes(),
+        );
+        payload.push(u8::from(spill_session.is_some()));
+        payload.extend_from_slice(&(path_bytes.len() as u32).to_le_bytes());
+        payload.extend_from_slice(path_bytes);
+
+        let ctrl = worker.ctrl_stream.take().expect("worker ctrl stream");
+        send_standby_invocation(&ctrl, &payload, &fds).map_err(|error| {
+            ExecutorStartError::Launch(ExecutorLaunchError {
+                launch_error: error,
+                cleanup_error: None,
+            })
+        })?;
+
+        let (supervisor_streams, result_stream, spill_stream) = channels.into_supervisor_streams();
+        Ok((
+            admitted,
+            RunningExecutor {
+                child: worker.child.take().expect("worker child"),
+                optimizer_child: worker.optimizer_child.take(),
+                cgroup: worker.cgroup.take(),
+                artifact_directory: worker.artifact_directory.take(),
+                worker_channels: Some(supervisor_streams),
+                spill_stream: Some(spill_stream),
+                spill_session,
+                result_stream: Some(result_stream),
+                cleanup_timeout: config.cleanup_timeout,
+                max_total_result_bytes: effective_profile.max_total_result_bytes,
+            },
+        ))
+    })
 }
 
 impl Drop for PrivateArtifactDirectory {

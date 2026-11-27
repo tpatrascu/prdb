@@ -33,6 +33,7 @@ struct Config {
     duration_secs: u64,
     warmup_secs: u64,
     workload: WorkloadMode,
+    insert_batch_size: usize,
     keep_data: bool,
 }
 
@@ -56,6 +57,7 @@ impl Default for Config {
             duration_secs: 60,
             warmup_secs: 5,
             workload: WorkloadMode::Mixed,
+            insert_batch_size: 1000,
             keep_data: false,
         }
     }
@@ -80,6 +82,7 @@ fn print_help() {
          --duration-secs N             Measurement duration in seconds (default 60)\n\
          --warmup-secs N               Warmup duration in seconds (default 5)\n\
          --workload mixed|tpcc|tpch    Workload mode (default mixed)\n\
+         --insert-batch-size N         Number of rows per insert batch (default 1000)\n\
          --keep-data                   Preserve run directory after completion"
     );
 }
@@ -136,6 +139,12 @@ fn parse_args() -> Result<Config, String> {
                 "tpch" => cfg.workload = WorkloadMode::Tpch,
                 _ => return Err(format!("invalid --workload: {val}")),
             },
+            "--insert-batch-size" => {
+                cfg.insert_batch_size = val.parse().map_err(|_| "invalid --insert-batch-size")?;
+                if cfg.insert_batch_size == 0 {
+                    return Err("--insert-batch-size must be positive".to_owned());
+                }
+            }
             other => return Err(format!("unknown option: {other}")),
         }
     }
@@ -219,6 +228,11 @@ fn run_interactive_sql(
     workload_class: &str,
     sql_file: &Path,
 ) -> Result<(), String> {
+    let deadline_ms = if workload_class == "analytical" {
+        "600000"
+    } else {
+        "60000"
+    };
     let out = Command::new(&cfg.prdb_client)
         .args([
             "interactive-sql",
@@ -244,6 +258,8 @@ fn run_interactive_sql(
             &cfg.runtime_profile,
             "--compiler-identity",
             "tcc",
+            "--deadline-ms",
+            deadline_ms,
             "--workload",
             workload_class,
         ])
@@ -332,7 +348,7 @@ fn compute_profile_limits(size_gb: f64) -> (u64, u64, u64, u64, u64, u64, u64) {
     let oltp_mem = ((512.0 * 1024.0 * 1024.0) * sqrt_scale)
         .min(1024.0 * 1024.0 * 1024.0)
         .round() as u64;
-    let oltp_deadline = (30_000.0 * sqrt_scale.min(4.0)).round() as u64;
+    let oltp_deadline = (60_000.0 * sqrt_scale.min(4.0)).round() as u64;
 
     let olap_mem = ((2.0 * 1024.0 * 1024.0 * 1024.0) * sqrt_scale)
         .min(8.0 * 1024.0 * 1024.0 * 1024.0)
@@ -382,7 +398,7 @@ fn provision_profiles_and_schema(
         olap_spill_bytes / (1024 * 1024 * 1024),
     );
     let oltp_profile_sql = format!(
-        "CREATE WORKLOAD PROFILE IF NOT EXISTS bench_oltp FROM large_operational WITH (memory_max_bytes = {oltp_mem}, max_deadline_ms = {oltp_deadline});"
+        "CREATE WORKLOAD PROFILE IF NOT EXISTS bench_oltp FROM large_operational WITH (memory_max_bytes = {oltp_mem}, max_invocation_scan_work = {olap_scan_work}, max_deadline_ms = {oltp_deadline});"
     );
     let olap_profile_sql = format!(
         "CREATE WORKLOAD PROFILE IF NOT EXISTS bench_olap FROM large_analytical WITH (memory_max_bytes = {olap_mem}, max_invocation_scan_work = {olap_scan_work}, max_total_result_bytes = {olap_result_bytes}, spill_max_bytes = {olap_spill_bytes}, max_deadline_ms = {olap_deadline});"
@@ -413,6 +429,19 @@ fn provision_profiles_and_schema(
         "CREATE TABLE bench.part (p_partkey BIGINT NOT NULL, p_name TEXT NOT NULL, p_size BIGINT NOT NULL, p_retailprice DECIMAL(12,2) NOT NULL);",
         "CREATE TABLE bench.h_orders (o_orderkey BIGINT NOT NULL, o_custkey BIGINT NOT NULL, o_orderstatus TEXT NOT NULL, o_totalprice DECIMAL(12,2) NOT NULL, o_orderdate BIGINT NOT NULL);",
         "CREATE TABLE bench.lineitem (l_orderkey BIGINT NOT NULL, l_partkey BIGINT NOT NULL, l_suppkey BIGINT NOT NULL, l_linenumber BIGINT NOT NULL, l_quantity DECIMAL(12,2) NOT NULL, l_extendedprice DECIMAL(12,2) NOT NULL, l_discount DECIMAL(4,2) NOT NULL, l_tax DECIMAL(4,2) NOT NULL, l_returnflag TEXT NOT NULL, l_linestatus TEXT NOT NULL, l_shipdate BIGINT NOT NULL);",
+        "CREATE UNIQUE INDEX idx_warehouse_pk ON bench.warehouse (w_id);",
+        "CREATE UNIQUE INDEX idx_district_pk ON bench.district (d_w_id, d_id);",
+        "CREATE UNIQUE INDEX idx_customer_pk ON bench.customer (c_w_id, c_d_id, c_id);",
+        "CREATE UNIQUE INDEX idx_orders_pk ON bench.orders (o_w_id, o_d_id, o_id);",
+        "CREATE UNIQUE INDEX idx_order_line_pk ON bench.order_line (ol_w_id, ol_d_id, ol_o_id, ol_number);",
+        "CREATE UNIQUE INDEX idx_stock_pk ON bench.stock (s_w_id, s_i_id);",
+        "CREATE UNIQUE INDEX idx_item_pk ON bench.item (i_id);",
+        "CREATE UNIQUE INDEX idx_region_pk ON bench.region (r_regionkey);",
+        "CREATE UNIQUE INDEX idx_nation_pk ON bench.nation (n_nationkey);",
+        "CREATE UNIQUE INDEX idx_supplier_pk ON bench.supplier (s_suppkey);",
+        "CREATE UNIQUE INDEX idx_part_pk ON bench.part (p_partkey);",
+        "CREATE UNIQUE INDEX idx_h_orders_pk ON bench.h_orders (o_orderkey);",
+        "CREATE UNIQUE INDEX idx_lineitem_pk ON bench.lineitem (l_orderkey, l_linenumber);",
     ];
     for stmt in stmts {
         run_admin_sql(cfg, logger, stmt)?;
@@ -635,25 +664,51 @@ fn generate_and_load_data(
     load_batch(&sql)?;
     sql.clear();
 
-    // Load items in multi-row INSERTs (10 rows per statement, <= 50 statements per batch)
+    // Load items and h_orders/lineitem in multi-row INSERTs respecting --insert-batch-size
+    // (clamped to MAX_EXECUTOR_ROW_HANDLES = 4096 per transaction and <= 60 statements per batch).
+    let effective_batch_rows = cfg.insert_batch_size.min(4096);
+    if cfg.insert_batch_size > 4096 {
+        println!(
+            "prdb-bench: clamping --insert-batch-size {} to 4096 rows per transaction (MAX_EXECUTOR_ROW_HANDLES)",
+            cfg.insert_batch_size
+        );
+    }
+    let rows_per_stmt = effective_batch_rows.div_ceil(60).clamp(1, 64);
+
+    let mut pending_rows = 0usize;
+    let mut stmt_count = 0usize;
     let mut i = 1usize;
     while i <= items {
-        let end = (i + 9).min(items);
-        sql.push_str("INSERT INTO item VALUES ");
+        let max_this_stmt = rows_per_stmt
+            .min(effective_batch_rows - pending_rows)
+            .max(1);
+        let end = (i + max_this_stmt - 1).min(items);
+        let mut stmt = String::from("INSERT INTO item VALUES ");
         for k in i..=end {
             if k > i {
-                sql.push_str(", ");
+                stmt.push_str(", ");
             }
-            sql.push_str(&format!(
+            stmt.push_str(&format!(
                 "({k}, 'ITEM_{k}', {:.2})",
                 10.0 + (k % 100) as f64
             ));
         }
-        sql.push_str(";\n");
-        i = end + 1;
-        if sql.lines().count() >= 50 {
+        stmt.push_str(";\n");
+        if !sql.is_empty() && sql.len() + stmt.len() > 60_000 {
             load_batch(&sql)?;
             sql.clear();
+            pending_rows = 0;
+            stmt_count = 0;
+        }
+        sql.push_str(&stmt);
+        pending_rows += end - i + 1;
+        stmt_count += 1;
+        i = end + 1;
+        if pending_rows >= effective_batch_rows || stmt_count >= 60 {
+            load_batch(&sql)?;
+            sql.clear();
+            pending_rows = 0;
+            stmt_count = 0;
         }
     }
     if !sql.is_empty() {
@@ -661,43 +716,90 @@ fn generate_and_load_data(
         sql.clear();
     }
 
+    pending_rows = 0;
+    stmt_count = 0;
     let mut o = 1usize;
     while o <= h_orders {
-        let end = (o + 9).min(h_orders);
-        sql.push_str("INSERT INTO h_orders VALUES ");
+        let max_this_stmt = rows_per_stmt
+            .min(effective_batch_rows - pending_rows)
+            .max(1);
+        let end = (o + max_this_stmt - 1).min(h_orders);
+        let mut stmt = String::from("INSERT INTO h_orders VALUES ");
         for k in o..=end {
             if k > o {
-                sql.push_str(", ");
+                stmt.push_str(", ");
             }
-            sql.push_str(&format!(
+            stmt.push_str(&format!(
                 "({k}, {}, 'O', {:.2}, {})",
                 (k % 1000) + 1,
                 100.0 + (k % 500) as f64,
                 19950101 + (k % 1000)
             ));
         }
-        sql.push_str(";\n");
-        for k in o..=end {
-            sql.push_str("INSERT INTO lineitem VALUES ");
-            for l in 1..=lineitems_per_order {
-                if l > 1 {
-                    sql.push_str(", ");
-                }
-                sql.push_str(&format!(
-                    "({k}, {}, {}, {l}, {:.2}, {:.2}, 0.05, 0.08, 'N', 'O', {})",
-                    ((k + l) % items) + 1,
-                    ((k + l) % 100) + 1,
-                    (l * 5) as f64,
-                    (l * 100) as f64,
-                    19950201 + (k % 1000)
-                ));
-            }
-            sql.push_str(";\n");
-        }
-        o = end + 1;
-        if sql.lines().count() >= 44 {
+        stmt.push_str(";\n");
+        if !sql.is_empty() && sql.len() + stmt.len() > 60_000 {
             load_batch(&sql)?;
             sql.clear();
+            pending_rows = 0;
+            stmt_count = 0;
+        }
+        sql.push_str(&stmt);
+        pending_rows += end - o + 1;
+        stmt_count += 1;
+        o = end + 1;
+        if pending_rows >= effective_batch_rows || stmt_count >= 60 {
+            load_batch(&sql)?;
+            sql.clear();
+            pending_rows = 0;
+            stmt_count = 0;
+        }
+    }
+    if !sql.is_empty() {
+        load_batch(&sql)?;
+        sql.clear();
+    }
+
+    pending_rows = 0;
+    stmt_count = 0;
+    let total_lineitems = h_orders * lineitems_per_order;
+    let mut li_idx = 0usize;
+    while li_idx < total_lineitems {
+        let max_this_stmt = rows_per_stmt
+            .min(effective_batch_rows - pending_rows)
+            .max(1);
+        let end_idx = (li_idx + max_this_stmt).min(total_lineitems);
+        let mut stmt = String::from("INSERT INTO lineitem VALUES ");
+        for idx in li_idx..end_idx {
+            if idx > li_idx {
+                stmt.push_str(", ");
+            }
+            let k = (idx / lineitems_per_order) + 1;
+            let l = (idx % lineitems_per_order) + 1;
+            stmt.push_str(&format!(
+                "({k}, {}, {}, {l}, {:.2}, {:.2}, 0.05, 0.08, 'N', 'O', {})",
+                ((k + l) % items) + 1,
+                ((k + l) % 100) + 1,
+                (l * 5) as f64,
+                (l * 100) as f64,
+                19950201 + (k % 1000)
+            ));
+        }
+        stmt.push_str(";\n");
+        if !sql.is_empty() && sql.len() + stmt.len() > 60_000 {
+            load_batch(&sql)?;
+            sql.clear();
+            pending_rows = 0;
+            stmt_count = 0;
+        }
+        sql.push_str(&stmt);
+        pending_rows += end_idx - li_idx;
+        stmt_count += 1;
+        li_idx = end_idx;
+        if pending_rows >= effective_batch_rows || stmt_count >= 60 {
+            load_batch(&sql)?;
+            sql.clear();
+            pending_rows = 0;
+            stmt_count = 0;
         }
     }
     if !sql.is_empty() {
@@ -919,7 +1021,8 @@ fn run() -> Result<(), String> {
     let mut handles = Vec::new();
 
     if cfg.workload == WorkloadMode::Mixed || cfg.workload == WorkloadMode::Tpcc {
-        for _ in 0..cfg.oltp_threads {
+        let warehouses = ((cfg.size_gb / 0.1).round() as usize).max(1);
+        for tid in 0..cfg.oltp_threads {
             let cfg_ref = Arc::new(&cfg);
             let _ = cfg_ref;
             let addr = cfg.address.clone();
@@ -931,7 +1034,19 @@ fn run() -> Result<(), String> {
             let cpu_base = cfg.cpu_baseline.clone();
             let sdk_rel = cfg.sdk_release;
             let scope = oltp_scope.clone();
-            let queries = oltp_paths.clone();
+            let w_id = (tid % warehouses) + 1;
+            let pay_path = query_dir.join(format!("tpcc_payment_update_t{tid}.sql"));
+            fs::write(
+                &pay_path,
+                format!("UPDATE warehouse SET w_ytd = w_ytd + 10.00 WHERE w_id = {w_id};\n"),
+            )
+            .map_err(|e| format!("failed to write {}: {e}", pay_path.display()))?;
+            let mut queries = oltp_paths.clone();
+            for (name, path) in &mut queries {
+                if *name == "tpcc_payment_update" {
+                    *path = pay_path.clone();
+                }
+            }
             let stats_c = Arc::clone(&stats);
             let logger_c = Arc::clone(&logger);
             let stop_c = Arc::clone(&stop);

@@ -9,6 +9,7 @@ use prdb_engine::client_submit::{
     ClientResultEvent, InvocationStatus, SubmissionClient, TerminalOutcome,
 };
 use prdb_engine::interactive_sql::{InteractiveStatement, parse_interactive_sql};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, IsTerminal, Read, Write};
@@ -437,29 +438,19 @@ pub(super) fn execute_interactive_package(
     }
     let sql_data = prdb_engine::client_sql::encode_sql_batch_data(schema, sql)
         .map_err(|error| error.to_string())?;
-    let package_dir = workspace.join("sql-batch-package");
-    if !package_dir.exists() {
-        let generated_source = prdb_engine::client_sql::generate_query_batch_source();
-        let source_path = workspace.join("sql-batch.c");
-        write_private_file(&source_path, &generated_source)?;
-        let package_options = PackageOptions {
-            tcc: tcc.to_path_buf(),
-            shared_linker: shared_linker.to_path_buf(),
-            patchelf: patchelf.to_path_buf(),
-            source: source_path,
-            sql_data: None,
-            sdk_library: sdk_library.to_path_buf(),
-            include_dir: include_dir.to_path_buf(),
-            requested_scope: requested_scope.to_path_buf(),
-            output_dir: package_dir.clone(),
-            native_abi_version: 1,
-            sdk_release,
-            cpu_baseline: cpu_baseline.to_owned(),
-            runtime_profile: runtime_profile.to_owned(),
-            compiler_identity: compiler_identity.to_owned(),
-        };
-        package_query_repository(&package_options).map_err(|error| error.to_string())?;
-    }
+    let package_dir = resolve_or_build_sql_batch_package(
+        workspace,
+        tcc,
+        shared_linker,
+        patchelf,
+        sdk_library,
+        include_dir,
+        requested_scope,
+        sdk_release,
+        cpu_baseline,
+        runtime_profile,
+        compiler_identity,
+    )?;
     let receipt = workspace.join(format!("interactive-{ordinal}.receipt"));
     let mut package_parameters = Zeroizing::new(parameters.to_vec());
     if let Some(transaction_id) = transaction_id {
@@ -572,13 +563,29 @@ pub(super) fn connect_interactive_client(
     address: SocketAddr,
     token_id: [u8; 16],
     token_secret: &mut [u8],
+    repository_profile: bool,
+) -> Result<SubmissionClient, prdb_engine::client_submit::ClientSubmitError> {
+    connect_interactive_client_with_timeout(
+        address,
+        token_id,
+        token_secret,
+        repository_profile,
+        Duration::from_secs(10),
+    )
+}
+
+pub(super) fn connect_interactive_client_with_timeout(
+    address: SocketAddr,
+    token_id: [u8; 16],
+    token_secret: &mut [u8],
     _repository_profile: bool,
+    timeout: Duration,
 ) -> Result<SubmissionClient, prdb_engine::client_submit::ClientSubmitError> {
     SubmissionClient::connect_repository_interactive_authenticated_with_timeout(
         address,
         token_id,
         token_secret,
-        Duration::from_secs(10),
+        timeout,
     )
 }
 
@@ -611,11 +618,13 @@ pub(super) fn stream_autocommit_interactive_package(
     let result = (|| {
         let token_id = credentials.token_id;
         let mut reconciliation_secret = Zeroizing::new(credentials.token_secret);
-        let mut client = connect_interactive_client(
+        let io_timeout = Duration::from_millis(deadline_ms.max(10_000));
+        let mut client = connect_interactive_client_with_timeout(
             address,
             token_id,
             &mut credentials.token_secret,
             repository_profile,
+            io_timeout,
         )
         .map_err(|error| error.to_string())?;
         let invocation_id = client
@@ -1072,7 +1081,135 @@ pub(super) fn read_sql_parameters(path: Option<&Path>) -> Result<Zeroizing<Vec<u
     encode_parameter_file(input.as_slice()).map_err(|error| error.to_string())
 }
 
-pub(super) fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+#[allow(clippy::too_many_arguments)]
+pub(super) fn resolve_or_build_sql_batch_package(
+    workspace: &Path,
+    tcc: &Path,
+    shared_linker: &Path,
+    patchelf: &Path,
+    sdk_library: &Path,
+    include_dir: &Path,
+    requested_scope: &Path,
+    sdk_release: u32,
+    cpu_baseline: &str,
+    runtime_profile: &str,
+    compiler_identity: &str,
+) -> Result<PathBuf, String> {
+    let local_pkg = workspace.join("sql-batch-package");
+    if local_pkg.join("query.so").is_file() {
+        return Ok(local_pkg);
+    }
+
+    let generated_source = prdb_engine::client_sql::generate_query_batch_source();
+    let scope_bytes = fs::read(requested_scope).map_err(|e| {
+        format!(
+            "failed to read requested scope {}: {e}",
+            requested_scope.display()
+        )
+    })?;
+    let sdk_meta = fs::metadata(sdk_library)
+        .map_err(|e| format!("failed to stat sdk library {}: {e}", sdk_library.display()))?;
+    let sdk_mtime = sdk_meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+
+    let mut hasher = Sha256::new();
+    hasher.update(&generated_source);
+    hasher.update(sdk_library.to_string_lossy().as_bytes());
+    hasher.update(sdk_meta.len().to_le_bytes());
+    hasher.update(sdk_mtime.to_le_bytes());
+    hasher.update(&scope_bytes);
+    hasher.update(include_dir.to_string_lossy().as_bytes());
+    hasher.update(tcc.to_string_lossy().as_bytes());
+    hasher.update(shared_linker.to_string_lossy().as_bytes());
+    hasher.update(patchelf.to_string_lossy().as_bytes());
+    hasher.update(sdk_release.to_le_bytes());
+    hasher.update(cpu_baseline.as_bytes());
+    hasher.update(runtime_profile.as_bytes());
+    hasher.update(compiler_identity.as_bytes());
+    let key_hex: String = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+
+    let cache_root = std::env::var_os("PRDB_CLIENT_CACHE_DIR")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("XDG_CACHE_HOME").map(|p| PathBuf::from(p).join("prdb")))
+        .unwrap_or_else(|| std::env::temp_dir().join("prdb-client-cache"));
+    let packages_dir = cache_root.join("sql-batch-packages");
+    let cached_pkg = packages_dir.join(&key_hex);
+    if cached_pkg.join("query.so").is_file() {
+        return Ok(cached_pkg);
+    }
+
+    if fs::create_dir_all(&packages_dir).is_ok() {
+        let staging_dir = packages_dir.join(format!(
+            "tmp-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let source_path = workspace.join("sql-batch.c");
+        write_private_file(&source_path, &generated_source)?;
+        let package_options = PackageOptions {
+            tcc: tcc.to_path_buf(),
+            shared_linker: shared_linker.to_path_buf(),
+            patchelf: patchelf.to_path_buf(),
+            source: source_path,
+            sql_data: None,
+            sdk_library: sdk_library.to_path_buf(),
+            include_dir: include_dir.to_path_buf(),
+            requested_scope: requested_scope.to_path_buf(),
+            output_dir: staging_dir.clone(),
+            native_abi_version: 1,
+            sdk_release,
+            cpu_baseline: cpu_baseline.to_owned(),
+            runtime_profile: runtime_profile.to_owned(),
+            compiler_identity: compiler_identity.to_owned(),
+        };
+        if package_query_repository(&package_options).is_ok() {
+            match fs::rename(&staging_dir, &cached_pkg) {
+                Ok(()) => return Ok(cached_pkg),
+                Err(_) if cached_pkg.join("query.so").is_file() => {
+                    let _ = fs::remove_dir_all(&staging_dir);
+                    return Ok(cached_pkg);
+                }
+                Err(_) => {
+                    let _ = fs::remove_dir_all(&staging_dir);
+                }
+            }
+        }
+    }
+
+    let source_path = workspace.join("sql-batch.c");
+    write_private_file(&source_path, &generated_source)?;
+    let package_options = PackageOptions {
+        tcc: tcc.to_path_buf(),
+        shared_linker: shared_linker.to_path_buf(),
+        patchelf: patchelf.to_path_buf(),
+        source: source_path,
+        sql_data: None,
+        sdk_library: sdk_library.to_path_buf(),
+        include_dir: include_dir.to_path_buf(),
+        requested_scope: requested_scope.to_path_buf(),
+        output_dir: local_pkg.clone(),
+        native_abi_version: 1,
+        sdk_release,
+        cpu_baseline: cpu_baseline.to_owned(),
+        runtime_profile: runtime_profile.to_owned(),
+        compiler_identity: compiler_identity.to_owned(),
+    };
+    package_query_repository(&package_options).map_err(|error| error.to_string())?;
+    Ok(local_pkg)
+}
+
+fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)

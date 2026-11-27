@@ -17,7 +17,7 @@ pub const EXECUTOR_SCAN_CURSOR_TOKEN_KIND: u8 = 7;
 pub const EXECUTOR_ROW_HANDLE_TOKEN_KIND: u8 = 8;
 pub const PLANNING_TABLE_HANDLE_TOKEN_KIND: u8 = 9;
 pub const MAX_RELATION_HANDLES: usize = 256;
-pub const MAX_EXECUTOR_ROW_HANDLES: usize = 4_096;
+pub const MAX_EXECUTOR_ROW_HANDLES: usize = 1_048_576;
 pub const MAX_EXECUTOR_BATCH_CANDIDATES: usize = 128;
 
 /// One relation admitted by schema usage and a data grant.

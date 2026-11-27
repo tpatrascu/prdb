@@ -59,7 +59,8 @@ mod worker {
     }
 
     pub fn main() {
-        let args = match std::env::args_os().skip(1).collect::<Vec<_>>().as_slice() {
+        let args_vec = std::env::args_os().skip(1).collect::<Vec<_>>();
+        let result = match args_vec.as_slice() {
             [flag] if flag == "--self-check" => {
                 if let Err(error) = initialize_worker() {
                     eprintln!("prdb-executor: worker setup failed: {error}");
@@ -67,16 +68,25 @@ mod worker {
                 }
                 return;
             }
+            values if values.first().is_some_and(|v| v == "--standby-fd") => {
+                match parse_standby_args(values) {
+                    Ok(standby) => initialize_worker()
+                        .and_then(|()| recv_standby_invocation(standby))
+                        .and_then(execute_library),
+                    Err(error) => {
+                        eprintln!("prdb-executor: {error}");
+                        std::process::exit(2);
+                    }
+                }
+            }
             values => match parse_args(values) {
-                Ok(args) => args,
+                Ok(args) => initialize_worker().and_then(|()| execute_library(args)),
                 Err(error) => {
                     eprintln!("prdb-executor: {error}");
                     std::process::exit(2);
                 }
             },
         };
-
-        let result = initialize_worker().and_then(|()| execute_library(args));
         match result {
             Ok(0) => unsafe { libc::_exit(0) },
             Ok(_) => unsafe { libc::_exit(1) },
@@ -86,6 +96,154 @@ mod worker {
                 unsafe { libc::_exit(EXIT_ERROR) }
             }
         }
+    }
+
+    struct StandbyArgs {
+        ctrl_fd: i32,
+        planner_fd: i32,
+        executor_fd: i32,
+        optimizer_fd: i32,
+        result_fd: i32,
+    }
+
+    fn parse_standby_args(values: &[std::ffi::OsString]) -> Result<StandbyArgs, String> {
+        if values.len() != 10
+            || values[0] != "--standby-fd"
+            || values[2] != "--planner-fd"
+            || values[4] != "--executor-fd"
+            || values[6] != "--optimizer-fd"
+            || values[8] != "--result-fd"
+        {
+            return Err("usage: prdb-executor --standby-fd FD --planner-fd FD --executor-fd FD --optimizer-fd FD --result-fd FD".to_owned());
+        }
+        let parse_fd = |idx: usize, name: &str| -> Result<i32, String> {
+            let fd = values[idx]
+                .to_str()
+                .ok_or_else(|| format!("{name} descriptor is not UTF-8"))?
+                .parse::<i32>()
+                .map_err(|_| format!("invalid {name} descriptor"))?;
+            if fd < 3 {
+                return Err("worker descriptors must be greater than stderr".to_owned());
+            }
+            Ok(fd)
+        };
+        let ctrl_fd = parse_fd(1, "standby")?;
+        let planner_fd = parse_fd(3, "planner")?;
+        let executor_fd = parse_fd(5, "executor")?;
+        let optimizer_fd = parse_fd(7, "optimizer")?;
+        let result_fd = parse_fd(9, "result")?;
+        let fds = [ctrl_fd, planner_fd, executor_fd, optimizer_fd, result_fd];
+        if fds.iter().enumerate().any(|(i, fd)| fds[..i].contains(fd)) {
+            return Err("worker descriptors must be distinct".to_owned());
+        }
+        Ok(StandbyArgs {
+            ctrl_fd,
+            planner_fd,
+            executor_fd,
+            optimizer_fd,
+            result_fd,
+        })
+    }
+
+    fn recv_standby_invocation(standby: StandbyArgs) -> io::Result<WorkerArgs> {
+        use std::os::unix::ffi::OsStringExt;
+        let mut payload = [0u8; 4128];
+        let mut iov = libc::iovec {
+            iov_base: payload.as_mut_ptr().cast(),
+            iov_len: payload.len(),
+        };
+        let cmsg_space = unsafe { libc::CMSG_SPACE((4 * std::mem::size_of::<i32>()) as u32) };
+        let mut cmsg_buf = vec![0u8; cmsg_space as usize];
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = cmsg_buf.as_mut_ptr().cast();
+        msg.msg_controllen = cmsg_buf.len() as _;
+        let received = loop {
+            let n = unsafe { libc::recvmsg(standby.ctrl_fd, &mut msg, 0) };
+            if n < 0 {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                unsafe { libc::close(standby.ctrl_fd) };
+                return Err(err);
+            }
+            break n as usize;
+        };
+        unsafe { libc::close(standby.ctrl_fd) };
+        if received < 17 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "truncated standby invocation payload",
+            ));
+        }
+        let max_total_result_bytes = u64::from_le_bytes(payload[0..8].try_into().unwrap());
+        let max_sql_index_probe_candidates = u32::from_le_bytes(payload[8..12].try_into().unwrap());
+        let has_spill_fd = payload[12] != 0;
+        let path_len = u32::from_le_bytes(payload[13..17].try_into().unwrap()) as usize;
+        if received != 17 + path_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid standby invocation payload length",
+            ));
+        }
+        let library = PathBuf::from(std::ffi::OsString::from_vec(
+            payload[17..17 + path_len].to_vec(),
+        ));
+        if !library.is_absolute()
+            || max_sql_index_probe_candidates == 0
+            || max_sql_index_probe_candidates
+                > prdb_engine::query_abi::MAX_SQL_INDEX_PROBE_CANDIDATES
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid standby invocation parameters",
+            ));
+        }
+
+        let mut received_fds = Vec::new();
+        let mut cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg) };
+        while !cmsg.is_null() {
+            let hdr = unsafe { &*cmsg };
+            if hdr.cmsg_level == libc::SOL_SOCKET && hdr.cmsg_type == libc::SCM_RIGHTS {
+                let data_ptr = unsafe { libc::CMSG_DATA(cmsg) };
+                let data_len = hdr.cmsg_len as usize - (data_ptr as usize - cmsg as usize);
+                let fd_count = data_len / std::mem::size_of::<i32>();
+                for i in 0..fd_count {
+                    let mut fd = -1i32;
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            data_ptr.add(i * std::mem::size_of::<i32>()),
+                            (&mut fd as *mut i32).cast::<u8>(),
+                            std::mem::size_of::<i32>(),
+                        );
+                    }
+                    received_fds.push(fd);
+                }
+            }
+            cmsg = unsafe { libc::CMSG_NXTHDR(&msg, cmsg) };
+        }
+        let expected_fds = if has_spill_fd { 4 } else { 3 };
+        if received_fds.len() != expected_fds || received_fds.iter().any(|&fd| fd < 3) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid standby invocation descriptor count",
+            ));
+        }
+        Ok(WorkerArgs {
+            library,
+            parameters_fd: received_fds[0],
+            sql_data_fd: received_fds[1],
+            profile_fd: Some(received_fds[2]),
+            planner_fd: standby.planner_fd,
+            executor_fd: standby.executor_fd,
+            optimizer_fd: standby.optimizer_fd,
+            result_fd: standby.result_fd,
+            spill_fd: if has_spill_fd { received_fds[3] } else { -1 },
+            max_total_result_bytes,
+            max_sql_index_probe_candidates,
+        })
     }
 
     fn parse_args(values: &[std::ffi::OsString]) -> Result<WorkerArgs, String> {

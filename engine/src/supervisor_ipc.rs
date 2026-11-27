@@ -1164,7 +1164,10 @@ fn dispatch_gateway_client_request_inner<'db>(
                         admission,
                         executor,
                     )
-                    .map_err(GatewayRequestError::Start)?;
+                    .map_err(|error| {
+                        eprintln!("prdb-supervisor: start submission failed: {error:?}");
+                        GatewayRequestError::Start(error)
+                    })?;
                 let submission = staging
                     .started_submission(
                         session

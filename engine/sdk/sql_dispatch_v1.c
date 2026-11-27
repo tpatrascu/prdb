@@ -1394,6 +1394,19 @@ int32_t prdb_sdk_sql_run_statement_v1(
         }
     }
     if (parse_status != PRDB_SDK_SQL_OK) {
+        if (host->optimizer_request != NULL && parameters_len > 0) {
+            prdb_sdk_select_v1 opt_sel = {0};
+            if (prdb_sdk_sql_parse_select_v1(sql, sql_len, &opt_sel,
+                                             sizeof(opt_sel), NULL) ==
+                    PRDB_SDK_SQL_OK &&
+                opt_sel.is_join == 0 && opt_sel.has_group_by == 0 &&
+                opt_sel.aggregate_kind == 0 && opt_sel.has_order_by == 0 &&
+                opt_sel.predicate_count > 0) {
+                return prdb_sdk_sql_run_statement_optimizer_v1(
+                    host, schema, schema_len, sql, sql_len, parameters,
+                    parameters_len);
+            }
+        }
         return prdb_sdk_sql_run_v1(host, schema, schema_len, sql, sql_len,
                                    parameters, parameters_len);
     }

@@ -924,6 +924,10 @@ impl WorkerCgroup {
         &self.path
     }
 
+    pub fn apply_limits(&self, limits: WorkerResourceLimits) -> io::Result<()> {
+        limits.apply(&self.path)
+    }
+
     /// Attach a stopped worker before allowing it to execute untrusted code.
     pub fn attach_process(&self, pid: u32) -> io::Result<()> {
         attach_process(&self.path, pid)

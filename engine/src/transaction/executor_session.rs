@@ -51,7 +51,7 @@ pub(super) struct ActiveExecutorScan {
 pub(super) enum ExecutorScanSource {
     Physical {
         row_cursor: Option<RowScanCursor>,
-        pending_row: Option<(RowId, Vec<SanitizedCell>)>,
+        pending_rows: std::collections::VecDeque<(RowId, Vec<SanitizedCell>)>,
     },
     InformationSchema {
         relation: BuiltinInformationSchemaRelation,
@@ -333,7 +333,7 @@ impl ExecutorMetadataConnection<'_, '_> {
                 } else {
                     ExecutorScanSource::Physical {
                         row_cursor: None,
-                        pending_row: None,
+                        pending_rows: std::collections::VecDeque::new(),
                     }
                 },
             },
@@ -719,7 +719,7 @@ impl ExecutorMetadataConnection<'_, '_> {
             rows.push((ExecutorRowHandle { token }, cells));
         }
         let continuation = if let Some(continuation) = next_cursor {
-            if self.used_scan_tokens.len() >= MAX_RELATION_HANDLES {
+            if self.used_scan_tokens.len() >= MAX_EXECUTOR_ROW_HANDLES {
                 self.transaction.abort()?;
                 return Err(TransactionError::RelationHandleLimitExceeded);
             }
@@ -809,7 +809,7 @@ impl ExecutorMetadataConnection<'_, '_> {
             rows.push((ExecutorRowHandle { token }, selected_cells));
         }
         let continuation = if let Some(row_cursor) = page.continuation {
-            if self.used_scan_tokens.len() >= MAX_RELATION_HANDLES {
+            if self.used_scan_tokens.len() >= MAX_EXECUTOR_ROW_HANDLES {
                 self.transaction.abort()?;
                 return Err(TransactionError::RelationHandleLimitExceeded);
             }
@@ -830,7 +830,7 @@ impl ExecutorMetadataConnection<'_, '_> {
                     selected_column_ordinals: scan.selected_column_ordinals,
                     source: ExecutorScanSource::Physical {
                         row_cursor: Some(row_cursor),
-                        pending_row: None,
+                        pending_rows: std::collections::VecDeque::new(),
                     },
                 },
             );
@@ -876,7 +876,7 @@ impl ExecutorMetadataConnection<'_, '_> {
         }
         let ExecutorScanSource::Physical {
             row_cursor,
-            pending_row,
+            pending_rows,
         } = scan.source
         else {
             return Err(TransactionError::InvalidMetadataRequest);
@@ -886,27 +886,30 @@ impl ExecutorMetadataConnection<'_, '_> {
         let mut scanned = 0usize;
         let mut rows = Vec::new();
         let mut row_cursor = row_cursor;
-        let mut pending_row = pending_row;
+        let mut pending_rows = pending_rows;
 
         while rows.len() < max_scanned {
-            let candidate = if let Some(candidate) = pending_row.take() {
-                Some(candidate)
-            } else if scanned < max_scanned {
+            if pending_rows.is_empty() {
+                let remaining_candidates = max_scanned.saturating_sub(scanned);
+                if remaining_candidates == 0 {
+                    break;
+                }
                 let page = self.transaction.scan_catalog_authorized_rows(
                     description.relation_id,
                     row_cursor.as_ref(),
-                    1,
+                    remaining_candidates,
                 )?;
-                scanned += 1;
+                scanned += remaining_candidates;
                 row_cursor = page.continuation;
-                page.rows.into_iter().next()
-            } else {
-                None
-            };
-            let Some((row_id, cells)) = candidate else {
-                if row_cursor.is_none() {
-                    break;
+                pending_rows.extend(page.rows);
+                if pending_rows.is_empty() {
+                    if row_cursor.is_none() {
+                        break;
+                    }
+                    continue;
                 }
+            }
+            let Some((row_id, cells)) = pending_rows.pop_front() else {
                 continue;
             };
             if row_id.table != description.relation_id {
@@ -929,7 +932,7 @@ impl ExecutorMetadataConnection<'_, '_> {
                     self.transaction.abort()?;
                     return Err(TransactionError::MetadataResultTooLarge);
                 }
-                pending_row = Some((row_id, selected_cells));
+                pending_rows.push_front((row_id, cells));
                 break;
             }
             if self.used_row_tokens.len() >= MAX_EXECUTOR_ROW_HANDLES {
@@ -951,8 +954,8 @@ impl ExecutorMetadataConnection<'_, '_> {
             encoded_bytes += row_bytes;
         }
 
-        let continuation = if pending_row.is_some() || row_cursor.is_some() {
-            if self.used_scan_tokens.len() >= MAX_RELATION_HANDLES {
+        let continuation = if !pending_rows.is_empty() || row_cursor.is_some() {
+            if self.used_scan_tokens.len() >= MAX_EXECUTOR_ROW_HANDLES {
                 self.transaction.abort()?;
                 return Err(TransactionError::RelationHandleLimitExceeded);
             }
@@ -973,7 +976,7 @@ impl ExecutorMetadataConnection<'_, '_> {
                     selected_column_ordinals: scan.selected_column_ordinals,
                     source: ExecutorScanSource::Physical {
                         row_cursor,
-                        pending_row,
+                        pending_rows,
                     },
                 },
             );
