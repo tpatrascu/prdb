@@ -18,7 +18,7 @@ COPY engine ./engine
 ARG PRDB_CPU_BASELINE=x86_64-v1
 ARG PRDB_RUNTIME_PROFILE=debian-bookworm-glibc-2.36
 ARG PRDB_SDK_RELEASE=1
-ARG PRDB_SDK_ABIS=1,2,3,4,5
+ARG PRDB_SDK_ABIS=1
 
 RUN cargo build --release --locked -p prdb-engine --bins \
     && make -f engine/sdk/Makefile sdk-shared-release \
@@ -46,7 +46,7 @@ RUN apt-get update \
 ARG PRDB_CPU_BASELINE=x86_64-v1
 ARG PRDB_RUNTIME_PROFILE=debian-bookworm-glibc-2.36
 ARG PRDB_SDK_RELEASE=1
-ARG PRDB_SDK_ABIS=1,2,3,4,5
+ARG PRDB_SDK_ABIS=1
 ENV PRDB_CPU_BASELINE=${PRDB_CPU_BASELINE} \
     PRDB_RUNTIME_PROFILE=${PRDB_RUNTIME_PROFILE} \
     PRDB_SDK_RELEASE=${PRDB_SDK_RELEASE} \
@@ -69,7 +69,7 @@ FROM client AS server
 
 USER root
 RUN install -d -o prdb -g prdb -m 0700 \
-      /var/lib/prdb /var/lib/prdb/scratch /var/lib/prdb/instance/sdk-libraries \
+      /var/lib/prdb /var/lib/prdb/scratch \
       /run/prdb
 
 COPY --from=build /src/target/release/prdb-executor /usr/local/bin/prdb-executor

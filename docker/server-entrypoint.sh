@@ -69,8 +69,8 @@ for controller in cpu memory pids; do
     fi
 done
 
-mkdir -p "$(dirname "$instance_dir")" "$scratch_dir" "$sdk_repository_dir" "$service_dir"
-chmod 0700 "$(dirname "$instance_dir")" "$scratch_dir" "$sdk_repository_dir" "$service_dir"
+mkdir -p "$(dirname "$instance_dir")" "$scratch_dir" "$service_dir"
+chmod 0700 "$(dirname "$instance_dir")" "$scratch_dir" "$service_dir"
 if [[ ! -e "$instance_dir/storage.redb" ]]; then
     /usr/local/bin/prdb-init \
         --instance-dir "$instance_dir" \
@@ -80,6 +80,8 @@ if [[ ! -e "$instance_dir/storage.redb" ]]; then
 else
     /usr/local/bin/prdb-maintain inspect --instance-dir "$instance_dir"
 fi
+mkdir -p "$sdk_repository_dir"
+chmod 0700 "$sdk_repository_dir"
 
 supervisor_args=(
     --instance-dir "$instance_dir"

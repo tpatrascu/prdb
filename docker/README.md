@@ -18,7 +18,7 @@ podman build --target server --tag localhost/prdb-server:latest .
 ```
 
 The image build defaults to CPU baseline `x86_64-v1`, runtime profile
-`debian-bookworm-glibc-2.36`, SDK release `1`, and SDK ABIs `1,2,3,4,5`. If the
+`debian-bookworm-glibc-2.36`, SDK release `1`, and SDK ABI `1`. If the
 server uses a different compatible profile, build both images with matching
 arguments. For example:
 
@@ -27,7 +27,7 @@ podman build --target client --tag localhost/prdb-client:latest \
   --build-arg PRDB_CPU_BASELINE=x86_64-v1 \
   --build-arg PRDB_RUNTIME_PROFILE=debian-bookworm-glibc-2.36 \
   --build-arg PRDB_SDK_RELEASE=1 \
-  --build-arg PRDB_SDK_ABIS=1,2,3,4,5 .
+  --build-arg PRDB_SDK_ABIS=1 .
 ```
 
 The same build arguments can be supplied when building the `server` target.
@@ -74,7 +74,7 @@ podman run --rm --network=host \
     --default-user admin \
     --sql-file /work/query.sql --schema public \
     --scope /work/scope.psc1 \
-    --sdk-library /opt/prdb/sdk/releases/linux-x86_64/x86_64-v1/debian-bookworm-glibc-2.36/sdk-1-abis1,2,3,4,5,6/libprdb_sql.so.1 \
+    --sdk-library /opt/prdb/sdk/releases/linux-x86_64/x86_64-v1/debian-bookworm-glibc-2.36/sdk-1-abis1/libprdb_sql.so.1 \
     --include-dir /opt/prdb/include \
     --sdk-release 1 --cpu-baseline x86_64-v1 \
     --runtime-profile debian-bookworm-glibc-2.36 \
@@ -182,3 +182,42 @@ Use a runtime profile validated for the host. The server image does not bypass
 the executor's sandbox requirements when the host lacks required features.
 For the host's broader runtime and confinement setup, see
 [the system service deployment guide](../contrib/systemd/README.md).
+
+## Docker Compose demo
+
+`docker/compose.yaml` runs two separate containers (`server` and `client`)
+connected over a shared Compose network and sharing the `prdb-data` volume for
+instance state and `admin.credentials`. The `client` container runs
+`docker/client-repl-loop.sh`, which resolves the `server` service IP, fetches a
+scope if needed, and runs `prdb-client interactive-sql` in a loop that
+automatically reconnects on disconnect.
+
+Start the demo inside a delegated cgroup v2 user service:
+
+```sh
+systemd-run --user --wait --pipe --collect \
+  --unit=prdb-compose-demo.service --slice=prdb-tests.slice \
+  --property='Delegate=cpu memory pids' \
+  --property="WorkingDirectory=$PWD" \
+  "$PWD/engine/tools/with_delegated_cgroup.sh" \
+  env bash -c '
+    export PRDB_CGROUP_PARENT="$PRDB_TEST_CGROUP_PARENT"
+    export PRDB_UID=$(id -u) PRDB_GID=$(id -g)
+    exec docker compose -f docker/compose.yaml up --build
+  '
+```
+
+Attach to the interactive SQL REPL in another terminal:
+
+```sh
+PRDB_CGROUP_PARENT=/dummy docker compose -f docker/compose.yaml attach client
+```
+
+
+Teardown Demo:
+
+```sh
+systemctl --user stop prdb-compose-demo.service 2>/dev/null || true
+systemctl --user reset-failed prdb-compose-demo.service
+PRDB_CGROUP_PARENT=/dummy docker compose -f docker/compose.yaml down -v
+```

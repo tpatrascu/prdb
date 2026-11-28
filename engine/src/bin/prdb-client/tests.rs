@@ -481,6 +481,65 @@ fn scope_file_is_private_and_never_overwritten() {
 }
 
 #[test]
+fn parameters_encode_reads_json_and_writes_raw_psp1_bytes() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!(
+        "prdb-client-parameters-encode-{}-{nonce}",
+        std::process::id()
+    ));
+    fs::create_dir(&directory).unwrap();
+    let input_path = directory.join("input.json");
+    let output_path = directory.join("output.psp1");
+    fs::write(
+        &input_path,
+        br#"{"format":"PDB-SQL-PARAMETERS-1","values":[{"type":"integer","value":"1"}]}"#,
+    )
+    .unwrap();
+
+    let mut fields = HashMap::new();
+    fields.insert(
+        "--input".to_owned(),
+        std::ffi::OsString::from(input_path.as_os_str()),
+    );
+    fields.insert(
+        "--output".to_owned(),
+        std::ffi::OsString::from(output_path.as_os_str()),
+    );
+    parameters_encode(&mut fields).unwrap();
+
+    let encoded = fs::read(&output_path).unwrap();
+    assert_eq!(&encoded[..4], b"PSP1");
+    assert_eq!(
+        prdb_engine::client_sql::encode_parameter_file(
+            br#"{"format":"PDB-SQL-PARAMETERS-1","values":[{"type":"integer","value":"1"}]}"#
+        )
+        .unwrap()
+        .as_slice(),
+        encoded.as_slice()
+    );
+
+    // A second run against the same --output must fail closed rather than
+    // silently overwrite a prior encoding.
+    let mut fields = HashMap::new();
+    fields.insert(
+        "--input".to_owned(),
+        std::ffi::OsString::from(input_path.as_os_str()),
+    );
+    fields.insert(
+        "--output".to_owned(),
+        std::ffi::OsString::from(output_path.as_os_str()),
+    );
+    assert!(parameters_encode(&mut fields).is_err());
+
+    fs::remove_file(&input_path).unwrap();
+    fs::remove_file(&output_path).unwrap();
+    fs::remove_dir(directory).unwrap();
+}
+
+#[test]
 fn token_expiration_requires_positive_bounded_lifetime() {
     assert!(expiration_time(0).is_err());
     let expiry = expiration_time(60).unwrap();

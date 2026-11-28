@@ -7,13 +7,55 @@ use prdb_engine::submission_scope::RequestedScopeBuilder;
 use prdb_engine::tuple::ScalarType;
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::net::SocketAddr;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::*;
+
+/// Encode a `PDB-SQL-PARAMETERS-1` JSON document into a raw PSP1 byte file.
+/// This is the only way to produce a `--parameters FILE` input for `submit`:
+/// unlike `interactive-sql`, `submit` never parses or encodes SQL parameters
+/// itself, since a custom native program chooses its own parameter format.
+/// Use this only when the submitted program calls an SDK SQL function (such
+/// as `prdb_sdk_sql_run_statement_v1`) that expects PSP1-encoded parameters.
+pub(super) fn parameters_encode(
+    fields: &mut HashMap<String, std::ffi::OsString>,
+) -> Result<(), String> {
+    let input_path = take_path(fields, "--input")?;
+    let output_path = take_path(fields, "--output")?;
+    reject_unknown(fields)?;
+    let input = if input_path == Path::new("-") {
+        let mut bytes = Vec::new();
+        io::stdin()
+            .lock()
+            .read_to_end(&mut bytes)
+            .map_err(|error| error.to_string())?;
+        bytes
+    } else {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&input_path)
+            .map_err(|error| error.to_string())?;
+        if !file
+            .metadata()
+            .map_err(|error| error.to_string())?
+            .is_file()
+        {
+            return Err("--input must be a regular file".to_owned());
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .map_err(|error| error.to_string())?;
+        bytes
+    };
+    let encoded = prdb_engine::client_sql::encode_parameter_file(&input)
+        .map_err(|error| error.to_string())?;
+    write_scope_file(&output_path, &encoded)
+}
 
 pub(super) fn scope(
     address: SocketAddr,

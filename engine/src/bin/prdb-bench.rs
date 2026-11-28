@@ -20,11 +20,6 @@ struct Config {
     address: String,
     admin_credentials: PathBuf,
     prdb_client: PathBuf,
-    sdk_library: PathBuf,
-    include_dir: PathBuf,
-    runtime_profile: String,
-    cpu_baseline: String,
-    sdk_release: u64,
     size_gb: f64,
     bench_root: PathBuf,
     run_dir: Option<PathBuf>,
@@ -44,11 +39,6 @@ impl Default for Config {
             address: "127.0.0.1:15432".to_owned(),
             admin_credentials: PathBuf::new(),
             prdb_client: PathBuf::from("target/release/prdb-client"),
-            sdk_library: PathBuf::from("target/release-profile/sdk/libprdb_sql.so.1"),
-            include_dir: PathBuf::from("engine/include"),
-            runtime_profile: "nixos-x86_64-glibc-2.42".to_owned(),
-            cpu_baseline: "x86_64-v1".to_owned(),
-            sdk_release: 1,
             size_gb: 5.0,
             bench_root: PathBuf::from(home).join("tmp/prdb-bench"),
             run_dir: None,
@@ -69,11 +59,6 @@ fn print_help() {
          --address IP:PORT             Gateway address (default 127.0.0.1:15432)\n\
          --admin-credentials PATH      Admin credentials file (required)\n\
          --prdb-client PATH            Path to prdb-client binary\n\
-         --sdk-library PATH            Path to libprdb_sql.so.1\n\
-         --include-dir PATH            Path to SDK include directory\n\
-         --runtime-profile NAME        Runtime profile name (default nixos-x86_64-glibc-2.42)\n\
-         --cpu-baseline NAME           CPU baseline name (default x86_64-v1)\n\
-         --sdk-release N               SDK release number (default 1)\n\
          --size-gb N                   Target database size in GB (default 5.0)\n\
          --bench-root PATH             External benchmark root (default $HOME/tmp/prdb-bench)\n\
          --run-dir PATH                Explicit run directory\n\
@@ -106,13 +91,6 @@ fn parse_args() -> Result<Config, String> {
             "--address" => cfg.address = val,
             "--admin-credentials" => cfg.admin_credentials = PathBuf::from(val),
             "--prdb-client" => cfg.prdb_client = PathBuf::from(val),
-            "--sdk-library" => cfg.sdk_library = PathBuf::from(val),
-            "--include-dir" => cfg.include_dir = PathBuf::from(val),
-            "--runtime-profile" => cfg.runtime_profile = val,
-            "--cpu-baseline" => cfg.cpu_baseline = val,
-            "--sdk-release" => {
-                cfg.sdk_release = val.parse().map_err(|_| "invalid --sdk-release")?;
-            }
             "--size-gb" => {
                 cfg.size_gb = val.parse().map_err(|_| "invalid --size-gb")?;
                 if cfg.size_gb <= 0.0 {
@@ -245,24 +223,7 @@ fn run_interactive_sql(
         .arg(sql_file)
         .args(["--schema", "bench", "--scope"])
         .arg(scope)
-        .arg("--sdk-library")
-        .arg(&cfg.sdk_library)
-        .arg("--include-dir")
-        .arg(&cfg.include_dir)
-        .args([
-            "--sdk-release",
-            &cfg.sdk_release.to_string(),
-            "--cpu-baseline",
-            &cfg.cpu_baseline,
-            "--runtime-profile",
-            &cfg.runtime_profile,
-            "--compiler-identity",
-            "tcc",
-            "--deadline-ms",
-            deadline_ms,
-            "--workload",
-            workload_class,
-        ])
+        .args(["--deadline-ms", deadline_ms, "--workload", workload_class])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()
@@ -338,6 +299,34 @@ fn create_bench_users_and_credentials(
     .map_err(|e| e.to_string())?;
     let _ = &mut olap_tok;
     Ok(())
+}
+
+const LINEITEMS_PER_ORDER: usize = 4;
+
+/// Approximate on-disk bytes per lineitem row, used to size the generated
+/// dataset. This is a calibration estimate, not a measured on-disk figure:
+/// it covers this schema's exact tuple encoding (engine/src/tuple.rs: a
+/// 20-byte tuple header plus a 5-byte state/length prefix per column,
+/// encoding 4 BIGINT + 4 DECIMAL + 2 one-byte TEXT + 1 BIGINT columns = 181
+/// bytes) plus a rough allowance for its `idx_lineitem_pk` index entry. It
+/// does not account for redb's own page/B-tree overhead or MVCC version
+/// chains, so treat the resulting database size as approximate, not exact.
+const LINEITEM_ROW_BYTES: u64 = 220;
+
+/// Derive (warehouses, items, h_orders) so the generated lineitem table --
+/// which dominates total bytes the same way it does in real TPC-H --
+/// actually reaches the requested `--size-gb`. The previous formula here
+/// (`warehouses = size_gb / 0.1`, with warehouses only weakly related to
+/// row counts) undershot any requested size by roughly two orders of
+/// magnitude; this derives row counts directly from the target byte count.
+fn dataset_sizes(size_gb: f64) -> (usize, usize, usize) {
+    let target_bytes = (size_gb * 1024.0 * 1024.0 * 1024.0).round() as u64;
+    let total_lineitems =
+        (target_bytes / LINEITEM_ROW_BYTES).max(LINEITEMS_PER_ORDER as u64) as usize;
+    let h_orders = (total_lineitems / LINEITEMS_PER_ORDER).max(100);
+    let warehouses = (h_orders / 500).max(1);
+    let items = (warehouses * 200).clamp(200, 50_000_000);
+    (warehouses, items, h_orders)
 }
 
 fn compute_profile_limits(size_gb: f64) -> (u64, u64, u64, u64, u64, u64, u64) {
@@ -635,34 +624,76 @@ fn generate_and_load_data(
         );
         res
     };
-    // Scale factor: 5.0 GB -> ~50 warehouses / SF 5.0 equivalent; minimum 1 warehouse.
-    let warehouses = ((cfg.size_gb / 0.1).round() as usize).max(1);
-    let items = (warehouses * 200).min(100_000);
-    let lineitems_per_order = 4usize;
-    let h_orders = (warehouses * 500).max(100);
+    let (warehouses, items, h_orders) = dataset_sizes(cfg.size_gb);
+    let lineitems_per_order = LINEITEMS_PER_ORDER;
+    let total_lineitems = h_orders * lineitems_per_order;
+    println!(
+        "prdb-bench: sizing load for {:.2} GB -> {warehouses} warehouses, {items} items, {h_orders} orders, {total_lineitems} lineitems (~{:.2} GB estimated, approximate)",
+        cfg.size_gb,
+        total_lineitems as f64 * LINEITEM_ROW_BYTES as f64 / (1024.0 * 1024.0 * 1024.0)
+    );
 
+    // region/nation/warehouse/district are single-row-per-statement INSERTs,
+    // flushed in <=60-statement/<=60KB chunks like item/h_orders/lineitem
+    // below. warehouses now scales with the requested --size-gb (see
+    // dataset_sizes), so this can no longer be sent as one unbounded batch:
+    // doing so already silently overflowed MAX_SQL_BYTES (65,536 bytes, see
+    // engine/src/client_sql.rs) for any multi-GB target.
     let mut sql = String::with_capacity(64 * 1024);
+    let mut stmt_count = 0usize;
+    let flush_if_needed =
+        |sql: &mut String, stmt_count: &mut usize, stmt: &str| -> Result<(), String> {
+            if !sql.is_empty() && sql.len() + stmt.len() > 60_000 {
+                load_batch(sql)?;
+                sql.clear();
+                *stmt_count = 0;
+            }
+            sql.push_str(stmt);
+            *stmt_count += 1;
+            if *stmt_count >= 60 {
+                load_batch(sql)?;
+                sql.clear();
+                *stmt_count = 0;
+            }
+            Ok(())
+        };
     for r in 0..5 {
-        sql.push_str(&format!("INSERT INTO region VALUES ({r}, 'REGION_{r}');\n"));
+        flush_if_needed(
+            &mut sql,
+            &mut stmt_count,
+            &format!("INSERT INTO region VALUES ({r}, 'REGION_{r}');\n"),
+        )?;
     }
     for n in 0..25 {
-        sql.push_str(&format!(
-            "INSERT INTO nation VALUES ({n}, 'NATION_{n}', {});\n",
-            n % 5
-        ));
+        flush_if_needed(
+            &mut sql,
+            &mut stmt_count,
+            &format!(
+                "INSERT INTO nation VALUES ({n}, 'NATION_{n}', {});\n",
+                n % 5
+            ),
+        )?;
     }
     for w in 1..=warehouses {
-        sql.push_str(&format!(
-            "INSERT INTO warehouse VALUES ({w}, 'WH_{w}', 300000.00, 0.0500);\n"
-        ));
+        flush_if_needed(
+            &mut sql,
+            &mut stmt_count,
+            &format!("INSERT INTO warehouse VALUES ({w}, 'WH_{w}', 300000.00, 0.0500);\n"),
+        )?;
         for d in 1..=10 {
-            sql.push_str(&format!(
-                "INSERT INTO district VALUES ({d}, {w}, 'DIST_{w}_{d}', 30000.00, 3001);\n"
-            ));
+            flush_if_needed(
+                &mut sql,
+                &mut stmt_count,
+                &format!(
+                    "INSERT INTO district VALUES ({d}, {w}, 'DIST_{w}_{d}', 30000.00, 3001);\n"
+                ),
+            )?;
         }
     }
-    load_batch(&sql)?;
-    sql.clear();
+    if !sql.is_empty() {
+        load_batch(&sql)?;
+        sql.clear();
+    }
 
     // Load items and h_orders/lineitem in multi-row INSERTs respecting --insert-batch-size
     // (clamped to MAX_EXECUTOR_ROW_HANDLES = 4096 per transaction and <= 60 statements per batch).
@@ -761,7 +792,6 @@ fn generate_and_load_data(
 
     pending_rows = 0;
     stmt_count = 0;
-    let total_lineitems = h_orders * lineitems_per_order;
     let mut li_idx = 0usize;
     while li_idx < total_lineitems {
         let max_this_stmt = rows_per_stmt
@@ -1022,18 +1052,13 @@ fn run() -> Result<(), String> {
     let mut handles = Vec::new();
 
     if cfg.workload == WorkloadMode::Mixed || cfg.workload == WorkloadMode::Tpcc {
-        let warehouses = ((cfg.size_gb / 0.1).round() as usize).max(1);
+        let (warehouses, _, _) = dataset_sizes(cfg.size_gb);
         for tid in 0..cfg.oltp_threads {
             let cfg_ref = Arc::new(&cfg);
             let _ = cfg_ref;
             let addr = cfg.address.clone();
             let client = cfg.prdb_client.clone();
             let creds = oltp_creds.clone();
-            let sdk_lib = cfg.sdk_library.clone();
-            let inc_dir = cfg.include_dir.clone();
-            let rt_prof = cfg.runtime_profile.clone();
-            let cpu_base = cfg.cpu_baseline.clone();
-            let sdk_rel = cfg.sdk_release;
             let scope = oltp_scope.clone();
             let w_id = (tid % warehouses) + 1;
             let pay_path = query_dir.join(format!("tpcc_payment_update_t{tid}.sql"));
@@ -1058,11 +1083,6 @@ fn run() -> Result<(), String> {
                     address: addr,
                     admin_credentials: creds.clone(),
                     prdb_client: client,
-                    sdk_library: sdk_lib,
-                    include_dir: inc_dir,
-                    runtime_profile: rt_prof,
-                    cpu_baseline: cpu_base,
-                    sdk_release: sdk_rel,
                     ..Config::default()
                 };
                 let mut idx = 0usize;
@@ -1114,11 +1134,6 @@ fn run() -> Result<(), String> {
             let addr = cfg.address.clone();
             let client = cfg.prdb_client.clone();
             let creds = olap_creds.clone();
-            let sdk_lib = cfg.sdk_library.clone();
-            let inc_dir = cfg.include_dir.clone();
-            let rt_prof = cfg.runtime_profile.clone();
-            let cpu_base = cfg.cpu_baseline.clone();
-            let sdk_rel = cfg.sdk_release;
             let scope = olap_scope.clone();
             let queries = olap_paths.clone();
             let stats_c = Arc::clone(&stats);
@@ -1131,11 +1146,6 @@ fn run() -> Result<(), String> {
                     address: addr,
                     admin_credentials: creds.clone(),
                     prdb_client: client,
-                    sdk_library: sdk_lib,
-                    include_dir: inc_dir,
-                    runtime_profile: rt_prof,
-                    cpu_baseline: cpu_base,
-                    sdk_release: sdk_rel,
                     ..Config::default()
                 };
                 let mut idx = 0usize;

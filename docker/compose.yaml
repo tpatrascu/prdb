@@ -1,0 +1,79 @@
+services:
+  init-volume:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: server
+      args:
+        http_proxy: ${http_proxy:-}
+        https_proxy: ${https_proxy:-}
+        no_proxy: ${no_proxy:-}
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+    user: "0:0"
+    entrypoint: [ "/bin/chown", "-R", "${PRDB_UID:-1000}:${PRDB_GID:-1000}", "/var/lib/prdb" ]
+    volumes:
+      - prdb-data:/var/lib/prdb
+
+  server:
+    depends_on:
+      init-volume:
+        condition: service_completed_successfully
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: server
+      args:
+        http_proxy: ${http_proxy:-}
+        https_proxy: ${https_proxy:-}
+        no_proxy: ${no_proxy:-}
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+    cgroup: host
+    user: "${PRDB_UID:-1000}:${PRDB_GID:-1000}"
+    environment:
+      PRDB_CGROUP_PARENT: ${PRDB_CGROUP_PARENT:?Set PRDB_CGROUP_PARENT to a writable delegated cgroup v2 parent}
+      PRDB_SERVICE_DIR: /tmp/prdb-run
+      PRDB_BIND: 0.0.0.0:8765
+      PRDB_CONTROL_BIND: 0.0.0.0:8766
+    ports:
+      - "8765:8765"
+      - "8766:8766"
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+      - prdb-data:/var/lib/prdb
+
+  client:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: client
+      args:
+        http_proxy: ${http_proxy:-}
+        https_proxy: ${https_proxy:-}
+        no_proxy: ${no_proxy:-}
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+    depends_on:
+      - server
+    network_mode: "service:server"
+    user: "${PRDB_UID:-1000}:${PRDB_GID:-1000}"
+    stdin_open: true
+    tty: true
+    environment:
+      PRDB_SERVER_HOST: 127.0.0.1
+      PRDB_SERVER_PORT: 8765
+      PRDB_CREDENTIAL_FILE: /var/lib/prdb/admin.credentials
+      PRDB_DEFAULT_USER: prdb_admin
+      PRDB_SCHEMA: public
+      PRDB_SCOPE_FILE: /tmp/scope.psc1
+    volumes:
+      - prdb-data:/var/lib/prdb:ro
+      - ./client-repl-loop.sh:/usr/local/bin/prdb-client-repl-loop:ro
+    entrypoint: [ "/bin/bash", "/usr/local/bin/prdb-client-repl-loop" ]
+
+volumes:
+  prdb-data:

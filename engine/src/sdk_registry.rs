@@ -273,13 +273,12 @@ impl SdkLibraryRepository {
             insert_release_abis(&mut releases, entry)?;
         }
         File::open(&repository_root)?.sync_all()?;
-        if let Some(default_release) = default_release {
-            if !releases
+        if let Some(default_release) = default_release
+            && !releases
                 .values()
                 .any(|release| release.record.sdk_release == default_release)
-            {
-                return Err(SdkRegistryError::UnavailableRelease);
-            }
+        {
+            return Err(SdkRegistryError::UnavailableRelease);
         }
         Ok(Self {
             repository_root: repository_root.clone(),

@@ -38,6 +38,9 @@ const USAGE: &str = "Usage:\n\
   prdb-client admin-status --address IP:PORT --credentials ADMIN_FILE --invocation-id HEX\n\n\
   prdb-client invocation-list --address IP:PORT --credentials FILE\n    [--limit N] [--cursor HEX]\n\n\
   prdb-client scope --address IP:PORT --credentials FILE --schema NAME --output FILE \\\n    [--relation NAME --operations select,insert,update,delete [--columns NAME,...]]\n\n\
+  prdb-client parameters-encode --input FILE|- --output FILE\n\
+    Encodes a PDB-SQL-PARAMETERS-1 JSON document into raw PSP1 bytes for submit's --parameters.\n\
+    See engine/examples/queries/README.md for the full build-and-submit walkthrough.\n\n\
   prdb-client credential-remove --credentials FILE\n\n\
 Submission output is provisional until a committed terminal event. START is never retried;\n\
 if its reply is uncertain, use status with the invocation ID and a newly authenticated connection.\n\
@@ -195,6 +198,10 @@ fn run() -> Result<(), String> {
         reject_unknown(&fields)?;
         credential_remove(credentials_path)?;
         return Ok(());
+    }
+
+    if command == "parameters-encode" {
+        return parameters_encode(&mut fields);
     }
 
     if command == "interactive-sql" {
