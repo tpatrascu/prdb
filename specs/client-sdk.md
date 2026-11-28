@@ -124,7 +124,7 @@ Read-only grants reject mutation calls. Public protocol definitions for commit d
 
 ## Language and Compilation Decision
 
-Use C and TinyCC for user queries and SDK SQL/runtime code. Rust implements the database engine, including the executor host, supervisor, optimizer, storage, transactions, and authorization. This is an established choice, not an experiment among language candidates. See [toolchain implications](toolchain.md) for the component split and release gates.
+Use C for user queries and SDK SQL/runtime code. TinyCC compiles user queries; the prebuilt SQL SDK shared library is built once per release with the pinned Clang/LLVM toolchain, since that build is not on the per-query latency path. Rust implements the database engine, including the executor host, supervisor, optimizer, storage, transactions, and authorization. This is an established choice, not an experiment among language candidates. See [toolchain implications](toolchain.md) for the component split and release gates.
 
 Distribute a pinned TinyCC toolchain and prebuilt C SDK shared libraries; compile only user source per edit. Keep administrative helpers separate from executor runtime code. TinyCC runs in a bounded client subprocess and emits query.so without executing it. Engine Rust compilation is never part of the per-query path.
 

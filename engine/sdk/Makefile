@@ -1,5 +1,15 @@
 TCC ?= tcc
 TCC_AR ?= $(TCC) -ar
+SDK_CC ?= clang
+SDK_CC_TARGET ?= -march=x86-64 -mtune=generic
+SDK_CC_OPT ?= -O2
+# TinyCC never flagged these; Clang's stricter defaults do even though the
+# code is correct (missing trailing fields are C-guaranteed zero-initialized
+# host-table slices, and the flagged locals/functions are pre-existing dead
+# code in already-tested dispatch paths that predates this toolchain switch).
+# Suppress only these dead-code/style classes so -Werror still catches
+# genuine Clang-specific issues.
+SDK_CC_WARN_SUPPRESS ?= -Wno-missing-field-initializers -Wno-unused-but-set-variable -Wno-unused-function -Wno-unused-parameter -Wno-unused-variable
 SHARED_LINKER ?= cc
 PYTHON ?= python3
 TAR ?= tar
@@ -306,7 +316,7 @@ $(SDK_PIC_OBJECT_DIR):
 $(SDK_PIC_OBJECT_DIR)/sql_exec_v1.o $(SDK_PIC_OBJECT_DIR)/sql_exec_group_v1.o $(SDK_PIC_OBJECT_DIR)/sql_exec_join_v1.o: engine/sdk/sql_parameter_internal.h
 
 $(SDK_PIC_OBJECT_DIR)/%.o: engine/sdk/%.c $(wildcard $(INCLUDE_DIR)/*.h) | $(SDK_PIC_OBJECT_DIR)
-	$(TCC) -Wall -Wextra -Werror -fPIC -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
+	$(SDK_CC) -Wall -Wextra -Werror $(SDK_CC_WARN_SUPPRESS) -fPIC $(SDK_CC_TARGET) $(SDK_CC_OPT) -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
 
 $(SDK_SQL_SHARED_LIBRARY): $(SDK_PIC_OBJECTS) $(SDK_EXTRA_SHARED_OBJECTS) | $(SDK_RELEASE_DIR)
 	env -u NIX_LDFLAGS NIX_DONT_SET_RPATH=1 $(SHARED_LINKER) -shared -Wl,--no-eh-frame-hdr,-z,noexecstack,-z,defs,--hash-style=both,-soname,$(SDK_SQL_SONAME) $(SDK_PIC_OBJECTS) $(SDK_EXTRA_SHARED_OBJECTS) -o "$@"

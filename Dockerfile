@@ -5,6 +5,7 @@ RUN apt-get update \
     && apt-get install --no-install-recommends -y \
         build-essential \
         binutils \
+        clang \
         patchelf \
         python3 \
         tcc=0.9.27+git20200814.62c30a4a-1 \
