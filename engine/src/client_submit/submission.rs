@@ -379,6 +379,127 @@ impl SubmissionClient {
         )
     }
 
+    /// Upload a plain SQL-text submission (no compiled artifact) and seal it.
+    /// The server's own SQL engine parses and executes `sql_data` directly;
+    /// there is no `query.so` to build or validate.
+    pub fn upload_sql_text_and_seal(
+        &mut self,
+        requested_scope: &[u8],
+        parameters: &[u8],
+        sql_data: &[u8],
+        deadline_ms: u64,
+    ) -> Result<[u8; 16], ClientSubmitError> {
+        self.upload_sql_text_and_seal_bound(
+            requested_scope,
+            parameters,
+            sql_data,
+            deadline_ms,
+            None,
+        )
+    }
+
+    /// Upload a plain SQL-text submission bound to a retained v2 transaction.
+    /// The caller supplies a fresh package ID and must never reuse it after an
+    /// uncertain START result.
+    pub fn upload_interactive_sql_text_and_seal(
+        &mut self,
+        requested_scope: &[u8],
+        parameters: &[u8],
+        sql_data: &[u8],
+        deadline_ms: u64,
+        transaction_id: [u8; 16],
+        package_id: [u8; 16],
+    ) -> Result<[u8; 16], ClientSubmitError> {
+        self.upload_sql_text_and_seal_bound(
+            requested_scope,
+            parameters,
+            sql_data,
+            deadline_ms,
+            Some((transaction_id, package_id)),
+        )
+    }
+
+    fn upload_sql_text_and_seal_bound(
+        &mut self,
+        requested_scope: &[u8],
+        parameters: &[u8],
+        sql_data: &[u8],
+        deadline_ms: u64,
+        transaction_binding: Option<([u8; 16], [u8; 16])>,
+    ) -> Result<[u8; 16], ClientSubmitError> {
+        if deadline_ms == 0
+            || parameters.len() as u64 > MAX_PARAMETER_BYTES
+            || sql_data.len() as u64 > MAX_SQL_DATA_BYTES
+            || requested_scope.is_empty()
+            || requested_scope.len() > MAX_SCOPE_BYTES
+        {
+            return Err(ClientSubmitError::InvalidPackage);
+        }
+        if transaction_binding.is_some_and(|(transaction_id, package_id)| {
+            self.protocol_major != 2 || transaction_id == [0; 16] || package_id == [0; 16]
+        }) {
+            return Err(ClientSubmitError::InvalidPackage);
+        }
+        let empty_sha256: [u8; 32] = Sha256::digest([]).into();
+        let parameter_hash: [u8; 32] = Sha256::digest(parameters).into();
+        let sql_data_hash: [u8; 32] = Sha256::digest(sql_data).into();
+        let mut prepare = format!(
+            "{{\"submission_kind\":\"sql_text\",\"manifest_version\":0,\"manifest\":\"\",\"artifact_bytes\":\"0\",\"artifact_sha256\":\"{}\",\"parameter_bytes\":\"{}\",\"parameter_sha256\":\"{}\",\"sql_data_bytes\":\"{}\",\"sql_data_sha256\":\"{}\",\"scope_version\":1,\"requested_scope\":\"{}\",\"deadline_ms\":\"{deadline_ms}\"}}",
+            lower_hex(&empty_sha256),
+            parameters.len(),
+            lower_hex(&parameter_hash),
+            sql_data.len(),
+            lower_hex(&sql_data_hash),
+            encode_base64(requested_scope),
+        );
+        if let Some((transaction_id, package_id)) = transaction_binding {
+            prepare.pop();
+            prepare.push_str(&format!(
+                ",\"transaction_id\":\"{}\",\"package_id\":\"{}\"}}",
+                lower_hex(&transaction_id),
+                lower_hex(&package_id),
+            ));
+        }
+        let response = self.exchange(3, prepare.into_bytes())?;
+        let fields = parse_flat_response(&response.payload)?;
+        let invocation_id = fields
+            .get("invocation_id")
+            .and_then(ResponseValue::as_string)
+            .and_then(decode_hex_array::<16>)
+            .ok_or(ClientSubmitError::InvalidResponse)?;
+        let parameter_chunk_bytes = fields
+            .get("parameter_chunk_bytes")
+            .and_then(ResponseValue::as_number)
+            .filter(|bytes| (1..=self.max_chunk_bytes as u64).contains(bytes))
+            .ok_or(ClientSubmitError::InvalidResponse)?
+            as usize;
+        let sql_data_chunk_bytes = fields
+            .get("sql_data_chunk_bytes")
+            .and_then(ResponseValue::as_number)
+            .filter(|bytes| (1..=self.max_chunk_bytes as u64).contains(bytes))
+            .ok_or(ClientSubmitError::InvalidResponse)? as usize;
+        // artifact_chunk_bytes is still advertised for the shared PREPARE
+        // response shape, but no artifact chunk is ever uploaded here.
+        if fields.len() != 4 || !fields.contains_key("artifact_chunk_bytes") {
+            return Err(ClientSubmitError::InvalidResponse);
+        }
+
+        self.upload_chunks(5, invocation_id, parameters, parameter_chunk_bytes)?;
+        self.upload_chunks(
+            crate::client_protocol::CLIENT_SQL_DATA_CHUNK_KIND,
+            invocation_id,
+            sql_data,
+            sql_data_chunk_bytes,
+        )?;
+        let seal_payload = format!("{{\"invocation_id\":\"{}\"}}", lower_hex(&invocation_id));
+        let sealed = self.exchange(6, seal_payload.into_bytes())?;
+        let fields = parse_flat_response(&sealed.payload)?;
+        if fields.len() != 1 || take_string(&fields, "state").as_deref() != Some("prepared") {
+            return Err(ClientSubmitError::InvalidResponse);
+        }
+        Ok(invocation_id)
+    }
+
     pub(super) fn upload_and_seal_bound(
         &mut self,
         package_dir: &std::path::Path,

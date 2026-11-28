@@ -921,6 +921,7 @@ int32_t prdb_query_main_v1(const prdb_host_api_v1 *host,
             manifest.runtime_profile.clone(),
             ["libc.so.6".to_owned()].into_iter().collect(),
             128 * 1024 * 1024,
+            None,
         )
         .map_err(|error| format!("open SDK repository: {error:?}"))?,
     );

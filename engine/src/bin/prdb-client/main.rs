@@ -28,10 +28,9 @@ const USAGE: &str = "Usage:\n\
   prdb-client submit --address IP:PORT --credentials FILE --package DIR --receipt FILE \\\n    [--parameters FILE] [--sql-data FILE] [--deadline-ms N] [--workload operational|analytical]\n\
   prdb-client interactive-sql --address LOOPBACK:PORT --credentials FILE --default-user USER \\
     [--credential-profile USER=FILE ...] [--sql-file FILE|-] --schema NAME --scope FILE \\
-    --sdk-library FILE --include-dir DIR --sdk-release N --cpu-baseline NAME \\
-    --runtime-profile NAME --compiler-identity TEXT [--parameters FILE] [--tcc FILE] \\
-    [--shared-linker FILE] [--patchelf FILE] [--deadline-ms N] \\
+    [--parameters FILE] [--deadline-ms N] \\
     [--workload operational|analytical] (omit --sql-file for a terminal REPL)\n\\
+    This submits SQL text directly; no artifact is compiled and no SDK/toolchain options apply.\n\\
   prdb-client admin-sql --address IP:PORT --credentials ADMIN_FILE --sql-file FILE|-\n\
   prdb-client status --address IP:PORT --credentials FILE --invocation-id HEX\n\n\
   prdb-client cancel --address IP:PORT --credentials FILE --invocation-id HEX\n\n\

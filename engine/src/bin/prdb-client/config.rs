@@ -528,55 +528,10 @@ pub(super) fn run_configured_interactive(
             return Err("explicit port does not match the selected configured instance".to_owned());
         }
     }
-    if instance.sdk.native_abi != 1 {
-        return Err("interactive-sql currently generates native ABI 1 queries; select ABI 1 for this instance".to_owned());
-    }
-    let tools = config
-        .client_tools
-        .as_ref()
-        .ok_or_else(|| "client_tools must be configured before interactive-sql".to_owned())?;
-    let (include_dir, sdk_library) = local_sdk_paths(&config_path, tools, &instance.sdk)?;
-    for option in [
-        "--sdk-library",
-        "--include-dir",
-        "--sdk-release",
-        "--abi",
-        "--cpu-baseline",
-        "--runtime-profile",
-    ] {
-        if fields.remove(option).is_some() {
-            return Err(format!(
-                "{option} is read from persistent instance configuration"
-            ));
-        }
-    }
-    fields.insert("--sdk-library".to_owned(), sdk_library.into_os_string());
-    fields.insert("--include-dir".to_owned(), include_dir.into_os_string());
-    fields.insert(
-        "--sdk-release".to_owned(),
-        instance.sdk.release.to_string().into(),
-    );
-    fields.insert(
-        "--cpu-baseline".to_owned(),
-        instance.sdk.cpu_baseline.clone().into(),
-    );
-    fields.insert(
-        "--runtime-profile".to_owned(),
-        instance.sdk.runtime_profile.clone().into(),
-    );
-    fields.insert("--compiler-identity".to_owned(), "prdb-client/tcc".into());
-    fields.insert(
-        "--tcc".to_owned(),
-        resolve_client_program(&config_path, &tools.tcc).into_os_string(),
-    );
-    fields.insert(
-        "--shared-linker".to_owned(),
-        resolve_client_program(&config_path, &tools.shared_linker).into_os_string(),
-    );
-    fields.insert(
-        "--patchelf".to_owned(),
-        resolve_client_program(&config_path, &tools.patchelf).into_os_string(),
-    );
+    // Interactive SQL submits SQL text directly; it builds no client
+    // artifact, so it needs none of the instance's SDK/toolchain
+    // configuration (that remains relevant only to `submit`'s native-program
+    // packaging path).
     let profiles = instance
         .credentials
         .iter()
@@ -644,71 +599,6 @@ pub(super) fn validate_package_selection(
         }
     }
     Ok(())
-}
-
-pub(super) fn local_sdk_paths(
-    config_path: &Path,
-    tools: &ClientTools,
-    selection: &SdkSelection,
-) -> Result<(PathBuf, PathBuf), String> {
-    let include_dir = resolve_config_path(config_path, &tools.include_dir);
-    let sdk_root = include_dir
-        .parent()
-        .ok_or_else(|| "client_tools.include_dir must be inside an SDK directory".to_owned())?;
-    let release_root = sdk_root
-        .join("releases")
-        .join(&selection.target)
-        .join(&selection.cpu_baseline)
-        .join(&selection.runtime_profile);
-    let prefix = format!("sdk-{}-abis", selection.release);
-    let entries = fs::read_dir(&release_root).map_err(|error| error.to_string())?;
-    for entry in entries {
-        let entry = entry.map_err(|error| error.to_string())?;
-        let entry_name = entry.file_name();
-        let Some(abi_list) = entry_name
-            .to_string_lossy()
-            .strip_prefix(&prefix)
-            .map(str::to_owned)
-        else {
-            continue;
-        };
-        if abi_list
-            .split(',')
-            .any(|abi| abi == selection.native_abi.to_string())
-        {
-            let library = entry
-                .path()
-                .join(format!("libprdb_sql.so.{}", selection.release));
-            if library.is_file() {
-                return Ok((include_dir, library));
-            }
-        }
-    }
-    Err(format!(
-        "matching local SDK release {} is unavailable",
-        selection.release
-    ))
-}
-
-pub(super) fn resolve_config_path(config_path: &Path, value: &str) -> PathBuf {
-    let path = PathBuf::from(value);
-    if path.is_absolute() {
-        path
-    } else {
-        config_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join(path)
-    }
-}
-
-pub(super) fn resolve_client_program(config_path: &Path, value: &str) -> PathBuf {
-    let path = PathBuf::from(value);
-    if path.is_absolute() || path.components().count() == 1 {
-        path
-    } else {
-        resolve_config_path(config_path, value)
-    }
 }
 
 pub(super) fn verify_local_sdk_build(

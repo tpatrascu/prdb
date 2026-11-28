@@ -25,8 +25,8 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
         manifest_v1_from_elf,
     };
     use prdb_engine::supervisor::{
-        ChunkKind, PrepareSubmission, StagingLimits, StagingStore, SubmissionMetadata,
-        SubmissionMetadataValidator,
+        ChunkKind, PrepareSubmission, StagingLimits, StagingStore, SubmissionKind,
+        SubmissionMetadata, SubmissionMetadataValidator,
     };
     use prdb_engine::supervisor_ipc::{
         GatewayAbortReason, GatewayAdmissionConfig, GatewayExecutorConfig, GatewayTerminalDecision,
@@ -395,6 +395,7 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
             "nixos-x86_64-glibc-2.42".to_owned(),
             ["libc.so.6".to_owned()].into_iter().collect(),
             128 * 1024 * 1024,
+            None,
         )
         .map_err(|error| format!("open SQL SDK repository: {error:?}"))?,
     );
@@ -2761,6 +2762,7 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
     let reservation = staging.prepare(
         owner,
         PrepareSubmission {
+            submission_kind: SubmissionKind::NativeArtifact,
             manifest_version: 1,
             manifest: manifest.clone(),
             artifact_bytes: u64::try_from(artifact.len())?,
@@ -3069,6 +3071,7 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
         let ordered_reservation = staging.prepare(
             ordered_owner,
             PrepareSubmission {
+                submission_kind: SubmissionKind::NativeArtifact,
                 manifest_version: 1,
                 manifest: manifest.clone(),
                 artifact_bytes: u64::try_from(artifact.len())?,
@@ -4342,6 +4345,7 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
     let cancellation_reservation = staging.prepare(
         cancellation_owner,
         PrepareSubmission {
+            submission_kind: SubmissionKind::NativeArtifact,
             manifest_version: 1,
             manifest: manifest.clone(),
             artifact_bytes: u64::try_from(artifact.len())?,
@@ -4421,6 +4425,7 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
         let worker_reservation = staging.prepare(
             worker_owner,
             PrepareSubmission {
+                submission_kind: SubmissionKind::NativeArtifact,
                 manifest_version: 1,
                 manifest: manifest.clone(),
                 artifact_bytes: u64::try_from(artifact.len())?,
@@ -4506,6 +4511,7 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
     let saturated_reservation = staging.prepare(
         saturated_owner,
         PrepareSubmission {
+            submission_kind: SubmissionKind::NativeArtifact,
             manifest_version: 1,
             manifest: manifest.clone(),
             artifact_bytes: u64::try_from(artifact.len())?,
@@ -6570,6 +6576,7 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
         let aggregate_reservation = staging.prepare(
             aggregate_owner,
             PrepareSubmission {
+                submission_kind: SubmissionKind::NativeArtifact,
                 manifest_version: 1,
                 manifest: manifest.clone(),
                 artifact_bytes: u64::try_from(artifact.len())?,
@@ -6994,6 +7001,7 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
             let redacted_reservation = staging.prepare(
                 redacted_owner,
                 PrepareSubmission {
+                    submission_kind: SubmissionKind::NativeArtifact,
                     manifest_version: 1,
                     manifest: manifest.clone(),
                     artifact_bytes: u64::try_from(artifact.len())?,
@@ -7150,6 +7158,7 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
         let bigint_reservation = bigint_staging.prepare(
             bigint_owner,
             PrepareSubmission {
+                submission_kind: SubmissionKind::NativeArtifact,
                 manifest_version: 1,
                 manifest: manifest.clone(),
                 artifact_bytes: u64::try_from(artifact.len())?,
@@ -7576,6 +7585,7 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
     let output_pressure_reservation = staging.prepare(
         owner,
         PrepareSubmission {
+            submission_kind: SubmissionKind::NativeArtifact,
             manifest_version: 1,
             manifest: manifest.clone(),
             artifact_bytes: u64::try_from(artifact.len())?,
@@ -7756,6 +7766,7 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
     let cancelled_output_reservation = staging.prepare(
         owner,
         PrepareSubmission {
+            submission_kind: SubmissionKind::NativeArtifact,
             manifest_version: 1,
             manifest: manifest.clone(),
             artifact_bytes: u64::try_from(artifact.len())?,
@@ -7920,6 +7931,7 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
     let timed_out_output_reservation = staging.prepare(
         owner,
         PrepareSubmission {
+            submission_kind: SubmissionKind::NativeArtifact,
             manifest_version: 1,
             manifest: manifest.clone(),
             artifact_bytes: u64::try_from(artifact.len())?,
@@ -8081,6 +8093,7 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
         .prepare(
             failure_owner,
             PrepareSubmission {
+                submission_kind: SubmissionKind::NativeArtifact,
                 manifest_version: 1,
                 manifest: manifest.clone(),
                 artifact_bytes: u64::try_from(artifact.len())?,
@@ -8220,6 +8233,7 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
         .prepare(
             target_limit_owner,
             PrepareSubmission {
+                submission_kind: SubmissionKind::NativeArtifact,
                 manifest_version: 1,
                 manifest: manifest.clone(),
                 artifact_bytes: u64::try_from(artifact.len())?,
@@ -8351,6 +8365,7 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
     let stage_failure_reservation = stage_failure_staging.prepare(
         stage_failure_owner,
         PrepareSubmission {
+            submission_kind: SubmissionKind::NativeArtifact,
             manifest_version: 1,
             manifest: manifest.clone(),
             artifact_bytes: u64::try_from(artifact.len())?,
@@ -8486,6 +8501,7 @@ pub(super) fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits()
     let restricted_reservation = restricted_staging.prepare(
         restricted_owner,
         PrepareSubmission {
+            submission_kind: SubmissionKind::NativeArtifact,
             manifest_version: 1,
             manifest: manifest.clone(),
             artifact_bytes: u64::try_from(restricted_artifact.len())?,

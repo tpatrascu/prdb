@@ -56,6 +56,7 @@ mod service {
         profile_runtime: Option<String>,
         sdk_repository_dir: Option<PathBuf>,
         sdk_repository_max_bytes: Option<u64>,
+        default_sdk_release: Option<u32>,
         dependencies: HashSet<String>,
         retention_seconds: Option<u64>,
         max_rows: Option<usize>,
@@ -101,6 +102,7 @@ mod service {
              --runtime-read-execute PATH (repeatable) --runtime-profile NAME\n\
              --cpu-baseline NAME --allowed-dependency NAME (repeatable)\n\
              [--sdk-repository-dir PATH --sdk-repository-max-bytes N]\n\
+             [--default-sdk-release N] (required for plain SQL-text submissions)\n\
              --retention-seconds N --max-rows N --max-bytes N\n\
              [--max-total-result-bytes N] (default 67108864)\n\
              [--analytical-max-total-result-bytes N] (overrides the operational value)\n\
@@ -217,6 +219,7 @@ mod service {
                 options
                     .sdk_repository_max_bytes
                     .unwrap_or(1024 * 1024 * 1024),
+                options.default_sdk_release,
             )
             .map_err(|error| format!("invalid SQL SDK library repository: {error:?}"))?,
         );
@@ -464,6 +467,7 @@ mod service {
                 "--sdk-repository-max-bytes" => {
                     set!(sdk_repository_max_bytes, value.parse::<u64>()?)
                 }
+                "--default-sdk-release" => set!(default_sdk_release, value.parse::<u32>()?),
                 "--allowed-dependency" => {
                     if !options.dependencies.insert(value) {
                         return Err("duplicate --allowed-dependency".into());

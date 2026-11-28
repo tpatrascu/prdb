@@ -951,9 +951,11 @@ fn build_command(
             "executor path is not a regular file",
         ));
     }
+    let submission_kind = submission.metadata().submission_kind;
     let artifact_directory = PrivateArtifactDirectory::create(
         &config.scratch_parent,
         submission.invocation_id(),
+        submission_kind,
         submission.artifact(),
         submission.sdk_library_pin(),
     )?;
@@ -978,9 +980,23 @@ fn build_command(
 
     let [planner_fd, executor_fd, optimizer_fd, result_fd, spill_fd] = channels.worker_fds();
     let mut command = Command::new(executor_path);
+    match submission_kind {
+        crate::supervisor::SubmissionKind::NativeArtifact => {
+            command
+                .arg("--library")
+                .arg(&artifact_directory.artifact_path);
+        }
+        crate::supervisor::SubmissionKind::SqlText => {
+            let sql_library_path = artifact_directory.sql_library_path().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "SqlText submission has no staged SQL engine library",
+                )
+            })?;
+            command.arg("--sql-library").arg(sql_library_path);
+        }
+    }
     command
-        .arg("--library")
-        .arg(&artifact_directory.artifact_path)
         .arg("--parameters-fd")
         .arg(parameters.as_raw_fd().to_string())
         .arg("--sql-data-fd")
@@ -1093,6 +1109,14 @@ struct PrivateArtifactDirectory {
 }
 
 impl PrivateArtifactDirectory {
+    /// Path of the SQL engine library staged for a `SqlText` submission,
+    /// which has no `query.so` at all. `None` until `populate` runs.
+    fn sql_library_path(&self) -> Option<PathBuf> {
+        self._sdk_library_pin
+            .as_ref()
+            .map(|pin| self.path.join(pin.soname()))
+    }
+
     fn create_empty(parent: &Path, invocation_id: [u8; 16]) -> io::Result<Self> {
         let parent = parent.canonicalize()?;
         if !parent.is_dir() {
@@ -1120,18 +1144,21 @@ impl PrivateArtifactDirectory {
 
     fn populate(
         &mut self,
+        submission_kind: crate::supervisor::SubmissionKind,
         artifact: &[u8],
         sdk_library_pin: Option<&crate::sdk_registry::SdkLibraryPin>,
     ) -> io::Result<()> {
         self._sdk_library_pin = sdk_library_pin.cloned();
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o500)
-            .open(&self.artifact_path)?;
-        file.write_all(artifact)?;
-        file.sync_all()?;
-        fs::set_permissions(&self.artifact_path, fs::Permissions::from_mode(0o500))?;
+        if submission_kind == crate::supervisor::SubmissionKind::NativeArtifact {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o500)
+                .open(&self.artifact_path)?;
+            file.write_all(artifact)?;
+            file.sync_all()?;
+            fs::set_permissions(&self.artifact_path, fs::Permissions::from_mode(0o500))?;
+        }
         if let Some(pin) = sdk_library_pin {
             let staged_library_path = self.path.join(pin.soname());
             let mut source = File::open(pin.library_path())?;
@@ -1150,11 +1177,12 @@ impl PrivateArtifactDirectory {
     fn create(
         parent: &Path,
         invocation_id: [u8; 16],
+        submission_kind: crate::supervisor::SubmissionKind,
         artifact: &[u8],
         sdk_library_pin: Option<&crate::sdk_registry::SdkLibraryPin>,
     ) -> io::Result<Self> {
         let mut directory = Self::create_empty(parent, invocation_id)?;
-        directory.populate(artifact, sdk_library_pin)?;
+        directory.populate(submission_kind, artifact, sdk_library_pin)?;
         Ok(directory)
     }
 }
@@ -1482,12 +1510,17 @@ fn launch_on_prewarmed_worker<T, E>(
             })
         })?;
 
+        let submission_kind = submission.metadata().submission_kind;
         let artifact_dir = worker
             .artifact_directory
             .as_mut()
             .expect("worker artifact dir");
         artifact_dir
-            .populate(submission.artifact(), submission.sdk_library_pin())
+            .populate(
+                submission_kind,
+                submission.artifact(),
+                submission.sdk_library_pin(),
+            )
             .map_err(|error| {
                 ExecutorStartError::Launch(ExecutorLaunchError {
                     launch_error: error,
@@ -1540,8 +1573,22 @@ fn launch_on_prewarmed_worker<T, E>(
             fds.push(spill_fd);
         }
 
-        let path_bytes = artifact_dir.artifact_path.as_os_str().as_bytes();
-        let mut payload = Vec::with_capacity(17 + path_bytes.len());
+        let library_path = match submission_kind {
+            crate::supervisor::SubmissionKind::NativeArtifact => artifact_dir.artifact_path.clone(),
+            crate::supervisor::SubmissionKind::SqlText => {
+                artifact_dir.sql_library_path().ok_or_else(|| {
+                    ExecutorStartError::Launch(ExecutorLaunchError {
+                        launch_error: io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "SqlText submission has no staged SQL engine library",
+                        ),
+                        cleanup_error: None,
+                    })
+                })?
+            }
+        };
+        let path_bytes = library_path.as_os_str().as_bytes();
+        let mut payload = Vec::with_capacity(18 + path_bytes.len());
         payload.extend_from_slice(&effective_profile.max_total_result_bytes.to_le_bytes());
         payload.extend_from_slice(
             &effective_profile
@@ -1549,6 +1596,9 @@ fn launch_on_prewarmed_worker<T, E>(
                 .to_le_bytes(),
         );
         payload.push(u8::from(spill_session.is_some()));
+        payload.push(u8::from(
+            submission_kind == crate::supervisor::SubmissionKind::SqlText,
+        ));
         payload.extend_from_slice(&(path_bytes.len() as u32).to_le_bytes());
         payload.extend_from_slice(path_bytes);
 
@@ -1675,8 +1725,14 @@ mod tests {
         let parent = std::env::temp_dir().join(format!("prdb-launch-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&parent);
         std::fs::create_dir(&parent).unwrap();
-        let directory =
-            PrivateArtifactDirectory::create(&parent, [7; 16], b"artifact", None).unwrap();
+        let directory = PrivateArtifactDirectory::create(
+            &parent,
+            [7; 16],
+            crate::supervisor::SubmissionKind::NativeArtifact,
+            b"artifact",
+            None,
+        )
+        .unwrap();
         assert_eq!(
             std::fs::read(&directory.artifact_path).unwrap(),
             b"artifact"

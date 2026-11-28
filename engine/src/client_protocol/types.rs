@@ -154,6 +154,7 @@ pub struct ClientChunk {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClientPrepare {
+    pub submission_kind: crate::supervisor::SubmissionKind,
     pub manifest_version: u32,
     pub manifest: Vec<u8>,
     pub artifact_bytes: u64,

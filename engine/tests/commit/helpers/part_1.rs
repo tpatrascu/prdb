@@ -428,8 +428,8 @@ pub fn run_sandboxed_forged_handle_client(
     use prdb_engine::client_protocol::{ClientConnectionSession, ClientFrame, ClientMode};
     use prdb_engine::ipc::{Operation, read_frame};
     use prdb_engine::supervisor::{
-        ChunkKind, PrepareSubmission, StagingLimits, StagingStore, SubmissionMetadata,
-        SubmissionMetadataValidator,
+        ChunkKind, PrepareSubmission, StagingLimits, StagingStore, SubmissionKind,
+        SubmissionMetadata, SubmissionMetadataValidator,
     };
     use prdb_engine::supervisor_ipc::{
         GatewayAdmissionConfig, GatewayExecutorConfig, GatewayTerminalDecision,
@@ -483,6 +483,7 @@ pub fn run_sandboxed_forged_handle_client(
     let reservation = staging.prepare(
         owner,
         PrepareSubmission {
+            submission_kind: SubmissionKind::NativeArtifact,
             manifest_version: 1,
             manifest: manifest.clone(),
             artifact_bytes: u64::try_from(artifact.len())?,

@@ -95,8 +95,18 @@ impl Default for StagingLimits {
     }
 }
 
+/// Whether a submission carries a client-compiled native artifact or is a
+/// plain SQL-text submission with no artifact at all. SqlText submissions
+/// are executed by the server's own fixed SQL engine; no client code runs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SubmissionKind {
+    NativeArtifact,
+    SqlText,
+}
+
 #[derive(Clone, Debug)]
 pub struct PrepareSubmission {
+    pub submission_kind: SubmissionKind,
     pub manifest_version: u32,
     pub manifest: Vec<u8>,
     pub artifact_bytes: u64,
@@ -114,6 +124,7 @@ pub struct PrepareSubmission {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SubmissionMetadata {
+    pub submission_kind: SubmissionKind,
     pub manifest_version: u32,
     pub manifest: Vec<u8>,
     pub scope_version: u32,
@@ -473,16 +484,26 @@ impl StagingStore {
         let max_manifest =
             MAX_MANIFEST_BYTES.min(request.workload_profile.max_manifest_bytes as usize);
         let max_scope = MAX_SCOPE_BYTES.min(request.workload_profile.max_scope_bytes as usize);
+        let artifact_ok = match request.submission_kind {
+            SubmissionKind::NativeArtifact => {
+                request.artifact_bytes != 0 && request.artifact_bytes <= max_artifact
+            }
+            SubmissionKind::SqlText => request.artifact_bytes == 0,
+        };
+        let manifest_ok = match request.submission_kind {
+            SubmissionKind::NativeArtifact => {
+                !request.manifest.is_empty() && request.manifest.len() <= max_manifest
+            }
+            SubmissionKind::SqlText => request.manifest.is_empty(),
+        };
         if owner.connection_id == [0; 16]
             || owner.principal_id == [0; 16]
-            || request.artifact_bytes == 0
-            || request.artifact_bytes > max_artifact
+            || !artifact_ok
+            || !manifest_ok
             || request.parameter_bytes > max_params
             || request.sql_data_bytes > max_sql_data
             || request.deadline_ms == 0
             || request.deadline_ms > max_deadline
-            || request.manifest.is_empty()
-            || request.manifest.len() > max_manifest
             || request.requested_scope.is_empty()
             || request.requested_scope.len() > max_scope
         {
@@ -584,6 +605,7 @@ impl StagingStore {
                 connection_id: owner.connection_id,
                 principal_id: owner.principal_id,
                 metadata: SubmissionMetadata {
+                    submission_kind: request.submission_kind,
                     manifest_version: request.manifest_version,
                     manifest: request.manifest,
                     scope_version: request.scope_version,
@@ -1533,6 +1555,7 @@ mod tests {
 
     fn request(artifact: &[u8], parameters: &[u8]) -> PrepareSubmission {
         PrepareSubmission {
+            submission_kind: SubmissionKind::NativeArtifact,
             manifest_version: 1,
             manifest: b"manifest".to_vec(),
             artifact_bytes: artifact.len() as u64,
@@ -1637,6 +1660,67 @@ mod tests {
         }
         store.seal(owner, reservation.invocation_id).unwrap();
         reservation.invocation_id
+    }
+
+    #[test]
+    fn sql_text_submission_requires_no_artifact_and_accepts_empty_manifest() {
+        struct AcceptSqlText;
+        impl SubmissionMetadataValidator for AcceptSqlText {
+            fn supports_versions(&self, manifest_version: u32, scope_version: u32) -> bool {
+                (manifest_version == 0 || manifest_version == 1) && scope_version == 1
+            }
+
+            fn validate(&self, metadata: &SubmissionMetadata) -> bool {
+                metadata.submission_kind == SubmissionKind::SqlText
+                    && metadata.manifest.is_empty()
+                    && metadata.requested_scope == requested_scope_fixture()
+            }
+        }
+
+        let staging = store(Arc::new(AcceptSqlText));
+        let owner = make_owner(31, 32);
+        let reservation = staging
+            .prepare(
+                owner,
+                PrepareSubmission {
+                    submission_kind: SubmissionKind::SqlText,
+                    manifest_version: 0,
+                    manifest: Vec::new(),
+                    artifact_bytes: 0,
+                    artifact_sha256: Sha256::digest([]).into(),
+                    scope_version: 1,
+                    requested_scope: requested_scope_fixture(),
+                    parameter_bytes: 0,
+                    parameter_sha256: Sha256::digest([]).into(),
+                    sql_data_bytes: 4,
+                    sql_data_sha256: Sha256::digest(b"sql!").into(),
+                    deadline_ms: 30_000,
+                    workload_profile_id: crate::workload_profile::SMALL_OPERATIONAL_PROFILE_ID,
+                    workload_profile:
+                        crate::workload_profile::WorkloadProfileLimits::small_operational(),
+                },
+            )
+            .unwrap();
+        staging
+            .upload_chunk(
+                owner,
+                reservation.invocation_id,
+                ChunkKind::SqlData,
+                0,
+                b"sql!",
+            )
+            .unwrap();
+        staging.seal(owner, reservation.invocation_id).unwrap();
+
+        // A SqlText submission with a nonzero/mismatched artifact is rejected
+        // at prepare(), never reaching upload or seal.
+        let rejected_owner = make_owner(33, 34);
+        let mut rejected = request(b"x", b"");
+        rejected.submission_kind = SubmissionKind::SqlText;
+        assert_eq!(
+            staging.prepare(rejected_owner, rejected),
+            Err(StagingError::InvalidRequest)
+        );
     }
 
     #[test]
@@ -1853,6 +1937,7 @@ mod tests {
                 "test-runtime".to_owned(),
                 allowed.clone(),
                 128 * 1024 * 1024,
+                None,
             )
             .unwrap(),
         );

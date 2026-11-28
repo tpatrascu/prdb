@@ -2,7 +2,7 @@
 
 ## Responsibilities and Isolation
 
-Implement the optimizer in Rust and transform structured query requests into logical and physical plans. TinyCC produces the submitted C query library in the client using the prebuilt C SDK; the server optimizer does not compile that program. The executor's [SQL library](sql-library.md) owns SQL text parsing and operator execution; the planner validates its structured input, resolves authorized schema/types, and performs optimization. Run in a process separate from both the executor and storage manager: optimizer complexity, malformed inputs, and resource exhaustion must not compromise storage memory.
+Implement the optimizer in Rust and transform structured query requests into logical and physical plans. For a hand-written native program, TinyCC produces the submitted C query library in the client using the prebuilt C SDK; the server optimizer does not compile that program. Ordinary SQL (`prdb-client interactive-sql`) instead submits SQL text directly with no client compilation step at all (`submission_kind: "sql_text"`); the executor's SQL engine is still the same fixed, server-selected code, just reached without a client-supplied `query.so` in the loop. The executor's [SQL library](sql-library.md) owns SQL text parsing and operator execution either way; the planner validates its structured input, resolves authorized schema/types, and performs optimization. Run in a process separate from both the executor and storage manager: optimizer complexity, malformed inputs, and resource exhaustion must not compromise storage memory.
 
 The planner is not an authorization authority. A compromised planner must not be able to mint execution grants or cause storage to release unauthorized values. Treat its plans as untrusted structured input. All client-built query artifacts are untrusted native code regardless of compiler or SDK provenance.
 
@@ -11,10 +11,18 @@ Cardinality thresholds, estimate row/candidate ceilings, planner request allowan
 ## Pipeline
 
 ```text
+native-artifact submission:
 client: user C source + prebuilt C SDK -> TinyCC compiler/linker -> query.so
 executor: query.so -> SDK SQL API -> structured planning request
 optimizer: validated request -> logical plan -> physical plan
 executor: SDK interpreter executes plan -> user code consumes results
+
+plain SQL-text submission (submission_kind: "sql_text"):
+client: SQL text + parameters + scope, no compiled artifact
+executor: dlsym the staged SQL engine library's batch entry points directly
+          -> SDK SQL API -> structured planning request
+optimizer: validated request -> logical plan -> physical plan
+executor: SDK interpreter executes plan -> result rows returned to caller
 ```
 
 The prebuilt SDK executes physical plans with an interpreter initially. There is no server compilation backend in the baseline; adding one requires an explicit future design decision.

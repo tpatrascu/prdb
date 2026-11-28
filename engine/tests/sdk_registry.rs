@@ -71,6 +71,7 @@ fn repository_install_is_durable_listable_and_pin_safe_for_removal() {
         "test-runtime".to_owned(),
         allowed.clone(),
         128 * 1024 * 1024,
+        None,
     )
     .unwrap();
     let installed = repository.install(&metadata, &library, &allowed).unwrap();
@@ -85,6 +86,7 @@ fn repository_install_is_durable_listable_and_pin_safe_for_removal() {
         "test-runtime".to_owned(),
         allowed.clone(),
         128 * 1024 * 1024,
+        None,
     )
     .unwrap();
     assert_eq!(reopened_while_installed.list().unwrap().len(), 1);
@@ -109,6 +111,7 @@ fn repository_install_is_durable_listable_and_pin_safe_for_removal() {
         "test-runtime".to_owned(),
         allowed,
         128 * 1024 * 1024,
+        None,
     )
     .unwrap();
     assert!(reopened.list().unwrap().is_empty());
@@ -131,6 +134,7 @@ fn repository_streamed_install_is_contiguous_owner_bound_and_durable() {
         "test-runtime".to_owned(),
         allowed,
         128 * 1024 * 1024,
+        None,
     )
     .unwrap();
     let digest: [u8; 32] = Sha256::digest(&library).into();
@@ -188,6 +192,7 @@ fn repository_streamed_install_is_contiguous_owner_bound_and_durable() {
         "test-runtime".to_owned(),
         HashSet::from(["libc.so.6".to_owned()]),
         128 * 1024 * 1024,
+        None,
     )
     .unwrap();
     assert_eq!(reopened.list().unwrap(), vec![installed.clone()]);
@@ -228,6 +233,7 @@ fn repository_streamed_install_is_contiguous_owner_bound_and_durable() {
         "test-runtime".to_owned(),
         HashSet::from(["libc.so.6".to_owned()]),
         128 * 1024 * 1024,
+        None,
     )
     .unwrap();
     assert!(matches!(
@@ -258,6 +264,7 @@ fn repository_rejects_identity_replacement_digest_corruption_and_disallowed_depe
         "test-runtime".to_owned(),
         allowed.clone(),
         128 * 1024 * 1024,
+        None,
     )
     .unwrap();
     repository.install(&metadata, &library, &allowed).unwrap();
@@ -332,9 +339,51 @@ fn repository_open_discards_only_incomplete_install_staging_directories() {
         "test-runtime".to_owned(),
         HashSet::from(["libc.so.6".to_owned()]),
         128 * 1024 * 1024,
+        None,
     )
     .unwrap();
     assert!(repository.list().unwrap().is_empty());
     assert_eq!(fs::read_dir(root.join("repository")).unwrap().count(), 0);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn default_release_must_exist_and_resolve_default_fails_closed_when_unset() {
+    let root = temp_dir();
+    fs::create_dir_all(&root).unwrap();
+
+    // No installed releases: a configured default_release that matches
+    // nothing fails closed at open(), before any SQL-text submission could
+    // ever be admitted against it.
+    assert_eq!(
+        SdkLibraryRepository::open(
+            &root.join("repository-missing-default"),
+            "linux-x86_64".to_owned(),
+            "x86_64-v1".to_owned(),
+            "test-runtime".to_owned(),
+            HashSet::from(["libc.so.6".to_owned()]),
+            128 * 1024 * 1024,
+            Some(1),
+        )
+        .err(),
+        Some(SdkRegistryError::UnavailableRelease)
+    );
+
+    // No default configured at all: resolve_default fails closed rather than
+    // guessing which installed release plain SQL-text submissions should use.
+    let repository = SdkLibraryRepository::open(
+        &root.join("repository-no-default"),
+        "linux-x86_64".to_owned(),
+        "x86_64-v1".to_owned(),
+        "test-runtime".to_owned(),
+        HashSet::from(["libc.so.6".to_owned()]),
+        128 * 1024 * 1024,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        repository.resolve_default().err(),
+        Some(SdkRegistryError::UnavailableRelease)
+    );
     fs::remove_dir_all(root).unwrap();
 }

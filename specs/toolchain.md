@@ -4,6 +4,8 @@
 
 Use C and TinyCC for user query compilation and the query SDK, including its SQL parser/interpreter and runtime stubs. The separately packaged external network submission helper may use Rust with client bindings; it is not linked into query.so. Use Rust for database-engine processes and trusted implementation code. This replaces the earlier language-selection experiment; benchmarks validate the chosen design rather than select its languages.
 
+Ordinary SQL submission (`prdb-client interactive-sql`) does not use TinyCC at all: the client sends SQL text, parameters, and scope directly (`submission_kind: "sql_text"`), and the confined executor calls the same prebuilt C SQL SDK's batch entry points directly, with no client compilation step and no client-supplied artifact. TinyCC remains required only for the hand-written native-program path (`prdb-client submit`, `prdb-packager`).
+
 | Component | Language / build | Execution location |
 | --- | --- | --- |
 | User query library | C compiled and linked with pinned TinyCC | Sandboxed executor |

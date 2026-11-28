@@ -734,8 +734,8 @@ pub fn run_sandboxed_v3_sql_error_fixture(
         manifest_v1_from_elf,
     };
     use prdb_engine::supervisor::{
-        ChunkKind, PrepareSubmission, StagingLimits, StagingStore, SubmissionMetadata,
-        SubmissionMetadataValidator,
+        ChunkKind, PrepareSubmission, StagingLimits, StagingStore, SubmissionKind,
+        SubmissionMetadata, SubmissionMetadataValidator,
     };
     use prdb_engine::supervisor_ipc::{
         GatewayAdmissionConfig, GatewayExecutorConfig, GatewayTerminalDecision,
@@ -858,6 +858,7 @@ pub fn run_sandboxed_v3_sql_error_fixture(
                 runtime_profile.to_owned(),
                 ["libc.so.6".to_owned()].into_iter().collect(),
                 128 * 1024 * 1024,
+                None,
             )
             .map_err(|error| format!("open test SDK repository: {error:?}"))?;
             let metadata = std::fs::read(release_dir.join("sdk-release.json"))?;
@@ -905,6 +906,7 @@ pub fn run_sandboxed_v3_sql_error_fixture(
     let reservation = staging.prepare(
         owner,
         PrepareSubmission {
+            submission_kind: SubmissionKind::NativeArtifact,
             manifest_version: 1,
             manifest,
             artifact_bytes: u64::try_from(artifact.len())?,

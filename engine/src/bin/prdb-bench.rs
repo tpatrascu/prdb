@@ -888,6 +888,7 @@ fn prepare_sdk_repo(repo_dir: &Path, release_dir: &Path) -> Result<(), String> {
         "nixos-x86_64-glibc-2.42".to_owned(),
         allowed.clone(),
         1024 * 1024 * 1024,
+        None,
     )
     .map_err(|e| format!("failed to open sdk repo: {e:?}"))?;
 

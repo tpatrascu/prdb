@@ -59,6 +59,49 @@ include!("query_abi_records.rs");
 
 pub type QueryMainV1 = unsafe extern "C" fn(*const HostApiV1, *const InvocationV1) -> c_int;
 
+/// `prdb_sdk_sql_batch_statement_v1` — one PSQ1 statement slice, borrowed
+/// from the decoded `sql_data` payload.
+#[repr(C)]
+pub struct SqlBatchStatementV1 {
+    pub sql: *const u8,
+    pub sql_len: u64,
+    pub parameters: *const u8,
+    pub parameters_len: u64,
+}
+
+/// Callback shape required by `prdb_sdk_sql_run_batch_v1` to run one PSQ1
+/// statement. Matches `prdb_sdk_sql_batch_statement_runner_v1_fn`.
+pub type QuerySqlBatchStatementRunnerV1 = unsafe extern "C" fn(
+    host: *const HostApiV1,
+    schema: *const u8,
+    schema_len: u32,
+    statement: *const SqlBatchStatementV1,
+) -> i32;
+
+/// `prdb_sdk_sql_run_batch_v1`, exported with default visibility from the SQL
+/// engine release library. Decodes PSQ1 `sql_data`, runs each statement
+/// through the supplied runner in order, and latches on the first failure.
+pub type QuerySqlRunBatchV1 = unsafe extern "C" fn(
+    host: *const HostApiV1,
+    invocation: *const InvocationV1,
+    run_statement: QuerySqlBatchStatementRunnerV1,
+) -> c_int;
+
+/// `prdb_sdk_sql_run_statement_v1`, exported with default visibility from the
+/// SQL engine release library. Runs one supported query/DML statement.
+pub type QuerySqlRunStatementV1 = unsafe extern "C" fn(
+    host: *const HostApiV1,
+    schema: *const u8,
+    schema_len: u32,
+    sql: *const u8,
+    sql_len: u64,
+    parameters: *const u8,
+    parameters_len: u64,
+) -> c_int;
+
+pub const QUERY_SQL_RUN_BATCH_SYMBOL: &str = "prdb_sdk_sql_run_batch_v1";
+pub const QUERY_SQL_RUN_STATEMENT_SYMBOL: &str = "prdb_sdk_sql_run_statement_v1";
+
 include!("query_abi_layout_assertions.rs");
 
 /// Invocation record whose parameter and SQL data pointers are tied to the

@@ -94,6 +94,10 @@ pub struct SdkLibraryRepository {
     uploads: Mutex<HashMap<[u8; 16], SdkUpload>>,
     completed_operations: RwLock<HashMap<[u8; 16], SdkLibraryOperationOutcome>>,
     operation_gate: Mutex<()>,
+    /// Release used for plain SQL-text submissions, which carry no client
+    /// manifest and so cannot declare a dependency to resolve against.
+    /// Server-configured only; never influenced by client input.
+    default_release: Option<u32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -159,6 +163,7 @@ impl SdkLibraryRepository {
         runtime_profile: String,
         allowed_dependencies: HashSet<String>,
         max_repository_bytes: u64,
+        default_release: Option<u32>,
     ) -> Result<Self, SdkRegistryError> {
         if max_repository_bytes == 0
             || target != "linux-x86_64"
@@ -268,6 +273,14 @@ impl SdkLibraryRepository {
             insert_release_abis(&mut releases, entry)?;
         }
         File::open(&repository_root)?.sync_all()?;
+        if let Some(default_release) = default_release {
+            if !releases
+                .values()
+                .any(|release| release.record.sdk_release == default_release)
+            {
+                return Err(SdkRegistryError::UnavailableRelease);
+            }
+        }
         Ok(Self {
             repository_root: repository_root.clone(),
             target,
@@ -279,6 +292,7 @@ impl SdkLibraryRepository {
             uploads: Mutex::new(HashMap::new()),
             completed_operations: RwLock::new(completed_operations),
             operation_gate: Mutex::new(()),
+            default_release,
         })
     }
 
@@ -314,6 +328,31 @@ impl SdkLibraryRepository {
         {
             return Err(SdkRegistryError::IncompatibleProfile);
         }
+        let library = read_regular(&release.library_path, MAX_RELEASE_LIBRARY_BYTES)?;
+        if sha256(&library) != release.record.sha256 {
+            return Err(SdkRegistryError::DigestMismatch);
+        }
+        validate_library(&release.record, &library)?;
+        release.pins.fetch_add(1, Ordering::AcqRel);
+        Ok(SdkLibraryPin(Arc::clone(release)))
+    }
+
+    /// Resolve and pin the server-configured default release for plain
+    /// SQL-text submissions, which carry no client manifest to resolve
+    /// against. The default is fixed at supervisor startup, never from
+    /// client input.
+    pub fn resolve_default(&self) -> Result<SdkLibraryPin, SdkRegistryError> {
+        let default_release = self
+            .default_release
+            .ok_or(SdkRegistryError::UnavailableRelease)?;
+        let releases = self
+            .releases
+            .read()
+            .map_err(|_| SdkRegistryError::InvalidConfiguration)?;
+        let release = releases
+            .values()
+            .find(|release| release.record.sdk_release == default_release)
+            .ok_or(SdkRegistryError::UnavailableRelease)?;
         let library = read_regular(&release.library_path, MAX_RELEASE_LIBRARY_BYTES)?;
         if sha256(&library) != release.record.sha256 {
             return Err(SdkRegistryError::DigestMismatch);

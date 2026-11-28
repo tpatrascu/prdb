@@ -243,7 +243,7 @@ pub(super) fn sealed_start_admits_only_current_credentials_and_enforces_request_
         ClientConnectionSession, ClientFrame, ClientMode, ClientStartError,
     };
     use prdb_engine::supervisor::{
-        ChunkKind, PrepareSubmission, StagingError, StagingLimits, StagingStore,
+        ChunkKind, PrepareSubmission, StagingError, StagingLimits, StagingStore, SubmissionKind,
         SubmissionMetadata, SubmissionMetadataValidator,
     };
     use prdb_engine::transaction::TransactionError;
@@ -301,6 +301,7 @@ pub(super) fn sealed_start_admits_only_current_credentials_and_enforces_request_
     let first = staging.prepare(
         owner,
         PrepareSubmission {
+            submission_kind: SubmissionKind::NativeArtifact,
             manifest_version: 1,
             manifest: b"m".to_vec(),
             artifact_bytes: artifact.len() as u64,
@@ -391,6 +392,7 @@ pub(super) fn sealed_start_admits_only_current_credentials_and_enforces_request_
     let second = staging.prepare(
         owner,
         PrepareSubmission {
+            submission_kind: SubmissionKind::NativeArtifact,
             manifest_version: 1,
             manifest: b"m".to_vec(),
             artifact_bytes: artifact.len() as u64,

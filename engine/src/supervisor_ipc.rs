@@ -2366,7 +2366,7 @@ mod worker_result_event_tests {
     #[test]
     fn started_callback_releases_reservation_before_same_session_resumes() {
         use crate::supervisor::{
-            ChunkKind, PrepareSubmission, StagingLimits, StagingOwner, StagingStore,
+            ChunkKind, PrepareSubmission, StagingLimits, StagingOwner, StagingStore, SubmissionKind,
         };
         use sha2::{Digest, Sha256};
 
@@ -2379,6 +2379,7 @@ mod worker_result_event_tests {
             .prepare(
                 owner,
                 PrepareSubmission {
+                    submission_kind: SubmissionKind::NativeArtifact,
                     manifest_version: 1,
                     manifest: b"manifest".to_vec(),
                     artifact_bytes: artifact.len() as u64,
@@ -2422,6 +2423,7 @@ mod worker_result_event_tests {
             .prepare(
                 owner,
                 PrepareSubmission {
+                    submission_kind: SubmissionKind::NativeArtifact,
                     manifest_version: 1,
                     manifest: b"manifest".to_vec(),
                     artifact_bytes: artifact.len() as u64,
@@ -2587,7 +2589,7 @@ mod worker_result_event_tests {
     #[test]
     fn idle_gateway_service_periodically_reaps_expired_staging() {
         use crate::supervisor::{
-            ChunkKind, PrepareSubmission, StagingLimits, StagingOwner, StagingStore,
+            ChunkKind, PrepareSubmission, StagingLimits, StagingOwner, StagingStore, SubmissionKind,
         };
         use sha2::{Digest, Sha256};
 
@@ -2628,6 +2630,7 @@ mod worker_result_event_tests {
             .prepare(
                 owner,
                 PrepareSubmission {
+                    submission_kind: SubmissionKind::NativeArtifact,
                     manifest_version: 1,
                     manifest: b"manifest".to_vec(),
                     artifact_bytes: artifact.len() as u64,

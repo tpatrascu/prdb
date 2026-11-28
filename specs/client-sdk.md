@@ -2,7 +2,7 @@
 
 ## Required Model
 
-The user writes a native query program in their client and compiles it into a loadable shared library using the SDK. The client submits that artifact and parameters. A disposable confined executor loads it and invokes its entry point. The SDK includes basic SQL support and public definitions for interacting with database components.
+For a hand-written native query program, the user compiles it into a loadable shared library using the SDK; the client submits that artifact and parameters, and a disposable confined executor loads it and invokes its entry point. For ordinary SQL (`prdb-client interactive-sql`), the client instead submits SQL text, parameters, and scope directly with `submission_kind: "sql_text"` and builds no artifact at all; the confined executor calls the SDK's own fixed SQL batch entry points directly, with no client-supplied code loaded. The SDK includes basic SQL support and public definitions for interacting with database components; either way, the SQL engine itself is the same fixed, server-selected code.
 
 The user program may call SQL, process authorized results, or use lower-level scoped storage APIs. SQL is a convenience layer, not an authorization boundary. Compilation does not require database access or live statistics; optimization happens when SDK SQL calls run against an admitted execution context.
 

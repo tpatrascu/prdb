@@ -82,6 +82,7 @@ pub(super) fn sandboxed_optimizer_metadata_submission_cancels_over_tcp()
             manifest.runtime_profile.clone(),
             ["libc.so.6".to_owned()].into_iter().collect(),
             128 * 1024 * 1024,
+            None,
         )
         .map_err(|error| format!("open SDK repository: {error:?}"))?,
     );

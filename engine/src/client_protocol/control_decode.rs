@@ -96,6 +96,16 @@ pub fn decode_client_prepare_for_protocol(
         return Err(ClientControlError::InvalidPrepare);
     }
     let mut fields = parse_scalar_object(payload)?;
+    let submission_kind = match fields.remove("submission_kind") {
+        None => crate::supervisor::SubmissionKind::NativeArtifact,
+        Some(JsonScalar::String(value)) if value == "native_artifact" => {
+            crate::supervisor::SubmissionKind::NativeArtifact
+        }
+        Some(JsonScalar::String(value)) if value == "sql_text" => {
+            crate::supervisor::SubmissionKind::SqlText
+        }
+        Some(_) => return Err(ClientControlError::InvalidPrepare),
+    };
     let manifest_version = take_number(&mut fields, "manifest_version")?
         .try_into()
         .map_err(|_| ClientControlError::InvalidPrepare)?;
@@ -131,16 +141,35 @@ pub fn decode_client_prepare_for_protocol(
         .transpose()?
         .map(|value| decode_lower_hex_id(&value).map_err(|_| ClientControlError::InvalidPrepare))
         .transpose()?;
+    let is_sql_text = submission_kind == crate::supervisor::SubmissionKind::SqlText;
     if transaction_id.is_some() != package_id.is_some()
         || protocol_major == 1 && transaction_id.is_some()
-        || !repository_sdk_library
+        || has_sql_library
+        || (is_sql_text && repository_sdk_library)
+        || (!is_sql_text && !repository_sdk_library)
     {
         return Err(ClientControlError::InvalidPrepare);
     }
     reject_unknown_scalars(fields)?;
-    if artifact_bytes == 0
+    const EMPTY_SHA256: [u8; 32] = [
+        0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f, 0xb9,
+        0x24, 0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52,
+        0xb8, 0x55,
+    ];
+    if is_sql_text {
+        if artifact_bytes != 0
+            || artifact_sha256 != EMPTY_SHA256
+            || !manifest_text.is_empty()
+            || manifest_version != 0
+            || parameter_bytes > crate::supervisor::MAX_PARAMETER_BYTES
+            || sql_data_bytes > crate::supervisor::MAX_SQL_DATA_BYTES
+            || deadline_ms == 0
+            || scope_text.len() > crate::supervisor::MAX_SCOPE_BYTES.div_ceil(3) * 4
+        {
+            return Err(ClientControlError::InvalidPrepare);
+        }
+    } else if artifact_bytes == 0
         || artifact_bytes > crate::supervisor::MAX_ARTIFACT_BYTES
-        || has_sql_library
         || parameter_bytes > crate::supervisor::MAX_PARAMETER_BYTES
         || sql_data_bytes > crate::supervisor::MAX_SQL_DATA_BYTES
         || deadline_ms == 0
@@ -149,13 +178,20 @@ pub fn decode_client_prepare_for_protocol(
     {
         return Err(ClientControlError::InvalidPrepare);
     }
-    let manifest = decode_base64_bytes(&manifest_text)
-        .filter(|bytes| !bytes.is_empty() && bytes.len() <= crate::supervisor::MAX_MANIFEST_BYTES)
-        .ok_or(ClientControlError::InvalidPrepare)?;
+    let manifest = if is_sql_text {
+        Vec::new()
+    } else {
+        decode_base64_bytes(&manifest_text)
+            .filter(|bytes| {
+                !bytes.is_empty() && bytes.len() <= crate::supervisor::MAX_MANIFEST_BYTES
+            })
+            .ok_or(ClientControlError::InvalidPrepare)?
+    };
     let requested_scope = decode_base64_bytes(&scope_text)
         .filter(|bytes| !bytes.is_empty() && bytes.len() <= crate::supervisor::MAX_SCOPE_BYTES)
         .ok_or(ClientControlError::InvalidPrepare)?;
     Ok(ClientPrepare {
+        submission_kind,
         manifest_version,
         manifest,
         artifact_bytes,

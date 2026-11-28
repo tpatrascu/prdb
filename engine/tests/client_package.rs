@@ -13,7 +13,7 @@ use prdb_engine::submission_manifest::{
     ArtifactCompatibilityProfile, VersionedSubmissionMetadataValidator, decode_elf_dynamic_info,
     decode_manifest_v1,
 };
-use prdb_engine::supervisor::{SubmissionMetadata, SubmissionMetadataValidator};
+use prdb_engine::supervisor::{SubmissionKind, SubmissionMetadata, SubmissionMetadataValidator};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{Read, Write};
@@ -974,6 +974,7 @@ fn packager_compiles_and_atomically_publishes_metadata_without_loading_query() {
         .unwrap();
     assert!(invalid_runpath.success());
     let metadata = SubmissionMetadata {
+        submission_kind: SubmissionKind::NativeArtifact,
         manifest_version: 1,
         manifest: manifest_bytes.clone(),
         scope_version: 1,

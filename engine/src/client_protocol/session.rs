@@ -393,7 +393,9 @@ impl ClientConnectionSession {
         self.revalidate_storage(storage)?;
         let prepare = decode_client_prepare_for_protocol(&request.payload, self.protocol_major)
             .map_err(ClientSessionError::InvalidControlPayload)?;
-        if prepare.repository_sdk_library != self.repository_sdk_library {
+        if prepare.submission_kind == crate::supervisor::SubmissionKind::NativeArtifact
+            && prepare.repository_sdk_library != self.repository_sdk_library
+        {
             return Err(ClientSessionError::InvalidControlPayload(
                 ClientControlError::InvalidPrepare,
             ));
@@ -412,6 +414,7 @@ impl ClientConnectionSession {
             .prepare(
                 self.staging_owner()?,
                 crate::supervisor::PrepareSubmission {
+                    submission_kind: prepare.submission_kind,
                     manifest_version: prepare.manifest_version,
                     manifest: prepare.manifest,
                     artifact_bytes: prepare.artifact_bytes,

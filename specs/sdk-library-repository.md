@@ -43,6 +43,10 @@ Resolution acquires an invocation pin on the immutable repository entry. The sup
 
 The repository is a source of immutable files, not a loaded-code cache. Workers have separate processes, address spaces, mutable SDK globals, and SQL state. The kernel may share file page-cache pages. Repository identity is not authorization, and a digest does not prove code safe. Storage continues to authorize and validate every SDK host request independently.
 
+### Default release for plain SQL-text submissions
+
+A plain SQL-text submission (`submission_kind: "sql_text"`, see [SQL library](sql-library.md)) carries no manifest, so there is no client-declared release to resolve. The repository instead exposes `resolve_default()`, keyed by a `default_release` fixed at supervisor startup (`prdb-supervisor --default-sdk-release N`), never by client input. If no default is configured, or the configured release is not installed, `resolve_default()` fails closed with `UnavailableRelease` before storage admission or worker launch, exactly as an unresolvable manifest-declared release does for native-artifact submissions. The resolved pin is staged and loaded identically to the manifest-resolved case, except no `query.so` is staged alongside it: the confined executor `dlsym`s the SQL engine's batch entry points directly from the staged library's own path.
+
 ## Persistent Client Version Selection
 
 The client keeps a durable SDK selection for each configured database instance in one client configuration file. Unless overridden by `PRDB_CLIENT_CONFIG`, its path is `$XDG_CONFIG_HOME/prdb/client.json`, or `$HOME/.config/prdb/client.json` when `XDG_CONFIG_HOME` is unset. The file is created with mode 0600 in a mode-0700 parent directory, must be owned by the invoking user, is opened without following symlinks, and is atomically replaced on updates. The client rejects broader permissions, duplicate JSON keys, unknown fields in the current format, invalid UTF-8, noncanonical IDs, excessive nesting, or files larger than 1 MiB. A failed read or update is an error; the client must not silently fall back to a different instance, SDK release, or credential.

@@ -21,6 +21,7 @@ pub fn install_test_sdk_repository(
         "nixos-x86_64-glibc-2.42".to_owned(),
         ["libc.so.6".to_owned()].into_iter().collect(),
         128 * 1024 * 1024,
+        None,
     )
     .map_err(|error| format!("open test SDK repository: {error:?}"))?;
     repository

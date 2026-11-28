@@ -302,6 +302,7 @@ pub(super) fn storage_manager_runtime_and_metadata_reads_enforce_authorization()
             "nixos-glibc-2.42".to_owned(),
             std::collections::HashSet::from(["libc.so.6".to_owned()]),
             1024 * 1024,
+            None,
         )
         .unwrap(),
     );

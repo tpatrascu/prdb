@@ -243,10 +243,18 @@ impl VersionedSubmissionMetadataValidator {
 
 impl SubmissionMetadataValidator for VersionedSubmissionMetadataValidator {
     fn supports_versions(&self, manifest_version: u32, scope_version: u32) -> bool {
-        manifest_version == 1 && scope_version == 1
+        // manifest_version 0 is reserved for SqlText submissions, which carry
+        // no manifest; the wire decoder only allows that pairing for the
+        // SqlText submission kind, so there is no ambiguity here.
+        (manifest_version == 1 || manifest_version == 0) && scope_version == 1
     }
 
     fn validate(&self, metadata: &SubmissionMetadata) -> bool {
+        if metadata.submission_kind == crate::supervisor::SubmissionKind::SqlText {
+            return metadata.manifest.is_empty()
+                && crate::submission_scope::decode_requested_scope_v1(&metadata.requested_scope)
+                    .is_ok();
+        }
         let Ok(manifest) = decode_manifest_v1(&metadata.manifest) else {
             return false;
         };
@@ -257,6 +265,11 @@ impl SubmissionMetadataValidator for VersionedSubmissionMetadataValidator {
     fn validate_artifact(&self, metadata: &SubmissionMetadata, artifact: &[u8]) -> bool {
         if !self.validate(metadata) {
             return false;
+        }
+        if metadata.submission_kind == crate::supervisor::SubmissionKind::SqlText {
+            // No artifact is ever submitted for this kind; `prepare` already
+            // enforces that `artifact_bytes == 0`.
+            return true;
         }
         let Ok(manifest) = decode_manifest_v1(&metadata.manifest) else {
             return false;
@@ -281,6 +294,28 @@ impl SubmissionMetadataValidator for VersionedSubmissionMetadataValidator {
         metadata: &SubmissionMetadata,
         _artifact: &[u8],
     ) -> Result<Option<crate::sdk_registry::SdkLibraryPin>, ManifestError> {
+        let registry = self
+            .sdk_registry
+            .as_ref()
+            .ok_or(ManifestError::UnavailableDependency)?;
+        if metadata.submission_kind == crate::supervisor::SubmissionKind::SqlText {
+            return registry
+                .resolve_default()
+                .map(Some)
+                .map_err(|error| match error {
+                    crate::sdk_registry::SdkRegistryError::IncompatibleProfile => {
+                        ManifestError::IncompatibleProfile
+                    }
+                    crate::sdk_registry::SdkRegistryError::UnavailableRelease => {
+                        ManifestError::UnavailableDependency
+                    }
+                    crate::sdk_registry::SdkRegistryError::DigestMismatch
+                    | crate::sdk_registry::SdkRegistryError::InvalidMetadata => {
+                        ManifestError::DependencyMismatch
+                    }
+                    _ => ManifestError::InvalidArtifact,
+                });
+        }
         let manifest = decode_manifest_v1(&metadata.manifest)?;
         let shared_sql_dependency = manifest
             .dependencies
@@ -289,10 +324,6 @@ impl SubmissionMetadataValidator for VersionedSubmissionMetadataValidator {
         if !shared_sql_dependency {
             return Err(ManifestError::UnavailableDependency);
         }
-        let registry = self
-            .sdk_registry
-            .as_ref()
-            .ok_or(ManifestError::UnavailableDependency)?;
         registry
             .resolve(&manifest)
             .map(Some)
@@ -1108,6 +1139,7 @@ mod tests {
 
     fn metadata(manifest: Vec<u8>) -> SubmissionMetadata {
         SubmissionMetadata {
+            submission_kind: crate::supervisor::SubmissionKind::NativeArtifact,
             manifest_version: 1,
             manifest,
             scope_version: 1,
@@ -1497,6 +1529,7 @@ mod tests {
             .prepare(
                 owner,
                 PrepareSubmission {
+                    submission_kind: crate::supervisor::SubmissionKind::NativeArtifact,
                     manifest_version: 1,
                     manifest: encode(manifest),
                     artifact_bytes: artifact.len() as u64,

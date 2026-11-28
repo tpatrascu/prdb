@@ -46,6 +46,10 @@ mod worker {
 
     struct WorkerArgs {
         library: PathBuf,
+        /// When true, `library` is the SQL engine release library itself
+        /// (no client-supplied `query.so`); the host calls its SQL batch
+        /// entry points directly instead of loading a foreign query program.
+        sql_only: bool,
         parameters_fd: i32,
         sql_data_fd: i32,
         planner_fd: i32,
@@ -172,7 +176,7 @@ mod worker {
             break n as usize;
         };
         unsafe { libc::close(standby.ctrl_fd) };
-        if received < 17 {
+        if received < 18 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "truncated standby invocation payload",
@@ -181,15 +185,25 @@ mod worker {
         let max_total_result_bytes = u64::from_le_bytes(payload[0..8].try_into().unwrap());
         let max_sql_index_probe_candidates = u32::from_le_bytes(payload[8..12].try_into().unwrap());
         let has_spill_fd = payload[12] != 0;
-        let path_len = u32::from_le_bytes(payload[13..17].try_into().unwrap()) as usize;
-        if received != 17 + path_len {
+        let sql_only = match payload[13] {
+            0 => false,
+            1 => true,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid standby invocation submission kind",
+                ));
+            }
+        };
+        let path_len = u32::from_le_bytes(payload[14..18].try_into().unwrap()) as usize;
+        if received != 18 + path_len {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "invalid standby invocation payload length",
             ));
         }
         let library = PathBuf::from(std::ffi::OsString::from_vec(
-            payload[17..17 + path_len].to_vec(),
+            payload[18..18 + path_len].to_vec(),
         ));
         if !library.is_absolute()
             || max_sql_index_probe_candidates == 0
@@ -233,6 +247,7 @@ mod worker {
         }
         Ok(WorkerArgs {
             library,
+            sql_only,
             parameters_fd: received_fds[0],
             sql_data_fd: received_fds[1],
             profile_fd: Some(received_fds[2]),
@@ -247,8 +262,9 @@ mod worker {
     }
 
     fn parse_args(values: &[std::ffi::OsString]) -> Result<WorkerArgs, String> {
+        let sql_only = values.first().is_some_and(|flag| flag == "--sql-library");
         if (values.len() != 20 && values.len() != 22)
-            || values[0] != "--library"
+            || (values[0] != "--library" && values[0] != "--sql-library")
             || values[2] != "--parameters-fd"
             || values[4] != "--sql-data-fd"
             || values[6] != "--planner-fd"
@@ -260,7 +276,7 @@ mod worker {
             || values[18] != "--max-sql-index-probe-candidates"
             || (values.len() == 22 && values[20] != "--profile-fd")
         {
-            return Err("usage: prdb-executor --library ABSOLUTE_PATH --parameters-fd FD --sql-data-fd FD --planner-fd FD --executor-fd FD --optimizer-fd FD --result-fd FD --spill-fd FD --max-total-result-bytes N --max-sql-index-probe-candidates N [--profile-fd FD] (or --self-check)".to_owned());
+            return Err("usage: prdb-executor (--library|--sql-library) ABSOLUTE_PATH --parameters-fd FD --sql-data-fd FD --planner-fd FD --executor-fd FD --optimizer-fd FD --result-fd FD --spill-fd FD --max-total-result-bytes N --max-sql-index-probe-candidates N [--profile-fd FD] (or --self-check)".to_owned());
         }
         let library = PathBuf::from(&values[1]);
         if !library.is_absolute() {
@@ -366,6 +382,7 @@ mod worker {
         }
         Ok(WorkerArgs {
             library,
+            sql_only,
             parameters_fd,
             sql_data_fd,
             planner_fd,
@@ -443,6 +460,12 @@ mod worker {
     }
 
     fn execute_library(args: WorkerArgs) -> io::Result<i32> {
+        if args.sql_only {
+            // SAFETY: this host has already verified confinement; the SQL
+            // engine release library is a fixed, server-selected path, never
+            // client-supplied code.
+            return unsafe { execute_sql_library(args) };
+        }
         let library_path = c_path(args.library.as_os_str())?;
         // SAFETY: the absolute path is explicitly supplied by the trusted
         // launcher and the current process has installed its syscall filter.
@@ -460,6 +483,77 @@ mod worker {
         // SAFETY: this host has already verified confinement and the loader
         // handle remains live through the entry-point call.
         unsafe { execute_v1_library(handle, descriptor_address, args) }
+    }
+
+    /// Resources shared by every entry point: the profile-sized parameter and
+    /// SQL-data buffers plus the leaked callback context they borrow from.
+    struct PreparedInvocation {
+        parameters: Vec<u8>,
+        sql_data: Vec<u8>,
+        context: &'static CallbackContext,
+    }
+
+    fn prepare_invocation(args: &WorkerArgs) -> io::Result<PreparedInvocation> {
+        let profile = if let Some(fd) = args.profile_fd {
+            let bytes = read_bounded_fd(
+                fd,
+                prdb_engine::workload_profile::WORKLOAD_PROFILE_PAYLOAD_BYTES as u64,
+                "workload profile exceeds limit",
+            )?;
+            prdb_engine::workload_profile::WorkloadProfileLimits::decode(&bytes).map_err(|e| {
+                io::Error::new(io::ErrorKind::InvalidData, format!("invalid profile: {e}"))
+            })?
+        } else {
+            let mut p = prdb_engine::workload_profile::WorkloadProfileLimits::small_operational();
+            p.max_total_result_bytes = args.max_total_result_bytes;
+            p.max_sql_index_probe_candidates = args.max_sql_index_probe_candidates;
+            p
+        };
+        let parameters = read_bounded_fd(
+            args.parameters_fd,
+            profile.max_parameter_bytes,
+            "invocation parameters exceed the profile limit",
+        )?;
+        let sql_data = read_bounded_fd(
+            args.sql_data_fd,
+            profile.max_sql_data_bytes,
+            "invocation SQL data exceeds the profile limit",
+        )?;
+        let context = unsafe {
+            CallbackContext::from_raw_fds(
+                args.planner_fd,
+                args.executor_fd,
+                args.optimizer_fd,
+                args.result_fd,
+                (args.spill_fd >= 3).then_some(args.spill_fd),
+                profile,
+            )
+        };
+        // Keep callback state alive until the worker's immediate `_exit`, even
+        // if hostile library code retains the context pointer on another thread.
+        let context: &'static CallbackContext = Box::leak(Box::new(context));
+        Ok(PreparedInvocation {
+            parameters,
+            sql_data,
+            context,
+        })
+    }
+
+    fn build_host_api(context: &CallbackContext) -> HostApiV1 {
+        HostApiV1 {
+            struct_size: std::mem::size_of::<HostApiV1>() as u32,
+            abi_version: QUERY_ABI_VERSION,
+            context: (context as *const CallbackContext).cast_mut().cast(),
+            executor_request: Some(executor_request_v2 as QueryIpcRequestV1),
+            planner_request: Some(planner_request_v2 as QueryIpcRequestV1),
+            write_result: Some(write_result_v2 as QueryWriteResultV1),
+            statement_failure: Some(statement_failure_v3 as QueryStatementFailureV1),
+            optimizer_request: Some(optimizer_request_v1 as QueryOptimizerRequestV1),
+            spill_request: context
+                .spill
+                .as_ref()
+                .map(|_| spill_request_v1 as QuerySpillRequestV1),
+        }
     }
 
     unsafe fn execute_v1_library(
@@ -490,70 +584,100 @@ mod worker {
         // this symbol as QueryMainV1. A bad function pointer terminates worker.
         let entry: QueryMainV1 = unsafe { std::mem::transmute(entry_address) };
 
-        let profile = if let Some(fd) = args.profile_fd {
-            let bytes = read_bounded_fd(
-                fd,
-                prdb_engine::workload_profile::WORKLOAD_PROFILE_PAYLOAD_BYTES as u64,
-                "workload profile exceeds limit",
-            )?;
-            prdb_engine::workload_profile::WorkloadProfileLimits::decode(&bytes).map_err(|e| {
-                io::Error::new(io::ErrorKind::InvalidData, format!("invalid profile: {e}"))
-            })?
-        } else {
-            let mut p = prdb_engine::workload_profile::WorkloadProfileLimits::small_operational();
-            p.max_total_result_bytes = args.max_total_result_bytes;
-            p.max_sql_index_probe_candidates = args.max_sql_index_probe_candidates;
-            p
-        };
-        let parameters = read_bounded_fd(
-            args.parameters_fd,
-            profile.max_parameter_bytes,
-            "invocation parameters exceed the profile limit",
-        )?;
-        let sql_data = read_bounded_fd(
-            args.sql_data_fd,
-            profile.max_sql_data_bytes,
-            "invocation SQL data exceeds the profile limit",
-        )?;
-        let invocation = BorrowedInvocationV1::new(&parameters, &sql_data).map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("invalid parameters or SQL data: {error:?}"),
-            )
-        })?;
-        let context = unsafe {
-            CallbackContext::from_raw_fds(
-                args.planner_fd,
-                args.executor_fd,
-                args.optimizer_fd,
-                args.result_fd,
-                (args.spill_fd >= 3).then_some(args.spill_fd),
-                profile,
-            )
-        };
-        // Keep callback state alive until the worker's immediate `_exit`, even
-        // if hostile library code retains the context pointer on another thread.
-        let context = Box::leak(Box::new(context));
-        let host = HostApiV1 {
-            struct_size: std::mem::size_of::<HostApiV1>() as u32,
-            abi_version: QUERY_ABI_VERSION,
-            context: (context as *mut CallbackContext).cast(),
-            executor_request: Some(executor_request_v2 as QueryIpcRequestV1),
-            planner_request: Some(planner_request_v2 as QueryIpcRequestV1),
-            write_result: Some(write_result_v2 as QueryWriteResultV1),
-            statement_failure: Some(statement_failure_v3 as QueryStatementFailureV1),
-            optimizer_request: Some(optimizer_request_v1 as QueryOptimizerRequestV1),
-            spill_request: context
-                .spill
-                .as_ref()
-                .map(|_| spill_request_v1 as QuerySpillRequestV1),
-        };
+        let prepared = prepare_invocation(&args)?;
+        let invocation = BorrowedInvocationV1::new(&prepared.parameters, &prepared.sql_data)
+            .map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("invalid parameters or SQL data: {error:?}"),
+                )
+            })?;
+        let host = build_host_api(prepared.context);
         // SAFETY: both records follow the validated v1 ABI. The parameter
         // bytes and host/invocation records remain alive for the entire call.
         let status = unsafe { entry(&host, invocation.as_ptr()) };
-        let failed = context.statement_failed.load(Ordering::SeqCst);
+        let failed = prepared.context.statement_failed.load(Ordering::SeqCst);
         // Deliberately leak the loader handle and let main use _exit; arbitrary
         // library finalizers must not run during host cleanup.
+        let _ = handle;
+        Ok(query_exit_status(status, failed))
+    }
+
+    /// Function pointer resolved by `execute_sql_library` for the current
+    /// (single) invocation. `sql_batch_statement_runner` reads it because the
+    /// C batch runner requires a plain function pointer with no closure
+    /// environment; one worker process ever runs one invocation.
+    static SQL_RUN_STATEMENT_FN: AtomicU64 = AtomicU64::new(0);
+
+    unsafe extern "C" fn sql_batch_statement_runner(
+        host: *const HostApiV1,
+        schema: *const u8,
+        schema_len: u32,
+        statement: *const prdb_engine::query_abi::SqlBatchStatementV1,
+    ) -> i32 {
+        let address = SQL_RUN_STATEMENT_FN.load(Ordering::Acquire);
+        // SAFETY: the address was resolved by `dlsym` on the same library
+        // before this callback could ever run.
+        let run_statement: prdb_engine::query_abi::QuerySqlRunStatementV1 =
+            unsafe { std::mem::transmute(address as usize) };
+        // SAFETY: `statement` is supplied by the SQL engine's own batch
+        // runner from the decoded PSQ1 payload for the duration of this call.
+        let statement = unsafe { &*statement };
+        unsafe {
+            run_statement(
+                host,
+                schema,
+                schema_len,
+                statement.sql,
+                statement.sql_len,
+                statement.parameters,
+                statement.parameters_len,
+            )
+        }
+    }
+
+    /// Call the SQL engine release library's batch entry point directly, with
+    /// no client-supplied `query.so` in the loop at all. The library is a
+    /// fixed, server-selected path; there is no foreign ABI descriptor or
+    /// entry symbol to validate, since the function being called is known
+    /// and versioned at this host's own build time.
+    unsafe fn execute_sql_library(args: WorkerArgs) -> io::Result<i32> {
+        let library_path = c_path(args.library.as_os_str())?;
+        // SAFETY: the absolute path points at the server-selected SQL engine
+        // release library staged by the trusted launcher, not client bytes.
+        let handle =
+            unsafe { libc::dlopen(library_path.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
+        if handle.is_null() {
+            return Err(dynamic_loader_error("dlopen"));
+        }
+        let run_batch_symbol = CString::new(prdb_engine::query_abi::QUERY_SQL_RUN_BATCH_SYMBOL)
+            .expect("static symbol");
+        let run_batch_address = lookup_symbol(handle, &run_batch_symbol)?;
+        let run_statement_symbol =
+            CString::new(prdb_engine::query_abi::QUERY_SQL_RUN_STATEMENT_SYMBOL)
+                .expect("static symbol");
+        let run_statement_address = lookup_symbol(handle, &run_statement_symbol)?;
+        SQL_RUN_STATEMENT_FN.store(run_statement_address as u64, Ordering::Release);
+        // SAFETY: the SDK release library exports this exact signature; the
+        // symbol name and ABI are pinned at this host's own build time.
+        let run_batch: prdb_engine::query_abi::QuerySqlRunBatchV1 =
+            unsafe { std::mem::transmute(run_batch_address) };
+
+        let prepared = prepare_invocation(&args)?;
+        let invocation = BorrowedInvocationV1::new(&prepared.parameters, &prepared.sql_data)
+            .map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("invalid parameters or SQL data: {error:?}"),
+                )
+            })?;
+        let host = build_host_api(prepared.context);
+        // SAFETY: both records follow the validated v1 ABI, and the batch
+        // runner's callback matches the pinned statement-runner signature.
+        let status = unsafe { run_batch(&host, invocation.as_ptr(), sql_batch_statement_runner) };
+        let failed = prepared.context.statement_failed.load(Ordering::SeqCst);
+        // Deliberately leak the loader handle and let main use _exit; the
+        // SQL engine's finalizers must not run during host cleanup.
         let _ = handle;
         Ok(query_exit_status(status, failed))
     }

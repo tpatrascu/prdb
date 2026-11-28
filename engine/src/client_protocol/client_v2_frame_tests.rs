@@ -110,6 +110,48 @@ fn prepare_transaction_binding_is_v2_only_and_requires_both_ids() {
 }
 
 #[test]
+fn sql_text_prepare_requires_no_artifact_or_manifest_and_defaults_to_native_artifact() {
+    let empty_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    let sql_text = format!(
+        "{{\"submission_kind\":\"sql_text\",\"manifest_version\":0,\"manifest\":\"\",\"artifact_bytes\":\"0\",\"artifact_sha256\":\"{empty_sha256}\",\"parameter_bytes\":\"0\",\"parameter_sha256\":\"{empty_sha256}\",\"sql_data_bytes\":\"0\",\"sql_data_sha256\":\"{empty_sha256}\",\"scope_version\":1,\"requested_scope\":\"AQ==\",\"deadline_ms\":\"1\"}}"
+    );
+    let decoded = decode_client_prepare_for_protocol(sql_text.as_bytes(), 1).unwrap();
+    assert_eq!(
+        decoded.submission_kind,
+        crate::supervisor::SubmissionKind::SqlText
+    );
+    assert_eq!(decoded.artifact_bytes, 0);
+    assert!(decoded.manifest.is_empty());
+    assert!(!decoded.repository_sdk_library);
+
+    // A nonzero artifact for a SqlText submission is rejected.
+    let with_artifact = sql_text.replace("\"artifact_bytes\":\"0\"", "\"artifact_bytes\":\"1\"");
+    assert_eq!(
+        decode_client_prepare_for_protocol(with_artifact.as_bytes(), 1),
+        Err(ClientControlError::InvalidPrepare)
+    );
+
+    // Declaring repository SDK mode for a SqlText submission is rejected.
+    let with_sdk_mode = sql_text.replace(
+        "\"deadline_ms\":\"1\"}",
+        "\"deadline_ms\":\"1\",\"sdk_library_mode\":\"repository\"}",
+    );
+    assert_eq!(
+        decode_client_prepare_for_protocol(with_sdk_mode.as_bytes(), 1),
+        Err(ClientControlError::InvalidPrepare)
+    );
+
+    // Omitting submission_kind entirely keeps today's legacy NativeArtifact
+    // behavior, which still requires a nonempty artifact and manifest.
+    let base = r#"{"manifest_version":1,"manifest":"AQ==","artifact_bytes":"1","artifact_sha256":"0000000000000000000000000000000000000000000000000000000000000000","parameter_bytes":"0","parameter_sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","sql_data_bytes":"0","sql_data_sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","scope_version":1,"requested_scope":"AQ==","deadline_ms":"1","sdk_library_mode":"repository"}"#;
+    let decoded_legacy = decode_client_prepare_for_protocol(base.as_bytes(), 1).unwrap();
+    assert_eq!(
+        decoded_legacy.submission_kind,
+        crate::supervisor::SubmissionKind::NativeArtifact
+    );
+}
+
+#[test]
 fn start_must_echo_sealed_v2_package_binding() {
     let start = br#"{"invocation_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","transaction_id":"11111111111111111111111111111111","package_id":"22222222222222222222222222222222"}"#;
     let decoded = decode_client_start_for_protocol(start, 2).unwrap();

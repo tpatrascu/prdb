@@ -318,6 +318,7 @@ fn supervisor_and_gateway_binaries_commit_a_confined_submission() {
         "nixos-x86_64-glibc-2.42".to_owned(),
         dependencies.iter().cloned().collect(),
         128 * 1024 * 1024,
+        None,
     )
     .expect("open instance SDK repository");
     let sdk_metadata = std::fs::read(sdk_release_dir.join("sdk-release.json"))
